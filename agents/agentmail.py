@@ -56,13 +56,68 @@ _ID_RE = re.compile(r"^\d{19}-[a-z0-9_-]+-[0-9a-f]{6}$")
 # --------------------------------------------------------------------------- #
 #  Where it lives
 # --------------------------------------------------------------------------- #
+def bus_dirs() -> List[str]:
+    """Everywhere the mailbox is kept. Must match ``widgets/core/agents.py``.
+
+    Two locations, for the reason documented there: the widget process could not
+    read ``%APPDATA%`` on the machine this was built for - not the Python
+    libraries it needed, not its own log, not the agent bus - while reading the
+    app folder perfectly, in the same process, at the same moment. Nobody found
+    out why.
+
+    Messages are written to both and read as the union of both, so an agent and
+    a widget that can each only see one of the two still share a mailbox.
+    """
+    dirs = []
+    base = os.environ.get("APPDATA")
+    if base:
+        dirs.append(os.path.join(base, "AgentWorkspace"))
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dirs.append(os.path.join(here, ".agentbus"))
+    if not dirs:
+        dirs.append(os.path.join(os.path.expanduser("~"), "AgentWorkspace"))
+    return dirs
+
+
 def bus_dir() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "AgentWorkspace")
+    return bus_dirs()[0]
+
+
+def mail_dirs() -> List[str]:
+    return [os.path.join(d, "mail") for d in bus_dirs()]
 
 
 def mail_dir() -> str:
-    return os.path.join(bus_dir(), "mail")
+    return mail_dirs()[0]
+
+
+def _find(name: str) -> Optional[str]:
+    """The freshest copy of one mailbox file, wherever it lives."""
+    best, at = None, -1.0
+    for directory in mail_dirs():
+        path = os.path.join(directory, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > at:
+            best, at = path, mtime
+    return best
+
+
+def _names() -> List[str]:
+    """Every message/seen file name across all locations, de-duplicated.
+
+    A directory that cannot be listed is skipped rather than treated as empty -
+    "no messages" and "I could not look" must not be the same answer.
+    """
+    found = set()
+    for directory in mail_dirs():
+        try:
+            found.update(os.listdir(directory))
+        except OSError:
+            continue
+    return sorted(found)
 
 
 def seen_path(agent: str) -> str:
@@ -177,14 +232,20 @@ def send(sender: str, to: str, subject: str, body: str = "",
         thread=_thread_for(subject, reply_to.strip()),
     )
 
-    try:
-        os.makedirs(mail_dir(), exist_ok=True)
-        final = os.path.join(mail_dir(), msg.id + ".json")
-        tmp = final + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(asdict(msg), fh, indent=2)
-        os.replace(tmp, final)          # atomic: no reader sees half a message
-    except Exception:
+    payload = asdict(msg)
+    landed = False
+    for directory in mail_dirs():
+        try:
+            os.makedirs(directory, exist_ok=True)
+            final = os.path.join(directory, msg.id + ".json")
+            tmp = final + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp, final)      # atomic: no reader sees half a message
+            landed = True
+        except Exception:
+            continue                    # one location failing is survivable
+    if not landed:
         return None
 
     _prune()
@@ -193,17 +254,22 @@ def send(sender: str, to: str, subject: str, body: str = "",
 
 def load(limit: Optional[int] = None, thread: str = "",
          since: float = 0.0) -> List[Message]:
-    """Every message, oldest first. Unreadable files are skipped, not fatal."""
-    try:
-        names = sorted(n for n in os.listdir(mail_dir())
-                       if n.endswith(".json") and _ID_RE.match(n[:-5] or ""))
-    except OSError:
-        return []
+    """Every message, oldest first. Unreadable files are skipped, not fatal.
+
+    Read as the union of every mailbox location - message ids are unique and the
+    filename *is* the id, so the same message present in both places is one
+    entry, not two.
+    """
+    names = [n for n in _names()
+             if n.endswith(".json") and _ID_RE.match(n[:-5] or "")]
 
     out: List[Message] = []
     for name in names:
+        path = _find(name)
+        if path is None:
+            continue
         try:
-            with open(os.path.join(mail_dir(), name), "r", encoding="utf-8") as fh:
+            with open(path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
         except Exception:
             continue            # mid-write or corrupt; it will be there next poll
@@ -232,25 +298,40 @@ def load(limit: Optional[int] = None, thread: str = "",
 #  Read state
 # --------------------------------------------------------------------------- #
 def _seen_ids(agent: str) -> set:
-    try:
-        with open(seen_path(agent), "r", encoding="utf-8") as fh:
-            return set(json.load(fh).get("ids") or [])
-    except Exception:
-        return set()
+    """This agent's read cursor, merged across locations.
+
+    Union rather than newest-wins: a message read while only one location was
+    reachable is still read, and re-showing something already answered is worse
+    than the file being slightly larger than it needs to be.
+    """
+    name = f"seen-{slug(agent)}.json"
+    ids: set = set()
+    for directory in mail_dirs():
+        try:
+            with open(os.path.join(directory, name), "r", encoding="utf-8") as fh:
+                ids.update(json.load(fh).get("ids") or [])
+        except Exception:
+            continue
+    return ids
 
 
 def _write_seen(agent: str, ids: Iterable[str]) -> bool:
     """Only this agent ever writes its own cursor, so no locking is needed."""
-    try:
-        os.makedirs(mail_dir(), exist_ok=True)
-        path = seen_path(agent)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"ids": sorted(ids), "ts": time.time()}, fh)
-        os.replace(tmp, path)
-        return True
-    except Exception:
-        return False
+    name = f"seen-{slug(agent)}.json"
+    payload = {"ids": sorted(ids), "ts": time.time()}
+    landed = False
+    for directory in mail_dirs():
+        try:
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, name)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp, path)
+            landed = True
+        except Exception:
+            continue
+    return landed
 
 
 def unread(agent: str) -> List[Message]:
@@ -326,21 +407,24 @@ def claimed_by_other(agent: str, paths: Iterable[str]) -> List[Tuple[str, str]]:
 
 # --------------------------------------------------------------------------- #
 def _prune(keep: int = KEEP_MESSAGES) -> None:
-    """Drop the oldest messages once the log gets long. Never touches cursors."""
-    try:
-        names = sorted(n for n in os.listdir(mail_dir())
-                       if n.endswith(".json") and _ID_RE.match(n[:-5] or ""))
-        # Count from the front rather than slicing from the back: names[:-keep]
-        # with keep == 0 is names[:0], i.e. the empty list, so _prune(0) quietly
-        # kept everything instead of clearing the log.
-        cut = len(names) - max(0, keep)
-        for name in names[:cut] if cut > 0 else []:
+    """Drop the oldest messages once the log gets long. Never touches cursors.
+
+    Decided on the union of names, then removed from every location, so the two
+    copies stay in step and a message cannot come back from the dead because one
+    directory still had it.
+    """
+    names = [n for n in _names()
+             if n.endswith(".json") and _ID_RE.match(n[:-5] or "")]
+    # Count from the front rather than slicing from the back: names[:-keep]
+    # with keep == 0 is names[:0], i.e. the empty list, so _prune(0) quietly
+    # kept everything instead of clearing the log.
+    cut = len(names) - max(0, keep)
+    for name in names[:cut] if cut > 0 else []:
+        for directory in mail_dirs():
             try:
-                os.remove(os.path.join(mail_dir(), name))
+                os.remove(os.path.join(directory, name))
             except OSError:
                 pass
-    except OSError:
-        pass
 
 
 def stats() -> Dict[str, object]:
@@ -351,4 +435,5 @@ def stats() -> Dict[str, object]:
         "threads": sorted({m.thread for m in msgs if m.thread}),
         "claims": len(claims()),
         "dir": mail_dir(),
+        "dirs": mail_dirs(),
     }

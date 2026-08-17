@@ -1,10 +1,10 @@
 """
-signal.py — the agent activity bus writer.
+agentsignal.py — the agent activity bus writer.
 
 Any coding agent can announce what it's doing by running this from a hook:
 
-    python signal.py --agent codex --event PostToolUse
-    python signal.py --agent codex --event Stop
+    python agentsignal.py --agent codex --event PostToolUse
+    python agentsignal.py --agent codex --event Stop
 
 One small JSON file per agent, in one directory. No sockets, no ports, no
 daemon, no shared writer — each agent owns exactly one file, so two agents can

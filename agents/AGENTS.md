@@ -12,13 +12,13 @@ Neither one touches Claude's code, and the widget needs no changes at all.
 
 ## 1. Publish your status
 
-Run `signal.py` (next to this file) from your hooks. It writes one small JSON
+Run `agentsignal.py` (next to this file) from your hooks. It writes one small JSON
 file and exits 0, always.
 
 ```bash
-python signal.py --agent codex --display Codex --event UserPromptSubmit
-python signal.py --agent codex --display Codex --event PostToolUse   # per tool
-python signal.py --agent codex --display Codex --event Stop
+python agentsignal.py --agent codex --display Codex --event UserPromptSubmit
+python agentsignal.py --agent codex --display Codex --event PostToolUse   # per tool
+python agentsignal.py --agent codex --display Codex --event Stop
 ```
 
 If your runner pipes the event as JSON on stdin, the tool name is picked up
@@ -43,7 +43,7 @@ Recognised events — anything else is treated as "still working":
 }
 ```
 
-You can write it yourself instead of using `signal.py` — the file *is* the
+You can write it yourself instead of using `agentsignal.py` — the file *is* the
 contract. If you do, three things matter:
 
 - **Write atomically.** Temp file then `os.replace`, or a reader will
@@ -52,7 +52,7 @@ contract. If you do, three things matter:
   not be able to break the agent reporting to it.
 - **Guard the late write.** If your hooks are async, a tool event can land just
   *after* `Stop` and revive a finished turn until the 90-second staleness
-  timeout. `signal.py` ignores tool events arriving within 5 s of a `Stop`.
+  timeout. `agentsignal.py` ignores tool events arriving within 5 s of a `Stop`.
 
 `count` is tool calls this turn, reset when a turn starts. `started` is when the
 current turn began, and drives the elapsed time in the caption. A turn with no

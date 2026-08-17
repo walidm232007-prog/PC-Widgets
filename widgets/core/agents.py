@@ -1,7 +1,7 @@
 """
 agents.py
 =========
-Reader for the agent activity bus that ``agents/signal.py`` writes.
+Reader for the agent activity bus that ``agents/agentsignal.py`` writes.
 
 One file per agent in one directory, so this is a directory listing plus a JSON
 read. Polling beats watching here: writes are atomic renames, the widget already
@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-STALE_AFTER = 90.0        # matches signal.py
+STALE_AFTER = 90.0        # matches agentsignal.py
 FADE_AFTER = 6.0          # seconds after Stop that a bay still reads as "just done"
 
 # Agents the workspace draws whether or not they have ever reported in.

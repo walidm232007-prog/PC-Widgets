@@ -83,18 +83,15 @@ login, and the single-instance guard means launching it twice does nothing.
 a different one for the taskbar, the Start menu and Explorer, and a 16px tile
 drawn at 16px keeps its corners where one downscaled from 256px turns to mush.
 
-One optional dependency: the **Now Playing** widget uses the `winrt-*`
-namespace packages for album art and playback position. Without them it falls
-back to reading the track from window titles, and says so instead of inventing a
-position. `winsdk` is the older package for the same API and has no wheels past
-Python 3.12 — on 3.13 install these:
+The **Now Playing** widget reads the system media session through the `winrt-*`
+namespace packages. **A copy ships in `vendor/`** and is loaded ahead of anything
+installed, so there is nothing to install — see `vendor/README.txt` for why it is
+vendored rather than a dependency, and `THIRD-PARTY.md` for its licence. Delete
+that folder and it falls back to an installed copy, then to reading the track
+from window titles, saying so rather than inventing a position.
 
-```bash
-pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Storage.Streams winrt-Windows.Foundation winrt-Windows.Foundation.Collections
-```
-
-Everything else needs nothing beyond PySide6, which you already had. Every icon,
-chart and card is drawn at runtime with `QPainter` — there are no image assets.
+Everything else needs nothing beyond PySide6. Every icon, chart and card is drawn
+at runtime with `QPainter` — there are no image assets.
 
 ---
 
@@ -132,13 +129,17 @@ Claude publishes to it already. **Codex: see [agents/AGENTS.md](agents/AGENTS.md
 — it's the full contract plus how to draw your own avatar. Two steps, neither of
 which touches any existing code:
 
-1. Run `agents/signal.py --agent codex --event <hook>` from your hooks.
+1. Run `agents/agentsignal.py --agent codex --event <hook>` from your hooks.
 2. Replace `CodexAvatar` in `widgets/core/avatars.py` (it's a deliberately plain
    placeholder right now, so the bay is never empty).
 
-State lives in `%APPDATA%\AgentWorkspace\<agent>.json` — **one file per agent**,
-so two agents can never race each other and neither has to know the other
-exists. An agent that reports in without being registered still gets a bay,
+State lives in `<agent>.json` — **one file per agent**, so two agents can never
+race each other and neither has to know the other exists. It is written to
+*two* directories, `%APPDATA%\AgentWorkspace` and `.agentbus` inside the project,
+and read as whichever copy is fresher: on the machine this was built for the
+board process could not read `%APPDATA%` at all while reading the project folder
+perfectly, and a status widget that silently shows nobody working is worse than
+writing two hundred bytes twice. An agent that reports in without being registered still gets a bay,
 drawn with the placeholder avatar. A turn with no events for 90 s is treated as
 over, so a crashed agent doesn't hammer forever.
 

@@ -155,11 +155,11 @@ def _check_agent_bus() -> None:
     if root not in sys.path:
         sys.path.insert(0, root)
 
-    # Loaded by path, under another name. ``agents/signal.py`` shadows a
+    # Loaded by path, under another name. ``agents/signal.py`` used to shadow a
     # standard library module, so a plain import here returns Python's own
     # ``signal`` - which has no bus_dirs and would fail confusingly.
     spec = importlib.util.spec_from_file_location(
-        "_agent_signal", os.path.join(root, "agents", "signal.py"))
+        "_agent_signal", os.path.join(root, "agents", "agentsignal.py"))
     writer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(writer)
 
