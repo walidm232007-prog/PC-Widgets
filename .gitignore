@@ -24,6 +24,12 @@ _run.log
 
 __pycache__/
 *.py[cod]
+
+# ...but vendor/ ships real native extension modules, and .pyd is caught by the
+# [cod] above. Without this exception the repository contained the Python half
+# of the WinRT projection and none of the binaries, so every clone failed with
+# "No module named 'winrt'" - the precise bug vendor/ exists to prevent.
+!vendor/**/*.pyd
 *.egg-info/
 .venv/
 venv/
