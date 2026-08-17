@@ -286,7 +286,10 @@ def cmd_wait(args, flags, me) -> int:
 def cmd_status(args, flags, me) -> int:
     s = mb.stats()
     print(f"you are: {me}")
-    print(f"mailbox: {s['dir']}")
+    # Both locations, because "which one is it in" is the first question when
+    # one process can see the mailbox and another cannot.
+    for i, d in enumerate(s.get("dirs") or [s["dir"]]):
+        print(f"mailbox: {d}" if i == 0 else f"     and: {d}")
     print(f"messages: {s['messages']}   unread for you: {len(mb.unread(me))}")
     print(f"senders: {', '.join(s['senders']) or 'none'}")
     print(f"threads: {', '.join(s['threads']) or 'none'}")
