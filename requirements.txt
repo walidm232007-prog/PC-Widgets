@@ -1,0 +1,23 @@
+﻿# PC Widgets - runtime dependencies
+#
+# Only PySide6 is required. Everything else is optional and the app degrades
+# deliberately without it, saying so in the widget rather than failing.
+
+PySide6>=6.6
+
+# --- optional -------------------------------------------------------------- #
+# The media widget reads the system media session through the WinRT projection.
+# A copy already ships in vendor/ and is used ahead of anything installed, so
+# you only need these if you delete that folder. See vendor/README.txt for why
+# it is vendored at all.
+#
+#   winrt-Windows.Media.Control>=3.2.1
+#   winrt-Windows.Storage.Streams>=3.2.1
+#   typing_extensions>=4.12.2
+#
+# The audio visualiser needs real samples for a true spectrum. Without these it
+# falls back to the Core Audio peak meter (no dependency), and failing that to
+# an animation.
+#
+#   numpy>=1.26
+#   PyAudioWPatch>=0.2.12

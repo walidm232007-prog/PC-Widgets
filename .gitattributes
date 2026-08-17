@@ -1,0 +1,22 @@
+# Normalise line endings so a Windows checkout and a Linux one agree, and so
+# nobody's editor produces a diff that is nothing but invisible characters.
+* text=auto eol=lf
+
+# Windows-only launchers must keep CRLF or cmd.exe mis-parses them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary: never touch, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.otf binary
+*.ttf binary
+*.pyd binary
+*.dll binary
+*.zip binary
+
+# Vendored third-party code - keep it byte-identical to upstream and out of
+# language statistics, since it is not this project's code.
+vendor/** linguist-vendored

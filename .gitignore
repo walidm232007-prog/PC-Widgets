@@ -1,0 +1,50 @@
+# --------------------------------------------------------------------------- #
+#  Fonts - the important one
+# --------------------------------------------------------------------------- #
+# SF Pro is Apple's. Its licence covers designing for Apple platforms and does
+# not permit redistribution, so the files must never be committed. The app runs
+# without them: the type stack falls back to Inter, then Helvetica Neue, then
+# Segoe UI Variable. fonts/README.txt tells anyone cloning this where to get
+# them, and is deliberately NOT ignored.
+fonts/*.otf
+fonts/*.ttf
+fonts/*.ttc
+fonts/*.woff
+fonts/*.woff2
+
+# --------------------------------------------------------------------------- #
+#  Local, generated, or machine-specific
+# --------------------------------------------------------------------------- #
+_selftest/
+_run.log
+*.log
+
+# Shortcuts hold absolute paths to one machine's folders.
+*.lnk
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Anything that looks like a credential or a private config. Belt and braces:
+# nothing here writes these, but a stray copy must not be publishable.
+*.pem
+*.key
+.env
+.env.*
+secrets.json
+settings.local.json
+
+# Editor / OS litter
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Agent status bus (runtime state, mirrored from %APPDATA%)
+.agentbus/
+_media.log

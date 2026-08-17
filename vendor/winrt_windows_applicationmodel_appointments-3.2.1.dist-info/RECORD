@@ -1,0 +1,11 @@
+winrt/_winrt_windows_applicationmodel_appointments.cp313-win_amd64.pyd,sha256=e1L_z6Xn3UsHVULkbF_5ttPLV2uWHyE4Mzma2Uglrzg,524288
+winrt/_winrt_windows_applicationmodel_appointments.pyi,sha256=tfkLKgiYnFzNTqSw6Y2YrbMIAYygY28RNcluM16dvYM,67590
+winrt/windows/applicationmodel/appointments/__init__.py,sha256=u8tzNiOoDbb-4S_uqnJzLdl2JRm9Dtf7HfQiJlabeK4,4217
+winrt/windows/applicationmodel/appointments/__pycache__/__init__.cpython-313.pyc,,
+winrt/windows/applicationmodel/appointments/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+winrt_windows_applicationmodel_appointments-3.2.1.dist-info/INSTALLER,sha256=zuuue4knoyJ-UwPPXg8fezS7VCrXJQrAP7zeNuwvFQg,4
+winrt_windows_applicationmodel_appointments-3.2.1.dist-info/METADATA,sha256=dNlegTWJRR2NDGiDZk_dMJ6xBCuhs2CIG021oZ6pPeU,1388
+winrt_windows_applicationmodel_appointments-3.2.1.dist-info/RECORD,,
+winrt_windows_applicationmodel_appointments-3.2.1.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+winrt_windows_applicationmodel_appointments-3.2.1.dist-info/WHEEL,sha256=qV0EIPljj1XC_vuSatRWjn02nZIz3N1t8jsZz7HBr2U,101
+winrt_windows_applicationmodel_appointments-3.2.1.dist-info/top_level.txt,sha256=BzwQb4dZRt0NxCXi10ARjWsox7Asmtf_lXrw_KR-D_E,6
