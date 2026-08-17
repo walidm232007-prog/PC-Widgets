@@ -3,8 +3,40 @@
 iPhone/Mac-style widgets for the Windows desktop. Rounded translucent cards that
 live *on* your desktop, snap to a grid, and come to the front on a hotkey.
 
-Double-click **PC Widgets** — the launcher sits at the top of this folder, and
-there's a copy on your Desktop. (`run.bat` still works as a fallback.)
+## From a fresh clone
+
+Windows 10 or 11 and Python 3.11+.
+
+```bash
+pip install -r requirements.txt
+```
+
+```bash
+python main.py
+```
+
+That is the whole install. Then, optionally, make yourself launchers and have it
+start with Windows:
+
+```bash
+python main.py --app --shortcut --install-startup
+```
+
+The shortcuts are not in the repository — a Windows `.lnk` stores an absolute
+path, so it would only ever be right on one machine. The command above builds
+them for yours.
+
+Two things are deliberately missing and the app handles both: **SF Pro** (Apple's
+font, not redistributable — `fonts/README.txt` says where to get it, and the type
+falls back to Inter, then Helvetica Neue, then Segoe UI Variable) and the
+**optional audio packages** in `requirements.txt`, without which the visualiser
+uses the Core Audio peak meter instead of a real spectrum.
+
+## Everyday use
+
+Double-click **PC Widgets** — the launcher sits at the top of this folder once
+you've run `--app`, and `--shortcut` puts a copy on your Desktop. (`run.bat`
+works as a fallback.)
 
 **Ctrl+Alt+W** brings the whole board to the front and sends it back down again.
 The tray icon adds widgets, switches theme and accent, and changes the layer.
