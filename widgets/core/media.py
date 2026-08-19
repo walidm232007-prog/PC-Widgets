@@ -772,6 +772,7 @@ class MediaSource:
                 _report("media: this process cannot import the media API at "
                         "all; reading it in a separate process instead")
 
+        began = time.monotonic()
         try:
             if self.use_winrt:
                 now = _from_winrt(self.prefer)
@@ -781,15 +782,19 @@ class MediaSource:
             else:
                 now = _from_titles(self.prefer)
         except Exception as exc:
+            took = time.monotonic() - began
             self._failures += 1
             if self._failures > 3 and self.use_winrt:
                 self.use_winrt = False
                 self.degraded = True
                 self._failures = 0
                 self._retry_at = clock + self.COOLOFF
-                from .store import _log
-                _log(f"media: winrt backend failed 4x, using window titles "
-                     f"for {self.COOLOFF:.0f}s ({exc!r})")
+                # Through _report, not store._log: the log under %APPDATA% is
+                # exactly the one this process may not be able to write, and a
+                # failure reason that lands nowhere is how this widget stayed
+                # broken for a week. The recovery message already went to both.
+                _report(f"media: winrt backend failed 4x after {took:.1f}s, "
+                        f"using window titles for {self.COOLOFF:.0f}s ({exc!r})")
             return self.last
 
         self._failures = 0
