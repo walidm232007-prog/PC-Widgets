@@ -121,12 +121,15 @@ class FilesWidget(WidgetCard):
         self.cwd: Optional[str] = None                # None = the home view
         self.error = ""
         self.query = ""
+        self._searching = False       # only true after clicking the search bar
         self._scroll = 0.0
         self._hot: Optional[str] = None
         self._rows: List[Tuple[QRectF, str, bool]] = []
         self._chrome: List[Tuple[QRectF, str]] = []
         self._history: List[str] = []
         self._resizing = None
+        self._pressed = None      # (path, tag) while a row is held
+        self._press_at = None
         self._size0 = (self.width(), self.height())
         self._reader: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -224,6 +227,7 @@ class FilesWidget(WidgetCard):
         if remember and self.cwd:
             self._history.append(self.cwd)
         self.query = ""
+        self._searching = False
         self._scroll = 0.0
         if path is None:
             self.cwd = None
@@ -301,16 +305,47 @@ class FilesWidget(WidgetCard):
 
         y = self._header(p, r, tight)
         body = QRectF(r.left(), y, r.width(), max(0.0, r.bottom() - y))
-        if self.cwd is not None:
+        if self._searching:
+            self._results(p, body)
+        elif self.cwd is not None:
             self._listing(p, body)
         else:
             self._home(p, body, tight)
         self._grip(p)
 
     def _header(self, p, r: QRectF, tight: bool) -> float:
-        """Where you are, how to get back, and the filter."""
+        """Where you are, how to get back, and the search field.
+
+        Searching takes the card over completely - the bar grows, everything
+        else stops being drawn, and results appear underneath as you type. The
+        alternative is a filter box perched above a list that is quietly lying
+        about how much is in it, which is the thing every file manager gets
+        wrong. Escape puts the browser back.
+        """
         pal = self.palette_
         top = r.top()
+
+        if self._searching:
+            box = QRectF(r.left(), top, r.width(), 30)
+            p.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
+            p.setBrush(QColor(0, 0, 0, 64))
+            p.drawRoundedRect(box, 9, 9)
+            self._magnifier(p, QPointF(box.left() + 16, box.center().y()),
+                            QColor(pal.text))
+            shown = self.query or "Search"
+            self.text(p, QRectF(box.left() + 30, box.top(), box.width() - 40,
+                                box.height()),
+                      self._elide(p, shown, box.width() - 46, 11),
+                      11, pal.text if self.query else pal.text_dim)
+            if self.query:
+                p.setFont(self.font(11))
+                caret = box.left() + 30 + p.fontMetrics().horizontalAdvance(
+                    self._elide(p, self.query, box.width() - 46, 11)) + 2
+                p.setPen(QPen(QColor(pal.text), 1.4))
+                p.drawLine(QPointF(caret, box.center().y() - 7),
+                           QPointF(caret, box.center().y() + 7))
+            self._chrome.append((box, "search"))
+            return top + 38
 
         if self.cwd:
             box = QRectF(r.left(), top - 2, 16, 16)
@@ -378,6 +413,39 @@ class FilesWidget(WidgetCard):
             y += 16
             self._rowlist(p, QRectF(r.left(), y, r.width(), r.bottom() - y),
                           [(x, False) for x in recent])
+
+    def _results(self, p, r: QRectF) -> None:
+        """What search mode shows instead of the browser."""
+        pal = self.palette_
+        q = self.query.lower()
+        where = (os.path.basename(self.cwd.rstrip("\\/")) or self.cwd
+                 if self.cwd else "recent files and places")
+        if not q:
+            self.text(p, QRectF(r.left(), r.top(), r.width(), 20),
+                      f"Type to search {where}", 9.5, pal.text_dim)
+            return
+
+        rows = self._matches(q)
+        if not rows:
+            self.text(p, QRectF(r.left(), r.top(), r.width(), 20),
+                      f"Nothing in {where} matches", 9.5, pal.text_dim)
+            return
+        self.text(p, QRectF(r.left(), r.top(), r.width(), 14),
+                  f"{len(rows)} match" + ("" if len(rows) == 1 else "es"),
+                  9, pal.text_dim, QFont.DemiBold)
+        self._rowlist(p, QRectF(r.left(), r.top() + 16, r.width(),
+                                r.bottom() - r.top() - 16), rows)
+
+    def _matches(self, q: str):
+        """Everything in the current context whose name contains the query."""
+        if self.cwd is not None:
+            return [(path, is_dir) for path, is_dir in self.entries
+                    if q in os.path.basename(path).lower()]
+        rows = [(x, True) for x in self.places
+                if q in os.path.basename(x.rstrip("\\/")).lower()]
+        rows += [(x, False) for x in self.recent
+                 if q in os.path.basename(x).lower()]
+        return rows
 
     def _listing(self, p, r: QRectF) -> None:
         pal = self.palette_
@@ -499,7 +567,14 @@ class FilesWidget(WidgetCard):
                    QPointF(c.x() + 4.8, c.y() + 4.8))
 
     def _grip(self, p) -> None:
-        """Three ticks in the corner - the only affordance saying "drag me"."""
+        """Three ticks in the corner - the only affordance saying "drag me".
+
+        Hidden while positions are locked, because locking is how you say "stop
+        letting me move things by accident" and a visible handle that refuses to
+        work is worse than no handle.
+        """
+        if self.locked:
+            return
         c = self.card_rect()
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(QColor(255, 255, 255, 64), 1.2, Qt.SolidLine, Qt.RoundCap))
@@ -576,6 +651,8 @@ class FilesWidget(WidgetCard):
     #  Interaction
     # ------------------------------------------------------------------ #
     def _in_grip(self, pos) -> bool:
+        if self.locked:
+            return False
         c = self.card_rect()
         return pos.x() > c.right() - GRIP and pos.y() > c.bottom() - GRIP
 
@@ -589,12 +666,27 @@ class FilesWidget(WidgetCard):
         return None, ""
 
     def mousePressEvent(self, ev) -> None:
-        if ev.button() == Qt.LeftButton and not self.locked \
-                and self._in_grip(ev.position()):
+        if ev.button() == Qt.LeftButton and self._in_grip(ev.position()):
             self._resizing = ev.globalPosition().toPoint()
             self._size0 = (self.width(), self.height())
             ev.accept()
             return
+
+        if ev.button() == Qt.LeftButton:
+            self._press_at = ev.globalPosition().toPoint()
+            path, tag = self._hit(ev.position())
+            if tag:
+                # Claim the press so the base class never starts a drag from it.
+                # WidgetCard sets _drag_from on *every* left press, so testing
+                # that at release time - which is what this did - meant a click
+                # on a row never registered at all.
+                self._pressed = (path, tag)
+                if self.wants_focus:
+                    self.raise_()
+                    self.activateWindow()
+                ev.accept()
+                return
+        self._pressed = None
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
@@ -628,17 +720,38 @@ class FilesWidget(WidgetCard):
             self.changed.emit()          # remember the shape across launches
             ev.accept()
             return
-        if ev.button() == Qt.LeftButton and self._drag_from is None:
-            path, tag = self._hit(ev.position())
-            if tag == "back":
-                self._back()
-            elif tag == "dir":
-                self._go(path)
-            elif tag == "file":
-                self._open(path)
-            if tag:
-                ev.accept()
-                return
+
+        if self._pressed is not None:
+            path, tag = self._pressed
+            self._pressed = None
+            # Only act if the pointer is still on what was pressed, as a button
+            # does - dragging off a row should cancel it.
+            if self._hit(ev.position()) == (path, tag):
+                if tag == "search":
+                    # Typing does nothing until the bar is clicked. Filtering on
+                    # whatever key happens to land, on a card that sits under
+                    # the mouse all day, is how you lose your place in a folder.
+                    self._searching = True
+                    self.query = ""
+                    self._scroll = 0.0
+                elif tag == "back":
+                    self._back()
+                elif tag == "dir":
+                    self._go(path)
+                elif tag == "file":
+                    self._open(path)
+            self.update()
+            ev.accept()
+            return
+
+        # A click on the background - not a drag - leaves search, the way
+        # clicking off a Spotlight field dismisses it.
+        if (self._searching and ev.button() == Qt.LeftButton
+                and self._press_at is not None
+                and (ev.globalPosition().toPoint()
+                     - self._press_at).manhattanLength() < 5):
+            self._exit_search()
+            self.update()
         super().mouseReleaseEvent(ev)
 
     def wheelEvent(self, ev) -> None:
@@ -646,33 +759,55 @@ class FilesWidget(WidgetCard):
         self.update()
         ev.accept()
 
+    def _exit_search(self) -> None:
+        """Put the browser back exactly as it was."""
+        self._searching = False
+        self.query = ""
+        self._scroll = 0.0
+
     def keyPressEvent(self, ev) -> None:
         key = ev.key()
-        if key == Qt.Key_Escape:
-            if self.query:
-                self.query = ""
-            else:
-                self._go(None, remember=False)
-        elif key == Qt.Key_Backspace:
-            # Editing the filter comes first; on an empty filter it means "go
-            # up", which is what Backspace does in Explorer.
-            if self.query:
+
+        if self._searching:
+            if key == Qt.Key_Escape:
+                self._exit_search()
+            elif key == Qt.Key_Backspace:
                 self.query = self.query[:-1]
+                self._scroll = 0.0
+            elif key in (Qt.Key_Return, Qt.Key_Enter):
+                if self._rows:
+                    _box, path, is_dir = self._rows[0]
+                    if is_dir:
+                        self._go(path)
+                        self._searching = False
+                    else:
+                        self._open(path)
+            elif key == Qt.Key_Down:
+                self._scroll += 1
+            elif key == Qt.Key_Up:
+                self._scroll = max(0.0, self._scroll - 1)
+            elif ev.text() and ev.text().isprintable():
+                self.query += ev.text()
+                self._scroll = 0.0
             else:
-                self._up()
-        elif key in (Qt.Key_Return, Qt.Key_Enter):
-            if self._rows:
-                _box, path, is_dir = self._rows[0]
-                self._go(path) if is_dir else self._open(path)
+                super().keyPressEvent(ev)
+                return
+            self.update()
+            ev.accept()
+            return
+
+        # Browsing. No printable key does anything here - see the search branch
+        # in mouseReleaseEvent for why.
+        if key == Qt.Key_Escape:
+            self._go(None, remember=False)
+        elif key == Qt.Key_Backspace:
+            self._up()
         elif key == Qt.Key_Up and ev.modifiers() & Qt.AltModifier:
             self._up()
         elif key == Qt.Key_Down:
             self._scroll += 1
         elif key == Qt.Key_Up:
             self._scroll = max(0.0, self._scroll - 1)
-        elif ev.text() and ev.text().isprintable():
-            self.query += ev.text()
-            self._scroll = 0.0
         else:
             super().keyPressEvent(ev)
             return
