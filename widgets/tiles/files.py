@@ -32,13 +32,20 @@ from typing import List, Optional, Tuple
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
-from ..core.card import WidgetCard, pixel_size
+from ..core.card import Fader, WidgetCard, pixel_size
 
 REFRESH = 90.0            # seconds between Quick Access re-reads
 MAX_ENTRIES = 4000        # a folder bigger than this is a filesystem, not a list
 ROW_H = 22.0
 MIN_W, MIN_H = 260, 200   # smallest the window may be dragged to
 GRIP = 16.0               # corner hit area for resizing
+
+# Transitions. Two, because entering a folder from the home view and going one
+# level deeper are different moves: the first is a change of mode, the second is
+# travel along a path. Giving both the same animation would say they were the
+# same thing.
+FADE_MS = 240.0           # home -> a folder
+SLIDE_MS = 300.0          # folder -> folder, in or out
 
 QA_CLSID = "{679F85CB-0220-4080-B29B-5540CC05AAB6}"
 
@@ -123,6 +130,14 @@ class FilesWidget(WidgetCard):
         self.query = ""
         self._searching = False       # only true after clicking the search bar
         self._scroll = 0.0
+        # The transition plays when the *listing* arrives, not when the click
+        # lands - the read is on a worker thread, and animating before the data
+        # is back would slide the old folder in and then swap it.
+        self._anim = Fader(self, fps=60)
+        self._anim.finish()
+        self._anim_kind = ""          # "fade" | "slide"
+        self._anim_dir = 1.0          # +1 entering from the right, -1 from the left
+        self._pending: Optional[Tuple[str, float]] = None
         self._hot: Optional[str] = None
         self._rows: List[Tuple[QRectF, str, bool]] = []
         self._chrome: List[Tuple[QRectF, str]] = []
@@ -218,29 +233,49 @@ class FilesWidget(WidgetCard):
         self.data_ready.emit()
 
     def _on_data(self) -> None:
+        if self._pending is not None:
+            kind, direction = self._pending
+            self._pending = None
+            self._begin(kind, direction)
         self.update()
 
     # ------------------------------------------------------------------ #
     #  Navigation
     # ------------------------------------------------------------------ #
-    def _go(self, path: Optional[str], remember: bool = True) -> None:
+    def _go(self, path: Optional[str], remember: bool = True,
+            back: bool = False) -> None:
         if remember and self.cwd:
             self._history.append(self.cwd)
         self.query = ""
         self._searching = False
         self._scroll = 0.0
+
         if path is None:
+            # Back out to the home view: a fade, the same move as arriving.
             self.cwd = None
             self.entries = []
             self.error = ""
+            self._pending = None
+            self._begin("fade", 1.0)
             self.update()
             return
+
+        # From home it is a change of mode, so fade. From one folder to another
+        # it is travel, so slide - out to the left going deeper, in from the
+        # left coming back.
+        self._pending = (("fade", 1.0) if self.cwd is None
+                         else ("slide", -1.0 if back else 1.0))
         self._want = path
         self._wake.set()
 
+    def _begin(self, kind: str, direction: float) -> None:
+        self._anim_kind = kind
+        self._anim_dir = direction
+        self._anim.start(FADE_MS if kind == "fade" else SLIDE_MS)
+
     def _back(self) -> None:
         if self._history:
-            self._go(self._history.pop(), remember=False)
+            self._go(self._history.pop(), remember=False, back=True)
         else:
             self._go(None, remember=False)
 
@@ -250,7 +285,7 @@ class FilesWidget(WidgetCard):
         parent = os.path.dirname(self.cwd.rstrip("\\/"))
         # A drive root's parent is itself, so "up" from C:\ means going home
         # rather than sitting there doing nothing.
-        self._go(parent if parent and parent != self.cwd else None)
+        self._go(parent if parent and parent != self.cwd else None, back=True)
 
     # ------------------------------------------------------------------ #
     def context_actions(self, menu) -> None:
@@ -305,12 +340,34 @@ class FilesWidget(WidgetCard):
 
         y = self._header(p, r, tight)
         body = QRectF(r.left(), y, r.width(), max(0.0, r.bottom() - y))
+
+        # The header does not move. Only the contents transition, which is what
+        # makes it read as the folder changing rather than the whole card
+        # lurching - and it keeps the back chevron under the pointer, so two
+        # levels can be climbed without waiting for an animation.
+        moving = self._anim.active and not self._searching
+        if moving:
+            p.save()
+            p.setClipRect(body)          # nothing may spill past the card edge
+            t = self._anim.value
+            if self._anim_kind == "slide":
+                p.translate((1.0 - t) * body.width() * self._anim_dir, 0.0)
+                # A touch of fade with the slide. Pure translation reads as a
+                # panel being shoved; the two together read as one view
+                # replacing another.
+                p.setOpacity(min(1.0, 0.35 + t * 0.65))
+            else:
+                p.setOpacity(t)
+
         if self._searching:
             self._results(p, body)
         elif self.cwd is not None:
             self._listing(p, body)
         else:
             self._home(p, body, tight)
+
+        if moving:
+            p.restore()
         self._grip(p)
 
     def _header(self, p, r: QRectF, tight: bool) -> float:
