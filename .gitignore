@@ -54,3 +54,6 @@ desktop.ini
 # Agent status bus (runtime state, mirrored from %APPDATA%)
 .agentbus/
 _media.log
+
+# Local render previews
+_preview/
