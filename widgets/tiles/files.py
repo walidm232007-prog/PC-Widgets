@@ -1,16 +1,25 @@
 """
-Files - the folders and documents you actually use, on the desktop.
+Files - a small file browser that lives on the desktop.
 
-Windows already keeps this list. Quick Access is what File Explorer shows when
-it opens, and it is a much better source than the obvious one: ``%APPDATA%\\
-Microsoft\\Windows\\Recent`` holds 655 shortcuts on this machine, most of them
-protocol activations - ``ms-gamingoverlay``, ``ms-screenclip`` - whose targets
-resolve to nothing at all. Quick Access is the same history already de-junked by
-the shell, with real paths.
+Not a launcher that hands off to Explorer: folders open *inside* the card, with
+history, scrolling and a filter. Explorer is still one click away in the
+right-click menu for the times you want the real thing.
 
-It costs about a second to enumerate through COM, so it is read on its own
-thread and cached. That is not a micro-optimisation: a second of blocking on the
-GUI thread freezes every card on the board.
+Two data sources. The home view comes from **Quick Access**, which is what File
+Explorer shows when it opens and is far better than the obvious source: on this
+machine ``%APPDATA%\\Microsoft\\Windows\\Recent`` holds 655 shortcuts, most of
+them protocol activations (``ms-gamingoverlay``, ``ms-screenclip``) whose targets
+resolve to nothing at all. Inside a folder it is a plain ``os.scandir``.
+
+Both run on one long-lived worker thread. A directory listing is usually a
+couple of milliseconds, but "usually" is not good enough on the GUI thread - a
+network path that has gone away blocks for the full timeout, and that would
+freeze every card on the board, not just this one.
+
+This tile is also the board's one exception to fixed sizes. Everything else is
+designed for three known shapes, which is what keeps a mixed board looking
+composed; a file list has no natural height, so this one can be dragged by the
+corner to whatever fits the gap. See :meth:`_grip`.
 """
 
 from __future__ import annotations
@@ -23,13 +32,16 @@ from typing import List, Optional, Tuple
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
-from ..core.card import WidgetCard
+from ..core.card import WidgetCard, pixel_size
 
-REFRESH = 90.0           # seconds between shell enumerations
+REFRESH = 90.0            # seconds between Quick Access re-reads
+MAX_ENTRIES = 4000        # a folder bigger than this is a filesystem, not a list
+ROW_H = 22.0
+MIN_W, MIN_H = 260, 200   # smallest the window may be dragged to
+GRIP = 16.0               # corner hit area for resizing
+
 QA_CLSID = "{679F85CB-0220-4080-B29B-5540CC05AAB6}"
 
-# Offered when the shell has nothing to say - a new profile has no Quick Access
-# history, and an empty card reads as broken rather than as new.
 FALLBACK_PLACES = ("Desktop", "Downloads", "Documents", "Pictures")
 
 # Extension -> glyph family. Drawn, not loaded: the board has no image assets
@@ -53,12 +65,7 @@ def kind_of(path: str) -> str:
 
 
 def _shell_snapshot() -> Tuple[List[str], List[str]]:
-    """Quick Access, split into folders and files. Slow; never on the GUI thread.
-
-    One PowerShell process, not one per item. ``-ExecutionPolicy Bypass`` is
-    deliberate - this runs a literal command rather than a file, and a
-    restricted policy would otherwise leave the tile silently empty.
-    """
+    """Quick Access, split into folders and files. Slow; never on the GUI thread."""
     script = (
         "$ErrorActionPreference='SilentlyContinue';"
         "$sh = New-Object -ComObject Shell.Application;"
@@ -71,7 +78,7 @@ def _shell_snapshot() -> Tuple[List[str], List[str]]:
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-Command", script],
             capture_output=True, text=True, timeout=20,
-            creationflags=0x08000000)          # CREATE_NO_WINDOW
+            creationflags=0x08000000)
     except Exception:
         return [], []
 
@@ -82,8 +89,8 @@ def _shell_snapshot() -> Tuple[List[str], List[str]]:
         if len(line) < 3 or line[1] != "|":
             continue
         tag, path = line[0], line[2:]
-        # Quick Access keeps entries for deleted files. Offering one is a dead
-        # click, so history that no longer exists is dropped here.
+        # Quick Access keeps entries for files that are gone. Offering one is a
+        # dead click, so it is dropped here rather than failing on use.
         if not os.path.exists(path):
             continue
         (dirs if tag == "D" else files).append(path)
@@ -100,7 +107,8 @@ class FilesWidget(WidgetCard):
     kind = "files"
     title = "Files"
     supported_sizes = ("small", "medium", "large")
-    refresh_ms = 0            # nothing to animate; the reader drives repaints
+    wants_focus = True        # the filter box has to be typeable
+    refresh_ms = 0
     repaint_on_tick = False
 
     data_ready = Signal()
@@ -109,22 +117,42 @@ class FilesWidget(WidgetCard):
         super().__init__(*a, **kw)
         self.places: List[str] = _fallback_places()
         self.recent: List[str] = []
-        self._rows: List[Tuple[QRectF, str, bool]] = []   # rect, path, is_dir
+        self.entries: List[Tuple[str, bool]] = []     # (path, is_dir)
+        self.cwd: Optional[str] = None                # None = the home view
+        self.error = ""
+        self.query = ""
+        self._scroll = 0.0
         self._hot: Optional[str] = None
+        self._rows: List[Tuple[QRectF, str, bool]] = []
+        self._chrome: List[Tuple[QRectF, str]] = []
+        self._history: List[str] = []
+        self._resizing = None
+        self._size0 = (self.width(), self.height())
         self._reader: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._want: Optional[str] = None
         self.data_ready.connect(self._on_data)
 
+        # Free size, remembered per card. Falls back to the size class, so a
+        # board saved before this existed keeps the shape it already had.
+        w, h = self.config.get("w"), self.config.get("h")
+        if isinstance(w, int) and isinstance(h, int):
+            self.resize(max(MIN_W, w), max(MIN_H, h))
+
+    # ------------------------------------------------------------------ #
+    #  The worker
     # ------------------------------------------------------------------ #
     def on_start(self) -> None:
         self._start_reader()
 
     def closeEvent(self, ev) -> None:
         self._stop.set()
+        self._wake.set()
         super().closeEvent(ev)
 
     def _start_reader(self) -> None:
-        """One long-lived thread, not one per refresh.
+        """One long-lived thread, not one per read.
 
         The media tile learned this the hard way: a thread spawned per poll
         needs a latch, and a latch set before a fallible operation is how that
@@ -138,68 +166,195 @@ class FilesWidget(WidgetCard):
         try:
             self._reader.start()
         except RuntimeError:
-            self._reader = None       # out of threads; try again on the next tick
+            self._reader = None
 
     def _loop(self) -> None:
-        first = True
-        while not self._stop.wait(0.0 if first else REFRESH):
-            first = False
-            self._refresh_once()
+        self._refresh_qa()
+        while not self._stop.is_set():
+            woke = self._wake.wait(REFRESH)
+            if self._stop.is_set():
+                break
+            self._wake.clear()
+            want = self._want
+            if want is not None:
+                self._want = None
+                self._list_dir(want)
+            elif not woke:
+                self._refresh_qa()
 
-    def _refresh_once(self) -> None:
+    def _refresh_qa(self) -> None:
         dirs, files = _shell_snapshot()
         if dirs or files:
             self.places = dirs or _fallback_places()
             self.recent = files
             self.data_ready.emit()
 
+    def _list_dir(self, path: str) -> None:
+        rows: List[Tuple[str, bool, str]] = []
+        try:
+            with os.scandir(path) as it:
+                for i, e in enumerate(it):
+                    if i >= MAX_ENTRIES:
+                        break
+                    try:
+                        is_dir = e.is_dir()
+                    except OSError:
+                        is_dir = False      # a link we are not allowed to follow
+                    rows.append((e.path, is_dir, e.name))
+            rows.sort(key=lambda r: (not r[1], r[2].lower()))
+            self.entries = [(p, d) for p, d, _ in rows]
+            self.error = ""
+        except Exception as exc:
+            # Permission denied, or the drive went away. Say which, on the card,
+            # rather than showing an empty folder that looks the same as a real
+            # empty folder.
+            self.entries = []
+            self.error = type(exc).__name__
+        self.cwd = path
+        self._scroll = 0.0
+        self.data_ready.emit()
+
     def _on_data(self) -> None:
         self.update()
 
     # ------------------------------------------------------------------ #
+    #  Navigation
+    # ------------------------------------------------------------------ #
+    def _go(self, path: Optional[str], remember: bool = True) -> None:
+        if remember and self.cwd:
+            self._history.append(self.cwd)
+        self.query = ""
+        self._scroll = 0.0
+        if path is None:
+            self.cwd = None
+            self.entries = []
+            self.error = ""
+            self.update()
+            return
+        self._want = path
+        self._wake.set()
+
+    def _back(self) -> None:
+        if self._history:
+            self._go(self._history.pop(), remember=False)
+        else:
+            self._go(None, remember=False)
+
+    def _up(self) -> None:
+        if not self.cwd:
+            return
+        parent = os.path.dirname(self.cwd.rstrip("\\/"))
+        # A drive root's parent is itself, so "up" from C:\ means going home
+        # rather than sitting there doing nothing.
+        self._go(parent if parent and parent != self.cwd else None)
+
+    # ------------------------------------------------------------------ #
     def context_actions(self, menu) -> None:
         from PySide6.QtGui import QAction
-        note = QAction(f"{len(self.recent)} recent, {len(self.places)} places",
-                       menu)
+        where = self.cwd or "Quick Access"
+        note = QAction(os.path.basename(where.rstrip("\\/")) or where, menu)
         note.setEnabled(False)
         menu.addAction(note)
 
-        refresh = QAction("Refresh now", menu)
-        refresh.triggered.connect(
-            lambda: threading.Thread(target=self._refresh_once,
-                                     daemon=True).start())
+        if self.cwd:
+            act = QAction("Open in File Explorer", menu)
+            act.triggered.connect(lambda: self._explorer(self.cwd))
+            menu.addAction(act)
+            home = QAction("Back to Quick Access", menu)
+            home.triggered.connect(lambda: self._go(None, remember=False))
+            menu.addAction(home)
+
+        refresh = QAction("Refresh", menu)
+        refresh.triggered.connect(self._reread)
         menu.addAction(refresh)
 
-        home = QAction("Open File Explorer", menu)
-        home.triggered.connect(lambda: self._open(os.path.expanduser("~"), True))
-        menu.addAction(home)
+        reset = QAction("Reset size", menu)
+        reset.triggered.connect(self._reset_size)
+        menu.addAction(reset)
+
+    def _reread(self) -> None:
+        if self.cwd:
+            self._want = self.cwd
+        self._wake.set()
+
+    def _reset_size(self) -> None:
+        self.config.pop("w", None)
+        self.config.pop("h", None)
+        self.resize(*pixel_size(self.size_class, self.extra_bottom))
+        self.changed.emit()
+        self.update()
+
+    def set_size_class(self, size: str) -> None:
+        # Picking a preset from the menu is an explicit instruction, so it
+        # overrides a hand-dragged size rather than being silently ignored.
+        self.config.pop("w", None)
+        self.config.pop("h", None)
+        super().set_size_class(size)
 
     # ------------------------------------------------------------------ #
     #  Painting
     # ------------------------------------------------------------------ #
     def paint_content(self, p, r: QRectF) -> None:
-        pal = self.palette_
         self._rows = []
-        small = self.size_class == "small"
-        large = self.size_class == "large"
+        self._chrome = []
+        tight = self.width() < 300 and self.height() < 260
 
-        self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Files")
-        y = r.top() + 20
+        y = self._header(p, r, tight)
+        body = QRectF(r.left(), y, r.width(), max(0.0, r.bottom() - y))
+        if self.cwd is not None:
+            self._listing(p, body)
+        else:
+            self._home(p, body, tight)
+        self._grip(p)
 
-        # --- places, as a grid of folder tiles ---------------------------- #
-        # The three sizes answer different questions, rather than being the
-        # same card with less of it: small is a launcher, medium is "what was I
-        # just working on", large is both. Medium showed one recent file when it
-        # carried the grid too, which is the worst of each.
-        #
-        # Icon above the name, not beside it. Four columns across a 384px card
-        # leaves about 54px of text per tile, which rendered "Downloads" as
-        # "D...s" - a label that was present and told you nothing.
-        cols = 2 if small else 4
+    def _header(self, p, r: QRectF, tight: bool) -> float:
+        """Where you are, how to get back, and the filter."""
+        pal = self.palette_
+        top = r.top()
+
+        if self.cwd:
+            box = QRectF(r.left(), top - 2, 16, 16)
+            self._chevron(p, box.center(), QColor(pal.text))
+            self._chrome.append((box.adjusted(-4, -4, 6, 4), "back"))
+            name = os.path.basename(self.cwd.rstrip("\\/")) or self.cwd
+            self.text(p, QRectF(r.left() + 22, top - 4, r.width() - 26, 18),
+                      self._elide(p, name, r.width() - 30, 10.5), 10.5,
+                      pal.text, QFont.DemiBold)
+        else:
+            self.label(p, QRectF(r.left(), top, r.width(), 12), "Files")
+
+        y = top + 20
+        if tight:
+            return y
+
+        box = QRectF(r.left(), y, r.width(), 20)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 22 if self.query else 14))
+        p.drawRoundedRect(box, 6, 6)
+        self._magnifier(p, QPointF(box.left() + 11, box.center().y()),
+                        QColor(pal.text_dim))
+        self.text(p, QRectF(box.left() + 22, box.top(), box.width() - 28,
+                            box.height()),
+                  self._elide(p, self.query or "Search", box.width() - 30, 9.5),
+                  9.5, pal.text if self.query else pal.text_dim)
+        self._chrome.append((box, "search"))
+        return y + 26
+
+    # ------------------------------------------------------------------ #
+    def _home(self, p, r: QRectF, tight: bool) -> None:
+        pal = self.palette_
+        q = self.query.lower()
+        y = r.top()
+
+        places = [x for x in self.places
+                  if not q or q in os.path.basename(x.rstrip("\\/")).lower()]
+        # Columns follow the width now that the card is resizable, rather than
+        # being pinned to the size class.
+        cols = max(2, int(r.width() // 92))
         tile_w = (r.width() - (cols - 1) * 6) / cols
         tile_h = 46.0
-        medium = self.size_class == "medium"
-        shown = [] if medium else self.places[:8 if large else 4]
+        max_rows = 1 if tight else max(1, int((r.height() * 0.45) // (tile_h + 6)))
+        shown = places[:cols * max_rows]
         for i, path in enumerate(shown):
             box = QRectF(r.left() + (i % cols) * (tile_w + 6),
                          y + (i // cols) * (tile_h + 6), tile_w, tile_h)
@@ -208,23 +363,58 @@ class FilesWidget(WidgetCard):
         if shown:
             y += ((len(shown) + cols - 1) // cols) * (tile_h + 6) + 4
 
-        if small:
+        recent = [x for x in self.recent
+                  if not q or q in os.path.basename(x).lower()]
+        left = r.bottom() - y
+        if not recent:
+            if left > 18:
+                self.text(p, QRectF(r.left(), y, r.width(), 20),
+                          "No matches" if q else "No recent files yet",
+                          9.5, pal.text_dim)
             return
-
-        # --- recent files -------------------------------------------------- #
-        row_h = 22.0
-        if self.recent and r.bottom() - y > row_h + 16:
+        if left > ROW_H + 16:
             self.text(p, QRectF(r.left(), y, r.width(), 14), "Recent", 9,
                       pal.text_dim, QFont.DemiBold)
             y += 16
-            for path in self.recent[:max(0, int((r.bottom() - y) // row_h))]:
-                box = QRectF(r.left(), y, r.width(), row_h)
-                self._row(p, box, path)
-                self._rows.append((box, path, os.path.isdir(path)))
-                y += row_h
-        elif not self.recent:
-            self.text(p, QRectF(r.left(), y, r.width(), 20),
-                      "No recent files yet", 9.5, pal.text_dim)
+            self._rowlist(p, QRectF(r.left(), y, r.width(), r.bottom() - y),
+                          [(x, False) for x in recent])
+
+    def _listing(self, p, r: QRectF) -> None:
+        pal = self.palette_
+        q = self.query.lower()
+        rows = [(path, is_dir) for path, is_dir in self.entries
+                if not q or q in os.path.basename(path).lower()]
+
+        if self.error:
+            self.text(p, QRectF(r.left(), r.top(), r.width(), 20),
+                      f"Can't read this folder - {self.error}", 9.5,
+                      pal.text_dim)
+            return
+        if not rows:
+            self.text(p, QRectF(r.left(), r.top(), r.width(), 20),
+                      "No matches" if q else "Empty folder", 9.5, pal.text_dim)
+            return
+        self._rowlist(p, r, rows)
+
+    def _rowlist(self, p, r: QRectF, rows) -> None:
+        """As many rows as fit, offset by the scroll position."""
+        visible = max(0, int(r.height() // ROW_H))
+        span = max(0.0, len(rows) - visible)
+        self._scroll = min(max(0.0, self._scroll), span)
+        start = int(self._scroll)
+
+        for i, (path, is_dir) in enumerate(rows[start:start + visible]):
+            box = QRectF(r.left(), r.top() + i * ROW_H, r.width(), ROW_H)
+            self._row(p, box, path, is_dir)
+            self._rows.append((box, path, is_dir))
+
+        # A hairline scrollbar, only when there is more than fits.
+        if span and visible:
+            bar_h = max(18.0, r.height() * visible / len(rows))
+            top = r.top() + (r.height() - bar_h) * (self._scroll / span)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 46))
+            p.drawRoundedRect(QRectF(r.right() - 2.5, top, 2.5, bar_h), 1.2, 1.2)
 
     # ------------------------------------------------------------------ #
     def _tile(self, p, box: QRectF, path: str) -> None:
@@ -233,44 +423,54 @@ class FilesWidget(WidgetCard):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 26 if hot else 12))
         p.drawRoundedRect(box, 8, 8)
-
-        self._folder(p, QPointF(box.center().x(), box.top() + 15),
-                     QColor(pal.accent))
+        self._folder(p, QPointF(box.center().x(), box.top() + 15))
         name = os.path.basename(path.rstrip("\\/")) or path
         self.text(p, QRectF(box.left() + 3, box.bottom() - 18,
                             box.width() - 6, 15),
-                  self._elide(p, name, box.width() - 8, 9.0), 9.0,
-                  pal.text, align=Qt.AlignHCenter | Qt.AlignVCenter)
+                  self._elide(p, name, box.width() - 8, 9.0), 9.0, pal.text,
+                  align=Qt.AlignHCenter | Qt.AlignVCenter)
 
-    def _row(self, p, box: QRectF, path: str) -> None:
+    def _row(self, p, box: QRectF, path: str, is_dir: bool) -> None:
         pal = self.palette_
         if self._hot == path:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, 20))
             p.drawRoundedRect(box.adjusted(-4, 1, 4, -1), 6, 6)
 
-        self._glyph(p, QPointF(box.left() + 9, box.center().y()), kind_of(path))
+        c = QPointF(box.left() + 9, box.center().y())
+        if is_dir:
+            self._folder(p, c, small=True)
+        else:
+            self._glyph(p, c, kind_of(path))
 
-        # The folder sits right, dimmer. Two files called index.html are only
-        # told apart by where they live, so the location has to be on the row -
-        # but it must not compete with the name for attention.
-        parent = os.path.basename(os.path.dirname(path))
-        p.setFont(self.font(8.5))
-        w_parent = min(p.fontMetrics().horizontalAdvance(parent) + 6,
-                       box.width() * 0.36)
-        self.text(p, QRectF(box.right() - w_parent, box.top(), w_parent,
-                            box.height()),
-                  self._elide(p, parent, w_parent, 8.5), 8.5, pal.text_dim,
-                  align=Qt.AlignRight | Qt.AlignVCenter)
+        right = 0.0
+        if self.cwd is None:
+            # In the home view a file's folder is the only thing telling two
+            # index.html apart, so it earns the right-hand column. Inside a
+            # folder every row shares it, and repeating it would be noise.
+            parent = os.path.basename(os.path.dirname(path))
+            p.setFont(self.font(8.5))
+            right = min(p.fontMetrics().horizontalAdvance(parent) + 6,
+                        box.width() * 0.36)
+            self.text(p, QRectF(box.right() - right, box.top(), right,
+                                box.height()),
+                      self._elide(p, parent, right, 8.5), 8.5, pal.text_dim,
+                      align=Qt.AlignRight | Qt.AlignVCenter)
 
-        avail = box.width() - 22 - w_parent - 6
+        avail = box.width() - 22 - right - 6
         self.text(p, QRectF(box.left() + 21, box.top(), avail, box.height()),
-                  self._elide(p, os.path.basename(path), avail, 9.5),
-                  9.5, pal.text)
+                  self._elide(p, os.path.basename(path), avail, 9.5), 9.5,
+                  pal.text)
 
     # -- drawn marks ----------------------------------------------------- #
-    def _folder(self, p, c: QPointF, col: QColor) -> None:
-        w, h = 13.0, 10.0
+    def _folder(self, p, c: QPointF, small: bool = False) -> None:
+        """White, deliberately.
+
+        The accent tinted every folder the same hue as the progress bars and
+        pills elsewhere on the board, which made them read as controls rather
+        than as objects.
+        """
+        w, h = (11.0, 8.6) if small else (13.0, 10.0)
         x, y = c.x() - w / 2, c.y() - h / 2
         path = QPainterPath()
         path.moveTo(x, y + h)
@@ -281,8 +481,31 @@ class FilesWidget(WidgetCard):
         path.lineTo(x + w, y + h)
         path.closeSubpath()
         p.setPen(Qt.NoPen)
-        p.setBrush(col)
+        p.setBrush(QColor(255, 255, 255, 236))
         p.drawPath(path)
+
+    def _chevron(self, p, c: QPointF, col: QColor) -> None:
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(col, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPolyline([QPointF(c.x() + 2.4, c.y() - 4.4),
+                        QPointF(c.x() - 2.4, c.y()),
+                        QPointF(c.x() + 2.4, c.y() + 4.4)])
+
+    def _magnifier(self, p, c: QPointF, col: QColor) -> None:
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(col, 1.3, Qt.SolidLine, Qt.RoundCap))
+        p.drawEllipse(QRectF(c.x() - 4.6, c.y() - 4.6, 7.2, 7.2))
+        p.drawLine(QPointF(c.x() + 2.4, c.y() + 2.4),
+                   QPointF(c.x() + 4.8, c.y() + 4.8))
+
+    def _grip(self, p) -> None:
+        """Three ticks in the corner - the only affordance saying "drag me"."""
+        c = self.card_rect()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 64), 1.2, Qt.SolidLine, Qt.RoundCap))
+        for d in (4.0, 8.0, 12.0):
+            p.drawLine(QPointF(c.right() - d - 3, c.bottom() - 4),
+                       QPointF(c.right() - 4, c.bottom() - d - 3))
 
     def _glyph(self, p, c: QPointF, kind: str) -> None:
         """One 12px mark per file family.
@@ -352,19 +575,43 @@ class FilesWidget(WidgetCard):
     # ------------------------------------------------------------------ #
     #  Interaction
     # ------------------------------------------------------------------ #
-    def _hit(self, pos) -> Optional[Tuple[str, bool]]:
+    def _in_grip(self, pos) -> bool:
+        c = self.card_rect()
+        return pos.x() > c.right() - GRIP and pos.y() > c.bottom() - GRIP
+
+    def _hit(self, pos):
+        for box, tag in self._chrome:
+            if box.contains(pos):
+                return None, tag
         for box, path, is_dir in self._rows:
             if box.contains(pos):
-                return path, is_dir
-        return None
+                return path, "dir" if is_dir else "file"
+        return None, ""
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton and not self.locked \
+                and self._in_grip(ev.position()):
+            self._resizing = ev.globalPosition().toPoint()
+            self._size0 = (self.width(), self.height())
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
-        hit = None if self._drag_from is not None else self._hit(ev.position())
-        name = hit[0] if hit else None
-        if name != self._hot:
-            self._hot = name
-            self.setCursor(Qt.PointingHandCursor if name else Qt.ArrowCursor)
+        if self._resizing is not None:
+            d = ev.globalPosition().toPoint() - self._resizing
+            self.resize(max(MIN_W, self._size0[0] + d.x()),
+                        max(MIN_H, self._size0[1] + d.y()))
             self.update()
+            ev.accept()
+            return
+        if self._drag_from is None:
+            hot = self._hit(ev.position())[0]
+            if hot != self._hot:
+                self._hot = hot
+                self.update()
+            self.setCursor(Qt.SizeFDiagCursor if self._in_grip(ev.position())
+                           else (Qt.PointingHandCursor if hot else Qt.ArrowCursor))
         super().mouseMoveEvent(ev)
 
     def leaveEvent(self, ev) -> None:
@@ -375,25 +622,77 @@ class FilesWidget(WidgetCard):
         super().leaveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self._resizing is not None:
+            self._resizing = None
+            self.config["w"], self.config["h"] = self.width(), self.height()
+            self.changed.emit()          # remember the shape across launches
+            ev.accept()
+            return
         if ev.button() == Qt.LeftButton and self._drag_from is None:
-            hit = self._hit(ev.position())
-            if hit:
-                self._open(hit[0], hit[1])
+            path, tag = self._hit(ev.position())
+            if tag == "back":
+                self._back()
+            elif tag == "dir":
+                self._go(path)
+            elif tag == "file":
+                self._open(path)
+            if tag:
                 ev.accept()
                 return
         super().mouseReleaseEvent(ev)
 
-    def _open(self, path: str, is_dir: bool) -> None:
-        """Hand it to the shell, exactly as double-clicking it in Explorer would.
+    def wheelEvent(self, ev) -> None:
+        self._scroll = max(0.0, self._scroll - ev.angleDelta().y() / 120.0 * 3)
+        self.update()
+        ev.accept()
 
-        Never raises: a file can be deleted between the shell listing it and the
-        click landing, and a widget that dies over that is worse than one that
-        quietly does nothing.
+    def keyPressEvent(self, ev) -> None:
+        key = ev.key()
+        if key == Qt.Key_Escape:
+            if self.query:
+                self.query = ""
+            else:
+                self._go(None, remember=False)
+        elif key == Qt.Key_Backspace:
+            # Editing the filter comes first; on an empty filter it means "go
+            # up", which is what Backspace does in Explorer.
+            if self.query:
+                self.query = self.query[:-1]
+            else:
+                self._up()
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            if self._rows:
+                _box, path, is_dir = self._rows[0]
+                self._go(path) if is_dir else self._open(path)
+        elif key == Qt.Key_Up and ev.modifiers() & Qt.AltModifier:
+            self._up()
+        elif key == Qt.Key_Down:
+            self._scroll += 1
+        elif key == Qt.Key_Up:
+            self._scroll = max(0.0, self._scroll - 1)
+        elif ev.text() and ev.text().isprintable():
+            self.query += ev.text()
+            self._scroll = 0.0
+        else:
+            super().keyPressEvent(ev)
+            return
+        self.update()
+        ev.accept()
+
+    # ------------------------------------------------------------------ #
+    def _explorer(self, path: str) -> None:
+        try:
+            subprocess.Popen(["explorer", os.path.normpath(path)])
+        except Exception:
+            pass
+
+    def _open(self, path: str) -> None:
+        """Hand a file to the shell, as double-clicking it in Explorer would.
+
+        Never raises: a file can be deleted between the listing and the click,
+        and a widget that dies over that is worse than one that does nothing.
         """
         try:
-            if is_dir:
-                subprocess.Popen(["explorer", os.path.normpath(path)])
-            else:
-                os.startfile(path)          # the user's own file, on their click
+            os.startfile(path)
         except Exception:
             pass
