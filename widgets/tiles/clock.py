@@ -15,6 +15,7 @@ class ClockWidget(WidgetCard):
     kind = "clock"
     title = "Clock"
     customizable = True
+    allow_image = True     # a photo can sit behind the time
     supported_sizes = ("small", "medium")
     refresh_ms = 1000        # the second hand needs it; nothing else here does
 

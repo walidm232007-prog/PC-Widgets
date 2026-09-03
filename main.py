@@ -1,4 +1,4 @@
-﻿"""
+"""
 PC Widgets - iPhone/Mac-style widgets for the Windows desktop.
 
     python main.py              show the board
@@ -393,8 +393,24 @@ def _check_appearance() -> None:
     assert ap.hue_near(base.good, "#14401f")     # green line, green card
     assert not ap.hue_near(base.bad, "#1f3a5f")  # red line, blue card
     assert not ap.hue_near(base.bad, "#2b2f38")  # grey card is not "red"
+
+    # Only the clock offers a picture background; a missing file falls through
+    # rather than blanking the card, and reset clears every appearance key.
+    assert REGISTRY["clock"].allow_image
+    assert not REGISTRY["calendar"].allow_image
+    clock = REGISTRY["clock"](base, "medium", {"image": "Z:/nope/missing.png"})
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtCore import QRectF
+    probe = QImage(10, 10, QImage.Format_ARGB32_Premultiplied)
+    pp = QPainter(probe)
+    assert clock._paint_image_bg(pp, QRectF(0, 0, 10, 10), None) is False
+    pp.end()
+    clock.config.update({"bg": "#111", "image": "x"})
+    clock.reset_appearance()
+    assert not any(k in clock.config for k in ("bg", "fg", "fill", "image"))
+    clock.deleteLater()
     print("  appearance: palette override, readable defaults, Notes contrast, "
-          "Stocks clash guard")
+          "Stocks clash guard, clock image + reset")
 
 
 def _check_audio_gate(pal) -> None:

@@ -15,10 +15,13 @@ chrome, the dragging, the menu and the persistence; the tile only draws.
 
 from __future__ import annotations
 
+import os
+
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QImage,
     QAction, QBrush, QColor, QFont, QFontMetrics, QLinearGradient, QPainter,
     QPainterPath, QPen,
 )
@@ -204,6 +207,7 @@ class WidgetCard(QWidget):
     # which is a tenth of a core if it repaints 25 times a second for nothing.
     repaint_on_tick = True
     customizable = False        # opt-in to per-card colour customization
+    allow_image = False         # opt-in to a picture background
 
     moved = Signal()
     changed = Signal()          # size or config changed; board should persist
@@ -219,6 +223,7 @@ class WidgetCard(QWidget):
         # base is what a theme change updates. See widgets/core/appearance.py.
         self._base_palette = palette
         self.palette_ = self._effective_palette()
+        self._img_cache: dict = {}      # (path, w, h) -> cover-fitted QImage
         self.locked = False
         self.snap_to_grid = False        # free placement by default
         self.opacity_ = 1.0
@@ -304,6 +309,50 @@ class WidgetCard(QWidget):
     # ------------------------------------------------------------------ #
     #  Appearance
     # ------------------------------------------------------------------ #
+    def _paint_image_bg(self, p: QPainter, r: QRectF, path) -> bool:
+        """Draw a chosen picture as the card background. Returns whether it did.
+
+        Cover-fitted and centre-cropped so the card is always filled whatever
+        the photo's shape, clipped to the squircle so the rounded corners hold,
+        then framed with a soft top-and-bottom scrim. The scrim is what keeps
+        white text off a bright sky legible without flattening the middle of the
+        image - the same trick iOS uses for widgets over a photo. A missing or
+        unreadable file falls straight through to the normal background.
+        """
+        if not self.allow_image:
+            return False
+        src = self.config.get("image")
+        if not src or not os.path.isfile(src):
+            return False
+
+        key = (src, int(r.width()), int(r.height()))
+        scaled = self._img_cache.get(key)
+        if scaled is None:
+            img = QImage(src)
+            if img.isNull():
+                return False
+            scaled = img.scaled(int(r.width()), int(r.height()),
+                                Qt.KeepAspectRatioByExpanding,
+                                Qt.SmoothTransformation)
+            self._img_cache = {key: scaled}     # only the current size is wanted
+        sx = max(0, (scaled.width() - int(r.width())) // 2)
+        sy = max(0, (scaled.height() - int(r.height())) // 2)
+
+        path2 = squircle(r, RADIUS)
+        p.save()
+        p.setClipPath(path2)
+        p.drawImage(r, scaled, QRectF(sx, sy, r.width(), r.height()))
+        scrim = QLinearGradient(r.left(), r.top(), r.left(), r.bottom())
+        scrim.setColorAt(0.0, QColor(0, 0, 0, 105))
+        scrim.setColorAt(0.32, QColor(0, 0, 0, 24))
+        scrim.setColorAt(0.7, QColor(0, 0, 0, 24))
+        scrim.setColorAt(1.0, QColor(0, 0, 0, 120))
+        p.setBrush(QBrush(scrim))
+        p.setPen(Qt.NoPen)
+        p.drawRect(r)
+        p.restore()
+        return True
+
     def _effective_palette(self) -> Palette:
         if not self.customizable:
             return self._base_palette
@@ -336,7 +385,7 @@ class WidgetCard(QWidget):
         self.update()
 
     def reset_appearance(self) -> None:
-        for key in ("bg", "fg", "fill"):
+        for key in ("bg", "fg", "fill", "image"):
             self.config.pop(key, None)
         self.palette_ = self._effective_palette()
         self.on_appearance_changed()
@@ -403,42 +452,45 @@ class WidgetCard(QWidget):
         # Frosted material: the blurred desktop showing through, then a tint on
         # top. The blur is clipped to the squircle, which is the whole reason
         # it's done in-process rather than handed to DWM.
-        # A card set to a solid background opts out of the frosted glass
-        # entirely - a flat fill at full opacity, which is the whole point of
-        # the option. Otherwise it is the usual blurred desktop plus a tint.
+        # Three backgrounds, in order of precedence: a chosen picture, a flat
+        # colour, or the frosted desktop. A picture and a solid colour both opt
+        # out of the glass entirely - that is the whole point of choosing them.
+        image = self._paint_image_bg(p, r, path)
         frosted = False
-        if not self.solid_bg and self.glass is not None:
+        if not image and not self.solid_bg and self.glass is not None:
             p.save()
             p.setClipPath(path)
             frosted = self.glass.paint_into(
                 p, r, self.x() + int(MARGIN), self.y() + int(MARGIN))
             p.restore()
 
-        fill = QColor(pal.card)
-        if self.solid_bg:
-            fill.setAlpha(255)
-        elif frosted:
-            # Low alpha so the wallpaper genuinely reads through, the way an
-            # Apple widget does. Opaque enough to keep text legible over a busy
-            # picture, which is what the tint is for.
-            fill.setAlpha(self.glass_tint)
-        else:
-            fill.setAlpha(224 if pal.dark else 232)
-        p.setBrush(fill)
-        p.drawPath(path)
+        if not image:
+            fill = QColor(pal.card)
+            if self.solid_bg:
+                fill.setAlpha(255)
+            elif frosted:
+                # Low alpha so the wallpaper genuinely reads through, the way an
+                # Apple widget does. Opaque enough to keep text legible over a
+                # busy picture, which is what the tint is for.
+                fill.setAlpha(self.glass_tint)
+            else:
+                fill.setAlpha(224 if pal.dark else 232)
+            p.setBrush(fill)
+            p.drawPath(path)
 
-        # No hairline border. A drawn 1px stroke is what made these read as
-        # sharp-edged; the shadow already separates the card from the desktop.
-        # All that's left is a very soft inner light along the top, clipped to
-        # the card so it can never show as a stray line.
-        p.save()
-        p.setClipPath(path)
-        sheen = QLinearGradient(r.left(), r.top(), r.left(), r.top() + 46)
-        sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
-        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.setBrush(QBrush(sheen))
-        p.drawRect(r)
-        p.restore()
+        # A soft inner light along the top - the sheen that makes frosted
+        # glass read as glass. It belongs only *on* glass: over a flat colour it
+        # is the grey glare that gave a solid card a smudged top edge, and over a
+        # picture it would fog the image. So it is skipped for both.
+        if not self.solid_bg and not image:
+            p.save()
+            p.setClipPath(path)
+            sheen = QLinearGradient(r.left(), r.top(), r.left(), r.top() + 46)
+            sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
+            sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+            p.setBrush(QBrush(sheen))
+            p.drawRect(r)
+            p.restore()
 
         if self._hover and not self.locked:
             ring = QColor(pal.accent)

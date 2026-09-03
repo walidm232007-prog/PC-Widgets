@@ -159,10 +159,21 @@ def add_menu(card, menu) -> None:
                  note=("Typed text stays readable automatically"
                        if card.kind == "notes" else ""))
 
+    if getattr(card, "allow_image", False):
+        sub.addSeparator()
+        pick = QAction("Background image…", sub)
+        pick.triggered.connect(lambda: _pick_image(card))
+        sub.addAction(pick)
+        if card.config.get("image"):
+            clear = QAction("Clear background image", sub)
+            clear.triggered.connect(lambda: card.set_appearance("image", None))
+            sub.addAction(clear)
+
     sub.addSeparator()
     reset = QAction("Reset appearance", sub)
     reset.setEnabled(bool(card.config.get("bg") or card.config.get("fg")
-                          or card.config.get("fill")))
+                          or card.config.get("fill")
+                          or card.config.get("image")))
     reset.triggered.connect(card.reset_appearance)
     sub.addAction(reset)
 
@@ -209,3 +220,14 @@ def _pick_custom(card, key: str) -> None:
                                 "Background" if key == "bg" else "Text color")
     if col.isValid():
         card.set_appearance(key, col.name())
+
+
+def _pick_image(card) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    start = card.config.get("image") or ""
+    path, _f = QFileDialog.getOpenFileName(
+        card, "Choose a background image", start,
+        "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+    if path:
+        card.set_appearance("image", path)
