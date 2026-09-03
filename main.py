@@ -367,11 +367,15 @@ def _check_appearance() -> None:
 
     base = build("dark", "blue")
 
-    # Media must stay uncustomizable; the requested tiles must opt in.
+    # Every tile but the media player is customizable and takes a picture
+    # background; the media player stays exactly as it was.
     assert not REGISTRY["media"].customizable, "media should stay as-is"
-    for kind in ("clock", "system", "disk", "calendar", "workspace",
-                 "notes", "stocks"):
-        assert REGISTRY[kind].customizable, f"{kind} should be customizable"
+    assert not getattr(REGISTRY["media"], "allow_image", False)
+    for kind, cls in REGISTRY.items():
+        if kind == "media":
+            continue
+        assert cls.customizable, f"{kind} should be customizable"
+        assert cls.allow_image, f"{kind} should accept a background image"
 
     # bg + fg override the palette; unset falls through unchanged.
     assert ap.effective(base, {}) is base
@@ -397,7 +401,7 @@ def _check_appearance() -> None:
     # Only the clock offers a picture background; a missing file falls through
     # rather than blanking the card, and reset clears every appearance key.
     assert REGISTRY["clock"].allow_image
-    assert not REGISTRY["calendar"].allow_image
+    assert not getattr(REGISTRY["media"], "allow_image", False)
     clock = REGISTRY["clock"](base, "medium", {"image": "Z:/nope/missing.png"})
     from PySide6.QtGui import QImage, QPainter
     from PySide6.QtCore import QRectF

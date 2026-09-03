@@ -21,6 +21,7 @@ from ..core.store import notes_path
 
 class NotesWidget(WidgetCard):
     kind = "notes"
+    allow_image = True
     title = "Notes"
     customizable = True
     supported_sizes = ("small", "medium", "large")

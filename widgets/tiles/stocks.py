@@ -95,6 +95,7 @@ def _money(v: Optional[float]) -> str:
 
 class StocksWidget(WidgetCard):
     kind = "stocks"
+    allow_image = True
     title = "Stocks"
     customizable = True
     supported_sizes = ("small", "medium", "large")

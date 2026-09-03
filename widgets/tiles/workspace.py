@@ -38,6 +38,7 @@ def _short(seconds: float) -> str:
 
 class WorkspaceWidget(WidgetCard):
     kind = "workspace"
+    allow_image = True
     title = "Workspace"
     customizable = True
     supported_sizes = ("small", "medium", "large")

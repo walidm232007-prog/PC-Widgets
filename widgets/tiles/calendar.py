@@ -13,6 +13,7 @@ from ..core.card import WidgetCard
 
 class CalendarWidget(WidgetCard):
     kind = "calendar"
+    allow_image = True
     title = "Calendar"
     customizable = True
     supported_sizes = ("small", "medium", "large")

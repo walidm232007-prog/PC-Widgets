@@ -163,6 +163,8 @@ def fetch(lat: float, lon: float, place: str, unit: str) -> Forecast:
 
 class WeatherWidget(WidgetCard):
     kind = "weather"
+    customizable = True
+    allow_image = True
     title = "Weather"
     supported_sizes = ("small", "medium", "large")
     refresh_ms = 15 * 60 * 1000        # the forecast does not change faster

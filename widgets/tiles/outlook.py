@@ -32,6 +32,8 @@ SPINES = ("#0a84ff", "#ff9f0a", "#32d74b", "#bf5af2", "#ff375f", "#64d2ff")
 
 class OutlookWidget(WidgetCard):
     kind = "outlook"
+    customizable = True
+    allow_image = True
     title = "Calendar"
     supported_sizes = ("medium", "large")
     refresh_ms = 30_000            # the agenda does not move fast

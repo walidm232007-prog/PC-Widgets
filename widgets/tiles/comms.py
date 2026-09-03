@@ -55,6 +55,8 @@ KIND_COLOUR = {
 
 class CommsWidget(WidgetCard):
     kind = "comms"
+    customizable = True
+    allow_image = True
     title = "Comms"
     supported_sizes = ("medium", "large")
     refresh_ms = 2000          # a directory listing; there is no hurry

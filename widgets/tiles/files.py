@@ -112,6 +112,8 @@ def _fallback_places() -> List[str]:
 
 class FilesWidget(WidgetCard):
     kind = "files"
+    customizable = True
+    allow_image = True
     title = "Files"
     supported_sizes = ("small", "medium", "large")
     wants_focus = True        # the filter box has to be typeable

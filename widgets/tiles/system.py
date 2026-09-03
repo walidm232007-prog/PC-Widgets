@@ -30,6 +30,7 @@ def _fmt_uptime(seconds: float) -> str:
 
 class SystemWidget(WidgetCard):
     kind = "system"
+    allow_image = True
     title = "System"
     customizable = True
     supported_sizes = ("small", "medium")
@@ -129,6 +130,7 @@ class SystemWidget(WidgetCard):
 
 class DiskWidget(WidgetCard):
     kind = "disk"
+    allow_image = True
     title = "Storage"
     customizable = True
     supported_sizes = ("small", "medium")
