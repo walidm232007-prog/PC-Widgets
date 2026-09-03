@@ -31,6 +31,7 @@ def _fmt_uptime(seconds: float) -> str:
 class SystemWidget(WidgetCard):
     kind = "system"
     title = "System"
+    customizable = True
     supported_sizes = ("small", "medium")
     refresh_ms = 1500
 
@@ -129,6 +130,7 @@ class SystemWidget(WidgetCard):
 class DiskWidget(WidgetCard):
     kind = "disk"
     title = "Storage"
+    customizable = True
     supported_sizes = ("small", "medium")
     refresh_ms = 30_000        # disk usage does not move fast
 

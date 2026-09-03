@@ -14,6 +14,7 @@ from ..core.card import PAD, Fader, WidgetCard
 class ClockWidget(WidgetCard):
     kind = "clock"
     title = "Clock"
+    customizable = True
     supported_sizes = ("small", "medium")
     refresh_ms = 1000        # the second hand needs it; nothing else here does
 

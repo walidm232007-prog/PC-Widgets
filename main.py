@@ -134,6 +134,7 @@ def selftest() -> int:
     _check_backend_recovery()
     _check_vendored_closure()
     _check_agent_bus()
+    _check_appearance()
     print("all good.")
     return 0
 
@@ -355,6 +356,45 @@ def _check_backend_recovery() -> None:
     assert m.MediaSource("nonsense").prefer == "auto"
     print("  backend recovery: falls back, holds, comes back, retries a failed "
           "import; selector pins to one player")
+
+
+def _check_appearance() -> None:
+    """Per-card colour customization: the palette override, Notes' contrast text,
+    and the Stocks graph-clash-to-white."""
+    from widgets.core import appearance as ap
+    from widgets.core.board import REGISTRY
+    from widgets.core.palette import build
+
+    base = build("dark", "blue")
+
+    # Media must stay uncustomizable; the requested tiles must opt in.
+    assert not REGISTRY["media"].customizable, "media should stay as-is"
+    for kind in ("clock", "system", "disk", "calendar", "workspace",
+                 "notes", "stocks"):
+        assert REGISTRY[kind].customizable, f"{kind} should be customizable"
+
+    # bg + fg override the palette; unset falls through unchanged.
+    assert ap.effective(base, {}) is base
+    pal = ap.effective(base, {"bg": "#4a1420", "fg": "#ffcf70"})
+    assert pal.card == "#4a1420" and pal.text == "#ffcf70"
+    assert pal.text_dim not in (base.text_dim, pal.text), "dim step not re-derived"
+
+    # A background with no text colour still reads: light -> dark, dark -> light.
+    assert ap.effective(base, {"bg": "#f4f5f7"}).text == "#101216"
+    assert ap.effective(base, {"bg": "#0b0d12"}).text == "#ffffff"
+
+    # Notes keeps typed text in contrast with a solid background.
+    assert ap.contrast_text("#000000") == "#ffffff"
+    assert ap.contrast_text("#ffffff") == "#101216"
+
+    # Stocks: a line only goes white when it would sit on its own hue - a dark
+    # wine card counts as red, a grey card does not.
+    assert ap.hue_near(base.bad, "#7a1420")      # red line, red-wine card
+    assert ap.hue_near(base.good, "#14401f")     # green line, green card
+    assert not ap.hue_near(base.bad, "#1f3a5f")  # red line, blue card
+    assert not ap.hue_near(base.bad, "#2b2f38")  # grey card is not "red"
+    print("  appearance: palette override, readable defaults, Notes contrast, "
+          "Stocks clash guard")
 
 
 def _check_audio_gate(pal) -> None:

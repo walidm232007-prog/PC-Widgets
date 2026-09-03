@@ -22,6 +22,7 @@ from ..core.store import notes_path
 class NotesWidget(WidgetCard):
     kind = "notes"
     title = "Notes"
+    customizable = True
     supported_sizes = ("small", "medium", "large")
     refresh_ms = 0        # purely user-driven
     wants_focus = True    # it is a text field; it has to be typeable
@@ -78,10 +79,19 @@ class NotesWidget(WidgetCard):
         pal = self.palette_
         f = QFont("Segoe UI", 10)
         self.edit.setFont(f)
+        # The one tile where the text colour is not the user's to set: notes are
+        # for reading back, so they stay in contrast with the background no
+        # matter what it is - the request was explicit about this. On glass
+        # there is no single background colour, so the theme's own text is used.
+        from ..core import appearance
+        if self.solid_bg and self.config.get("bg"):
+            ink = appearance.contrast_text(self.config["bg"])
+        else:
+            ink = pal.text
         self.edit.setStyleSheet(
             "QPlainTextEdit {"
             "  background: transparent; border: none;"
-            f" color: {pal.text};"
+            f" color: {ink};"
             f" selection-background-color: {pal.accent};"
             "  selection-color: #ffffff;"
             "}"
@@ -89,6 +99,9 @@ class NotesWidget(WidgetCard):
 
     def set_palette_(self, palette) -> None:
         super().set_palette_(palette)
+        self._restyle()
+
+    def on_appearance_changed(self) -> None:
         self._restyle()
 
     def _relayout(self) -> None:

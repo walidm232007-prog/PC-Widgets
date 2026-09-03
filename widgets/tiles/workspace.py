@@ -39,6 +39,7 @@ def _short(seconds: float) -> str:
 class WorkspaceWidget(WidgetCard):
     kind = "workspace"
     title = "Workspace"
+    customizable = True
     supported_sizes = ("small", "medium", "large")
     refresh_ms = 90            # animation, not data; the bus poll is throttled
 

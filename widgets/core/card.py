@@ -203,6 +203,7 @@ class WidgetCard(QWidget):
     # has actually changed - the media player's frosted glass costs 4ms a frame,
     # which is a tenth of a core if it repaints 25 times a second for nothing.
     repaint_on_tick = True
+    customizable = False        # opt-in to per-card colour customization
 
     moved = Signal()
     changed = Signal()          # size or config changed; board should persist
@@ -211,9 +212,13 @@ class WidgetCard(QWidget):
     def __init__(self, palette: Palette, size: str = "small",
                  config: Optional[dict] = None) -> None:
         super().__init__(None)
-        self.palette_ = palette
         self.size_class = size if size in self.supported_sizes else self.supported_sizes[0]
         self.config = dict(config or {})
+        # The theme palette is kept apart from the one the tile actually paints
+        # with: a customised card overrides colours on a derived copy, and the
+        # base is what a theme change updates. See widgets/core/appearance.py.
+        self._base_palette = palette
+        self.palette_ = self._effective_palette()
         self.locked = False
         self.snap_to_grid = False        # free placement by default
         self.opacity_ = 1.0
@@ -299,9 +304,48 @@ class WidgetCard(QWidget):
     # ------------------------------------------------------------------ #
     #  Appearance
     # ------------------------------------------------------------------ #
+    def _effective_palette(self) -> Palette:
+        if not self.customizable:
+            return self._base_palette
+        from . import appearance
+        return appearance.effective(self._base_palette, self.config)
+
+    @property
+    def solid_bg(self) -> bool:
+        """True when the card is a flat fill rather than frosted glass."""
+        if not self.customizable:
+            return False
+        from . import appearance
+        return appearance.is_solid(self.config)
+
     def set_palette_(self, palette: Palette) -> None:
-        self.palette_ = palette
+        # A theme change updates the base; the tile keeps its own overrides.
+        self._base_palette = palette
+        self.palette_ = self._effective_palette()
         self.update()
+
+    def set_appearance(self, key: str, value) -> None:
+        """Write one appearance key, re-derive the palette, persist, repaint."""
+        if value is None:
+            self.config.pop(key, None)
+        else:
+            self.config[key] = value
+        self.palette_ = self._effective_palette()
+        self.on_appearance_changed()
+        self.changed.emit()
+        self.update()
+
+    def reset_appearance(self) -> None:
+        for key in ("bg", "fg", "fill"):
+            self.config.pop(key, None)
+        self.palette_ = self._effective_palette()
+        self.on_appearance_changed()
+        self.changed.emit()
+        self.update()
+
+    def on_appearance_changed(self) -> None:
+        """Hook for tiles that hold colour outside the palette (Notes' editor)."""
+        pass
 
     def set_size_class(self, size: str) -> None:
         if size not in self.supported_sizes or size == self.size_class:
@@ -359,8 +403,11 @@ class WidgetCard(QWidget):
         # Frosted material: the blurred desktop showing through, then a tint on
         # top. The blur is clipped to the squircle, which is the whole reason
         # it's done in-process rather than handed to DWM.
+        # A card set to a solid background opts out of the frosted glass
+        # entirely - a flat fill at full opacity, which is the whole point of
+        # the option. Otherwise it is the usual blurred desktop plus a tint.
         frosted = False
-        if self.glass is not None:
+        if not self.solid_bg and self.glass is not None:
             p.save()
             p.setClipPath(path)
             frosted = self.glass.paint_into(
@@ -368,7 +415,9 @@ class WidgetCard(QWidget):
             p.restore()
 
         fill = QColor(pal.card)
-        if frosted:
+        if self.solid_bg:
+            fill.setAlpha(255)
+        elif frosted:
             # Low alpha so the wallpaper genuinely reads through, the way an
             # Apple widget does. Opaque enough to keep text legible over a busy
             # picture, which is what the tint is for.
@@ -530,6 +579,9 @@ class WidgetCard(QWidget):
             m.addSeparator()
 
         self.context_actions(m)
+        if self.customizable:
+            from . import appearance
+            appearance.add_menu(self, m)
         if not m.actions()[-1].isSeparator():
             m.addSeparator()
 

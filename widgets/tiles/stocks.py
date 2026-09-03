@@ -96,6 +96,7 @@ def _money(v: Optional[float]) -> str:
 class StocksWidget(WidgetCard):
     kind = "stocks"
     title = "Stocks"
+    customizable = True
     supported_sizes = ("small", "medium", "large")
     refresh_ms = 2 * 60 * 1000
 
@@ -179,7 +180,19 @@ class StocksWidget(WidgetCard):
         pal = self.palette_
         if q.error or q.price is None:
             return pal.text_faint
-        return pal.good if q.up else pal.bad
+        colour = pal.good if q.up else pal.bad
+        # The graph keeps its true green and red under every other setting -
+        # customization deliberately leaves pal.good and pal.bad alone. The one
+        # exception is the clash the request called out: a green line on a green
+        # card, or red on red, disappears into its own background, so there it
+        # goes white. Judged against the chosen background colour, which is what
+        # "if the background is red" means.
+        bg = self.config.get("bg")
+        if bg:
+            from ..core import appearance
+            if appearance.hue_near(colour, bg):
+                return "#ffffff"
+        return colour
 
     def _hero(self, p, r: QRectF, q: Quote) -> None:
         """Small size: one symbol, big, with its intraday shape behind."""
@@ -231,9 +244,14 @@ class StocksWidget(WidgetCard):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(tint))
         p.drawRoundedRect(pill, 7, 7)
+        # The label contrasts with the pill, not a fixed white - when the clash
+        # guard turns the pill white (red line on a red card) white text would
+        # vanish into it.
+        from ..core import appearance
+        ink = appearance.contrast_text(tint) if tint == "#ffffff" else "#ffffff"
         self.text(p, pill,
                   "—" if q.error else f"{'+' if q.up else ''}{q.change_pct:.2f}%",
-                  9, "#ffffff", QFont.DemiBold, align=Qt.AlignCenter)
+                  9, ink, QFont.DemiBold, align=Qt.AlignCenter)
 
     def _spark(self, p, rect: QRectF, values: List[float], colour: str,
                fill: bool = False) -> None:

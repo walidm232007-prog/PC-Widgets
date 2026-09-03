@@ -14,6 +14,7 @@ from ..core.card import WidgetCard
 class CalendarWidget(WidgetCard):
     kind = "calendar"
     title = "Calendar"
+    customizable = True
     supported_sizes = ("small", "medium", "large")
     refresh_ms = 60_000        # only needs to notice midnight
 
