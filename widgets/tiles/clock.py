@@ -10,6 +10,16 @@ from PySide6.QtGui import QColor, QFont, QPen
 
 from ..core.card import PAD, Fader, WidgetCard
 
+# The time's typography, offered in the right-click menu. Qt synthesises any
+# face the font lacks, so these all work on the fallback stack too.
+TIME_WEIGHTS = (
+    ("Thin", QFont.Thin), ("Light", QFont.Light), ("Regular", QFont.Normal),
+    ("Medium", QFont.Medium), ("Semibold", QFont.DemiBold),
+    ("Bold", QFont.Bold), ("Heavy", QFont.Black),
+)
+TIME_WIDTHS = (("Condensed", 78), ("Normal", 100), ("Wide", 122), ("Extra wide", 140))
+DEFAULT_WEIGHT = QFont.DemiBold
+
 
 class ClockWidget(WidgetCard):
     kind = "clock"
@@ -136,6 +146,73 @@ class ClockWidget(WidgetCard):
             self._draw_block(p, r, self._prev, 1.0 - t)
         self._draw_block(p, r, self._shown, t if self._fade.active else 1.0)
 
+    def context_actions(self, menu) -> None:
+        """A Time style submenu: weight, width and italic for the digits."""
+        from PySide6.QtGui import QAction, QActionGroup
+
+        style = menu.addMenu("Time style")
+
+        wsub = style.addMenu("Weight")
+        wg = QActionGroup(wsub)
+        wg.setExclusive(True)
+        cur_w = int(self.config.get("time_weight", DEFAULT_WEIGHT))
+        for name, val in TIME_WEIGHTS:
+            a = QAction(name, wsub, checkable=True)
+            a.setChecked(cur_w == val)
+            a.triggered.connect(lambda _c=False, v=val: self._set_time("time_weight", v))
+            wg.addAction(a)
+            wsub.addAction(a)
+
+        dsub = style.addMenu("Width")
+        dg = QActionGroup(dsub)
+        dg.setExclusive(True)
+        cur_s = int(self.config.get("time_stretch", 0)) or 100
+        for name, val in TIME_WIDTHS:
+            a = QAction(name, dsub, checkable=True)
+            a.setChecked(cur_s == val)
+            # Normal is stored as absent, so a default clock carries no width key.
+            a.triggered.connect(
+                lambda _c=False, v=val: self._set_time("time_stretch",
+                                                       None if v == 100 else v))
+            dg.addAction(a)
+            dsub.addAction(a)
+
+        italic = QAction("Italic", style, checkable=True)
+        italic.setChecked(bool(self.config.get("time_italic", False)))
+        italic.toggled.connect(
+            lambda on: self._set_time("time_italic", True if on else None))
+        style.addAction(italic)
+
+        style.addSeparator()
+        reset = QAction("Reset time style", style)
+        reset.setEnabled(any(k in self.config
+                             for k in ("time_weight", "time_stretch", "time_italic")))
+        reset.triggered.connect(self._reset_time)
+        style.addAction(reset)
+
+    def _set_time(self, key: str, value) -> None:
+        if value is None:
+            self.config.pop(key, None)
+        else:
+            self.config[key] = value
+        self.changed.emit()          # persist with the layout
+        self.update()
+
+    def _reset_time(self) -> None:
+        for k in ("time_weight", "time_stretch", "time_italic"):
+            self.config.pop(k, None)
+        self.changed.emit()
+        self.update()
+
+    def _time_font(self, size: float):
+        """The time's font, built from the saved weight, italic and width."""
+        return self.font(
+            size,
+            int(self.config.get("time_weight", DEFAULT_WEIGHT)),
+            italic=bool(self.config.get("time_italic", False)),
+            stretch=int(self.config.get("time_stretch", 0)),
+        )
+
     def _draw_block(self, p, r: QRectF, block, alpha: float) -> None:
         if block is None or alpha <= 0.004:
             return
@@ -148,25 +225,29 @@ class ClockWidget(WidgetCard):
                   Qt.AlignHCenter | Qt.AlignVCenter)
 
         size = 58
-        p.setFont(self.font(size, QFont.DemiBold))
+        time_font = self._time_font(size)
+        p.setFont(time_font)
         fm = p.fontMetrics()
         gap = 8.0
         w_time = fm.horizontalAdvance(hhmm)
 
-        p.setFont(self.font(17, QFont.DemiBold))
+        suffix_font = self._time_font(17)
+        p.setFont(suffix_font)
         w_suffix = p.fontMetrics().horizontalAdvance(suffix)
 
         block = w_time + gap + w_suffix
         left = r.left() + (r.width() - block) / 2.0
         band = QRectF(r.left(), r.top() + 20, r.width(), r.height() - 20)
 
-        self.text(p, QRectF(left, band.top(), w_time, band.height()),
-                  hhmm, size, pal.text, QFont.DemiBold,
-                  Qt.AlignLeft | Qt.AlignVCenter)
+        p.setFont(time_font)
+        p.setPen(QColor(pal.text))
+        p.drawText(QRectF(left, band.top(), w_time, band.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, hhmm)
         # AM/PM sits on the time's baseline rather than its centre.
-        self.text(p, QRectF(left + w_time + gap,
-                            band.top() + band.height() / 2 - 2,
-                            w_suffix + 4, 26),
-                  suffix, 17, pal.text_dim, QFont.DemiBold,
-                  Qt.AlignLeft | Qt.AlignVCenter)
+        p.setFont(suffix_font)
+        p.setPen(QColor(pal.text_dim))
+        p.drawText(QRectF(left + w_time + gap,
+                          band.top() + band.height() / 2 - 2,
+                          w_suffix + 4, 26),
+                   Qt.AlignLeft | Qt.AlignVCenter, suffix)
         p.setOpacity(1.0)

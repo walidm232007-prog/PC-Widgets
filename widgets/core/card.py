@@ -507,10 +507,13 @@ class WidgetCard(QWidget):
         self.paint_content(p, inner)
 
     # -- painting helpers shared by every tile --------------------------- #
-    def font(self, size: float, weight: int = QFont.Normal) -> QFont:
+    def font(self, size: float, weight: int = QFont.Normal,
+             italic: bool = False, stretch: int = 0) -> QFont:
         """Apple-set type: optical size picked by point size, plus SF's
-        size-dependent tracking. See :mod:`widgets.core.typography`."""
-        return typography.font(size, weight)
+        size-dependent tracking. See :mod:`widgets.core.typography`.
+
+        ``italic`` and ``stretch`` pass through for the clock's time styling."""
+        return typography.font(size, weight, italic=italic, stretch=stretch)
 
     def text(self, p: QPainter, rect: QRectF, s: str, size: int,
              color: str, weight: int = QFont.Normal,

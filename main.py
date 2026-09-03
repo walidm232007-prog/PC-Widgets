@@ -412,9 +412,30 @@ def _check_appearance() -> None:
     clock.config.update({"bg": "#111", "image": "x"})
     clock.reset_appearance()
     assert not any(k in clock.config for k in ("bg", "fg", "fill", "image"))
+
+    # Clock time styling: weight, italic and width must each change the font,
+    # and a weight loaded as a plain int (which is how JSON stores it) must not
+    # blow up PySide6's setWeight.
+    from PySide6.QtGui import QFont, QFontMetricsF
+    ClockCls = REGISTRY["clock"]
+    def tw(cfg):
+        c = ClockCls(base, "medium", cfg)
+        f = c._time_font(58)
+        adv = QFontMetricsF(f).horizontalAdvance("6:30")
+        c.deleteLater()
+        return f, adv
+    f0, w0 = tw({})
+    fT, wT = tw({"time_weight": int(QFont.Thin)})       # int, from JSON
+    fH, _  = tw({"time_weight": int(QFont.Black)})
+    fI, _  = tw({"time_italic": True})
+    fC, wC = tw({"time_stretch": 78})
+    fW, wW = tw({"time_stretch": 140})
+    assert int(fT.weight()) == 100 and int(fH.weight()) == 900
+    assert fI.italic() and not f0.italic()
+    assert wC < w0 < wW, f"width did not scale: {wC} {w0} {wW}"
     clock.deleteLater()
     print("  appearance: palette override, readable defaults, Notes contrast, "
-          "Stocks clash guard, clock image + reset")
+          "Stocks clash guard, clock image + reset, time weight/italic/width")
 
 
 def _check_audio_gate(pal) -> None:

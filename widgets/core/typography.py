@@ -132,11 +132,25 @@ def tracking_percent(size: float) -> float:
 
 
 def font(size: float, weight: int = QFont.Normal,
-         tracking: bool = True) -> QFont:
-    """A font set the way Apple would set it at this size."""
+         tracking: bool = True, italic: bool = False,
+         stretch: int = 0) -> QFont:
+    """A font set the way Apple would set it at this size.
+
+    ``italic`` and ``stretch`` exist for the clock's customizable time. Qt
+    synthesises both when the family has no dedicated face - an oblique slant and
+    a horizontal scale - so a widened or italic time works on the fallback stack
+    as well as on SF Pro. ``stretch`` is a percentage (100 = normal); 0 leaves it
+    at the font's own width.
+    """
     f = QFont(family_for(size))
     f.setPointSizeF(float(size))
-    f.setWeight(weight)
+    # Coerce to the Weight enum: a weight loaded from JSON is a plain int,
+    # and PySide6's setWeight rejects those.
+    f.setWeight(QFont.Weight(int(weight)))
+    if italic:
+        f.setItalic(True)
+    if stretch:
+        f.setStretch(int(stretch))
 
     # Windows grid-fits glyphs to whole pixels by default, which sharpens stems
     # at the cost of distorting the letterform - the reason type can look
