@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import sys
 
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
@@ -135,6 +136,7 @@ def selftest() -> int:
     _check_vendored_closure()
     _check_agent_bus()
     _check_appearance()
+    _check_layout_mirror()
     print("all good.")
     return 0
 
@@ -436,6 +438,46 @@ def _check_appearance() -> None:
     clock.deleteLater()
     print("  appearance: palette override, readable defaults, Notes contrast, "
           "Stocks clash guard, clock image + reset, time weight/italic/width")
+
+
+def _check_layout_mirror() -> None:
+    """The saved layout must survive one of its two locations being unreadable.
+
+    A layout that cannot be read comes back as a *default* board - every
+    position, colour and background picture silently gone, which is
+    indistinguishable from the app having forgotten them. This machine's board
+    process has repeatedly been unable to read or write %APPDATA%, so the layout
+    is mirrored beside the app and read from whichever copy is newest.
+    """
+    import tempfile
+    from widgets.core import store as st
+
+    real_appdata = os.environ.get("APPDATA")
+    sandbox = tempfile.mkdtemp()
+    os.environ["APPDATA"] = sandbox
+    try:
+        cfg = {"bg": "#000000", "fill": "solid", "image": "C:/pic.jpg"}
+        state = st.BoardState(
+            placements=[st.Placement("clock", "medium", 40, 40, dict(cfg))])
+        assert st.save(state), "save failed"
+        assert os.path.exists(st._path()), "no profile copy"
+        assert os.path.exists(st._mirror_path()), "no mirrored copy"
+
+        os.remove(st._path())            # the profile copy goes unreadable
+        back = st.load()
+        assert back.placements and back.placements[0].config == cfg, (
+            "layout lost when the profile copy was unavailable - this is the "
+            "failure that looks like the app forgetting your settings")
+
+        st.save(state)
+        os.remove(st._mirror_path())     # and the other way round
+        assert st.load().placements[0].config == cfg
+        print("  layout mirror: survives losing either copy")
+    finally:
+        if real_appdata is not None:
+            os.environ["APPDATA"] = real_appdata
+        shutil.rmtree(sandbox, ignore_errors=True)
+        shutil.rmtree(st._mirror_dir(), ignore_errors=True)
 
 
 def _check_audio_gate(pal) -> None:

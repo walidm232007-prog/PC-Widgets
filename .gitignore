@@ -57,3 +57,7 @@ _media.log
 
 # Local render previews
 _preview/
+
+# Mirrored layout + widget diagnostics (runtime state)
+.boardstate/
+_widgets.log

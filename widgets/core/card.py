@@ -309,6 +309,20 @@ class WidgetCard(QWidget):
     # ------------------------------------------------------------------ #
     #  Appearance
     # ------------------------------------------------------------------ #
+    def _say_image(self, msg: str) -> None:
+        """Report a background-image outcome once per card, per message."""
+        seen = getattr(self, "_img_said", None)
+        if seen is None:
+            seen = self._img_said = set()
+        if msg in seen:
+            return
+        seen.add(msg)
+        try:
+            from .store import report
+            report(f"{self.kind}: background image - {msg}")
+        except Exception:
+            pass
+
     def _paint_image_bg(self, p: QPainter, r: QRectF, path) -> bool:
         """Draw a chosen picture as the card background. Returns whether it did.
 
@@ -322,7 +336,10 @@ class WidgetCard(QWidget):
         if not self.allow_image:
             return False
         src = self.config.get("image")
-        if not src or not os.path.isfile(src):
+        if not src:
+            return False
+        if not os.path.isfile(src):
+            self._say_image(f"file is gone: {src}")
             return False
 
         key = (src, int(r.width()), int(r.height()))
@@ -330,7 +347,9 @@ class WidgetCard(QWidget):
         if scaled is None:
             img = QImage(src)
             if img.isNull():
+                self._say_image(f"could not decode {src}")
                 return False
+            self._say_image(f"loaded {img.width()}x{img.height()} from {src}")
             scaled = img.scaled(int(r.width()), int(r.height()),
                                 Qt.KeepAspectRatioByExpanding,
                                 Qt.SmoothTransformation)
