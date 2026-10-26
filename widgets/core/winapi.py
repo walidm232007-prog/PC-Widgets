@@ -35,6 +35,10 @@ dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
 GWL_EXSTYLE = -20
 GWL_STYLE = -16
 WS_CAPTION = 0x00C00000
+WS_SYSMENU = 0x00080000
+WS_THICKFRAME = 0x00040000
+WS_MINIMIZEBOX = 0x00020000
+WS_MAXIMIZEBOX = 0x00010000
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
@@ -45,7 +49,9 @@ HWND_NOTOPMOST = -2
 
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 SWP_SHOWWINDOW = 0x0040
 
 SPI_GETWORKAREA = 0x0030
@@ -402,6 +408,81 @@ def is_minimised(hwnd: int) -> bool:
         return bool(user32.IsIconic(wt.HWND(hwnd)))
     except Exception:
         return False
+
+
+def is_maximised(hwnd: int) -> bool:
+    try:
+        return bool(user32.IsZoomed(wt.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+class MARGINS(ctypes.Structure):
+    _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
+                ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
+
+
+DWMWCP_ROUND = 2
+
+
+def native_frame(hwnd: int, dark: bool) -> None:
+    """Give a frameless window back what Windows hangs off a real frame.
+
+    Qt's frameless windows drop the frame styles, and with them the drop shadow,
+    the rounded corners, Aero Snap, Win+arrow and the minimise and maximise
+    animations. Putting the styles back restores all of those; the window's
+    WM_NCCALCSIZE handler then makes the frame zero-sized so none of it is
+    drawn (see widgets/ui/chrome.py). Extending the DWM frame by a pixel is what
+    keeps the shadow once the frame has no size.
+    """
+    try:
+        h = wt.HWND(hwnd)
+        style = _get_style(h, GWL_STYLE)
+        _set_style(h, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU
+                   | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+        margins = MARGINS(0, 0, 1, 0)
+        dwmapi.DwmExtendFrameIntoClientArea(h, ctypes.byref(margins))
+        corner = ctypes.c_int(DWMWCP_ROUND)
+        dwmapi.DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE,
+                                     ctypes.byref(corner), ctypes.sizeof(corner))
+        val = ctypes.c_int(1 if dark else 0)
+        dwmapi.DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                     ctypes.byref(val), ctypes.sizeof(val))
+        user32.SetWindowPos(h, None, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                            | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+    except Exception:
+        pass
+
+
+def set_dark_frame(hwnd: int, dark: bool) -> None:
+    """Dark or light DWM edge and shadow, to follow the app's theme."""
+    try:
+        val = ctypes.c_int(1 if dark else 0)
+        dwmapi.DwmSetWindowAttribute(wt.HWND(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                     ctypes.byref(val), ctypes.sizeof(val))
+    except Exception:
+        pass
+
+
+def monitor_work_area(hwnd: int) -> Rect:
+    """The work area of the monitor a window is on."""
+    try:
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        hmon = user32.MonitorFromWindow(wt.HWND(hwnd), MONITOR_DEFAULTTONEAREST)
+        if hmon and user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            w = mi.rcWork
+            return (w.left, w.top, w.right, w.bottom)
+    except Exception:
+        pass
+    return work_area()
+
+
+def window_rect(hwnd: int) -> Rect:
+    r = wt.RECT()
+    user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(r))
+    return (r.left, r.top, r.right, r.bottom)
 
 
 def set_app_id(app_id: str) -> None:

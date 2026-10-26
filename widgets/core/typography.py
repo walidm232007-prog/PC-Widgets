@@ -27,6 +27,7 @@ table and :func:`tracking_percent` interpolates it.
 
 from __future__ import annotations
 
+import functools
 import os
 from bisect import bisect_left
 from typing import Dict, List, Optional, Tuple
@@ -141,7 +142,19 @@ def font(size: float, weight: int = QFont.Normal,
     a horizontal scale - so a widened or italic time works on the fallback stack
     as well as on SF Pro. ``stretch`` is a percentage (100 = normal); 0 leaves it
     at the font's own width.
+
+    Built once per combination and handed out as copies. Every paint asks for
+    several fonts, and building one - family, tracking, hinting - cost about as
+    much as drawing the text it was for. A QFont copy is shared until changed,
+    so a caller adjusting its copy cannot touch the cached one.
     """
+    return QFont(_font(float(size), int(weight), bool(tracking), bool(italic),
+                       int(stretch)))
+
+
+@functools.lru_cache(maxsize=512)
+def _font(size: float, weight: int, tracking: bool, italic: bool,
+          stretch: int) -> QFont:
     f = QFont(family_for(size))
     f.setPointSizeF(float(size))
     # Coerce to the Weight enum: a weight loaded from JSON is a plain int,

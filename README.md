@@ -67,6 +67,28 @@ can't drift from what a widget actually looks like. Nothing in the window keeps
 its own copy of the board: a change made from a card's right-click menu or the
 tray shows up in the window, and the other way round.
 
+**The look.** The window is made of the widgets' own material: the blurred
+wallpaper under a heavy tint (the idea behind Windows 11's Mica), the sidebar
+more see-through than the content, raised cards with an edge lit from above and
+a real soft shadow, and controls that ease between states instead of snapping
+(`widgets/ui/theme.py`). The stock title bar is replaced by drawn caption
+buttons, but the window keeps everything Windows hangs off a real frame - the
+shadow, rounded corners, Aero Snap, Win+arrow, the minimise and maximise
+animations - by keeping the frame styles and making the frame zero-sized
+instead (`widgets/ui/chrome.py`).
+
+**Scrolling.** The mouse wheel glides rather than stepping: each notch eases
+over about a fifth of a second, ticking at the refresh rate of the screen the
+window is on - 5 ms on a 200 Hz panel. A glide is only as smooth as a frame is
+cheap, and the frosted backdrop means a scroll can't just shift pixels: every
+frame repaints everything in view. So cards, controls, text and the backdrop
+each paint once into a cached image and are blitted until something about them
+changes, which took a scroll frame from about 12 ms to about 3 ms. For the same
+reason the window carries no stylesheet (one on a window routes every widget
+inside it through Qt's slower stylesheet style), live thumbnails refresh one at
+a time and never mid-scroll, and the gallery's hover lift waits until a scroll
+has settled rather than lifting every card the content glides under.
+
 Launching the app while it's already running doesn't start a second board. The
 new copy finds the running one's hidden control window, hands it the right to
 come to the foreground, asks it to open its window and exits — about a tenth of

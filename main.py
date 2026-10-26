@@ -616,7 +616,8 @@ def _check_app_window() -> None:
     ``_selftest/_app_*.png`` so it can be looked at."""
     import time as _t
 
-    from PySide6.QtCore import QCoreApplication, QEvent, QRectF, Qt
+    from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRectF, Qt
+    from PySide6.QtGui import QWheelEvent
     from PySide6.QtWidgets import QApplication
 
     from widgets.core import store
@@ -675,13 +676,34 @@ def _check_app_window() -> None:
                     win.show_page(page)
                     pump(0.6)
                     win.grab().save(os.path.join(out, f"_app_{theme}_{page}.png"))
+
+            # A wheel notch glides through many positions rather than jumping,
+            # and lands exactly where one notch should.
+            win.show_page("gallery")
+            pump(0.3)
+            area = win.gallery.area
+            bar = area.verticalScrollBar()
+            bar.setValue(0)
+            QApplication.sendEvent(area.viewport(), QWheelEvent(
+                QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, -120),
+                Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+            seen = set()
+            end = _t.monotonic() + 1.5
+            while _t.monotonic() < end and (area._timer.isActive() or not seen):
+                QApplication.processEvents()
+                seen.add(bar.value())
+                _t.sleep(0.003)
+            want = min(bar.maximum(), int(area.STEP))
+            assert bar.value() == want, f"a wheel notch landed at {bar.value()}, not {want}"
+            assert len(seen) >= 5, f"a wheel notch jumped instead of gliding: {sorted(seen)}"
             win.hide()
             win.deleteLater()
             board.close_all()
     finally:
         WidgetCard.start = real_start
     print("  app window: a tile per widget, Add places clear of other cards, "
-          "Remove and Undo round-trip; pages in _selftest/_app_*.png")
+          "Remove and Undo round-trip, wheel scrolling glides; pages in "
+          "_selftest/_app_*.png")
 
 
 def _check_audio_gate(pal) -> None:

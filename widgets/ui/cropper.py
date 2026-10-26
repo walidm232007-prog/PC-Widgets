@@ -8,6 +8,8 @@ the card's shape is dimmed, and inside it is the real card - the photo exactly a
 the card will paint it, with the card's own text, scrim and corners on top.
 Placing a photo so the time doesn't land across someone's face needs the time to
 be there while you do it; a bare crop rectangle would leave that to guesswork.
+The zoom controls float over the photo in a dark bar, as in Photos, so they stay
+legible over any picture in either theme.
 
 Every change shows on the desktop widget as it is made, so with the editor moved
 aside the real thing can be checked too. Cancel puts everything back.
@@ -27,18 +29,73 @@ from typing import Optional
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QSlider, QVBoxLayout, QWidget,
+    QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QSlider,
+    QVBoxLayout, QWidget,
 )
 
 from ..core import imagefit, startup, winapi
 from ..core.card import RADIUS, squircle
 from ..core.imagefit import Crop
 from . import theme
+from .chrome import Chrome
+from .theme import Button, hints, paint_shadow, rounded
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 SLIDER_STEPS = 1000
 WHEEL_STEP = 1.0015          # per eighth of a degree: ~1.2x per mouse-wheel notch
+HUD_H = 46                   # the floating zoom bar
+HUD_ROOM = 72                # canvas height kept clear of the card for it
+
+
+class HudBar(QWidget):
+    """The floating zoom bar: dark glass in both themes, over the photo."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(HUD_H + 16)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 8, 16, 8)
+        lay.setSpacing(4)
+        self.smaller = Button("", "hud", "minus", height=30, tip="Zoom out")
+        self.larger = Button("", "hud", "plus", height=30, tip="Zoom in")
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, SLIDER_STEPS)
+        self.slider.setFixedWidth(220)
+        self.slider.setStyleSheet(
+            "QSlider { background: transparent; min-height: 22px; }"
+            "QSlider::groove:horizontal { height: 4px; border-radius: 2px;"
+            " background: rgba(255,255,255,0.22); }"
+            f"QSlider::sub-page:horizontal {{ background: {theme.current().accent};"
+            " border-radius: 2px; }"
+            "QSlider::handle:horizontal { background: #ffffff; width: 16px; height: 16px;"
+            " margin: -6px 0; border-radius: 8px; border: 1px solid rgba(0,0,0,0.25); }")
+        self.slider.setCursor(Qt.PointingHandCursor)
+        self.fit = Button("Fit", "hud", height=30, tip="Show all of the photo")
+        self.fill = Button("Fill", "hud", height=30, tip="The smallest size with no gaps")
+        lay.addWidget(self.smaller)
+        lay.addWidget(self.slider)
+        lay.addWidget(self.larger)
+        lay.addSpacing(10)
+        lay.addWidget(self.fit)
+        lay.addWidget(self.fill)
+        self.setCursor(Qt.ArrowCursor)
+        self.adjustSize()
+
+    def mousePressEvent(self, ev) -> None:
+        ev.accept()             # the bar is not part of the photo to drag
+
+    def paintEvent(self, _ev) -> None:
+        p = hints(QPainter(self))
+        r = QRectF(self.rect()).adjusted(6, 6, -6, -6)
+        paint_shadow(p, r, r.height() / 2, blur=14, alpha=120, dy=5)
+        p.fillPath(rounded(r, r.height() / 2), QColor(24, 24, 28, 214))
+        p.setPen(QPen(QColor(255, 255, 255, 34), 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(rounded(r.adjusted(0.5, 0.5, -0.5, -0.5), r.height() / 2))
+        x = self.fit.geometry().left() - 6.5
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
+        p.drawLine(QPointF(x, r.top() + 11), QPointF(x, r.bottom() - 11))
+        p.end()
 
 
 class CropCanvas(QWidget):
@@ -64,10 +121,11 @@ class CropCanvas(QWidget):
         self._tick = QTimer(self)
         self._tick.timeout.connect(self.update)
         self._tick.start(1000)
-        self.setMinimumSize(560, 330)
+        self.setMinimumSize(600, 380)
         self.setCursor(Qt.OpenHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.crop = imagefit.normalise(*self.dims(), crop)
+        self.hud = HudBar(self)
 
     # -- geometry -------------------------------------------------------- #
     def dims(self):
@@ -77,14 +135,20 @@ class CropCanvas(QWidget):
     def frame(self):
         """Where the card sits in the canvas, and how much it is enlarged."""
         _iw, _ih, cw, ch = self.dims()
-        k = min((self.width() - 120) / cw, (self.height() - 84) / ch, 2.2)
-        k = max(0.2, k)
+        room_w, room_h = self.width() - 120, self.height() - 60 - HUD_ROOM
+        k = max(0.2, min(room_w / cw, room_h / ch, 2.2))
         fw, fh = cw * k, ch * k
-        return QRectF((self.width() - fw) / 2, (self.height() - fh) / 2, fw, fh), k
+        top = (self.height() - HUD_ROOM - fh) / 2 + 8
+        return QRectF((self.width() - fw) / 2, top, fw, fh), k
 
     def _card_point(self, pos: QPointF):
         frame, k = self.frame()
         return ((pos.x() - frame.left()) / k, (pos.y() - frame.top()) / k)
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self.hud.move((self.width() - self.hud.width()) // 2,
+                      self.height() - self.hud.height() - 8)
 
     # -- changes --------------------------------------------------------- #
     def set_crop(self, crop: Crop) -> None:
@@ -129,12 +193,11 @@ class CropCanvas(QWidget):
         return self._view
 
     def paintEvent(self, _ev) -> None:
-        ui = theme.current()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        p.setRenderHint(QPainter.TextAntialiasing, True)
-        p.fillRect(self.rect(), QColor(ui.sidebar))
+        p = hints(QPainter(self))
+        well = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setClipPath(rounded(well, 16))
+        # Photos are judged against dark, so the stage is dark in both themes.
+        p.fillRect(self.rect(), QColor("#0d0d10"))
 
         frame, k = self.frame()
         iw, ih, cw, ch = self.dims()
@@ -148,8 +211,7 @@ class CropCanvas(QWidget):
         card_path = squircle(frame, RADIUS * k)
         outside = QPainterPath()
         outside.addRect(QRectF(self.rect()))
-        p.fillPath(outside.subtracted(card_path),
-                   QColor(0, 0, 0, 150 if ui.dark else 125))
+        p.fillPath(outside.subtracted(card_path), QColor(8, 8, 10, 165))
 
         # The real card at this scale: photo, scrim, text and all.
         r = self.card.card_rect()
@@ -174,8 +236,11 @@ class CropCanvas(QWidget):
                 p.drawLine(QPointF(x, frame.top()), QPointF(x, frame.bottom()))
                 p.drawLine(QPointF(frame.left(), y), QPointF(frame.right(), y))
             p.restore()
-        p.setPen(QPen(QColor(255, 255, 255, 175), 1.25))
+        p.setPen(QPen(QColor(255, 255, 255, 190), 1.25))
         p.drawPath(card_path)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1.0))
+        p.drawPath(rounded(well, 16))
         p.end()
 
     # -- input ----------------------------------------------------------- #
@@ -227,7 +292,7 @@ class CropCanvas(QWidget):
             super().keyPressEvent(ev)
 
 
-class CropDialog(QDialog):
+class CropDialog(Chrome, QDialog):
     """The editor window. Accept keeps the photo where it is; reject restores."""
 
     def __init__(self, card, path: str, image: QImage, parent=None) -> None:
@@ -239,7 +304,7 @@ class CropDialog(QDialog):
         card.destroyed.connect(self._card_gone)
 
         ui = theme.current()
-        self.setObjectName("Dialog")
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowTitle(f"Background photo — {card.title}")
         ico = startup.icon_path()
         if ico:
@@ -247,91 +312,76 @@ class CropDialog(QDialog):
         self.setPalette(theme.qpalette(ui))
         self.setStyleSheet(theme.stylesheet(ui))
         self.setFont(theme.font(10))
-        self.resize(780, 620)
+        self.resize(820, 660)
 
         start = (imagefit.from_config(card.config)
                  if card.config.get("image") == path else Crop())
         self.canvas = CropCanvas(card, image, start)
         self.canvas.changed.connect(self._changed)
+        hud = self.canvas.hud
+        self.zoom = hud.slider
+        self.zoom.valueChanged.connect(self._slid)
+        hud.smaller.clicked.connect(lambda: self.canvas.zoom_to(self.canvas.crop.zoom / 1.15))
+        hud.larger.clicked.connect(lambda: self.canvas.zoom_to(self.canvas.crop.zoom * 1.15))
+        hud.fit.clicked.connect(self._fit)
+        hud.fill.clicked.connect(self._fill)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 18, 22, 18)
-        lay.setSpacing(12)
-
-        title = QLabel("Position your photo")
-        title.setFont(theme.font(17, QFont.Bold))
-        sub = QLabel(f"{card.title} · {card.size_class.capitalize()}")
-        sub.setProperty("tone", "dim")
+        lay.setContentsMargins(22, 16, 22, 20)
+        lay.setSpacing(0)
         head = QVBoxLayout()
         head.setSpacing(2)
+        title = QLabel("Position your photo")
+        title.setFont(theme.font(15, QFont.Bold))
+        sub = QLabel(f"{card.title} · {card.size_class.capitalize()}")
+        sub.setFont(theme.font(9.75))
+        sub.setProperty("tone", "dim")
         head.addWidget(title)
         head.addWidget(sub)
         lay.addLayout(head)
+        lay.addSpacing(16)
         lay.addWidget(self.canvas, 1)
+        lay.addSpacing(10)
         hint = QLabel("Drag to move  ·  Scroll to zoom  ·  Double-click to reset")
+        hint.setFont(theme.font(9))
         hint.setProperty("tone", "faint")
         hint.setAlignment(Qt.AlignCenter)
         lay.addWidget(hint)
-
-        zoom_row = QHBoxLayout()
-        zoom_row.setSpacing(10)
-        smaller = QPushButton("−")
-        larger = QPushButton("+")
-        for b in (smaller, larger):
-            b.setProperty("kind", "flat")
-            b.setFixedWidth(34)
-            b.setFont(theme.font(13, QFont.DemiBold))
-        smaller.setToolTip("Zoom out")
-        larger.setToolTip("Zoom in")
-        smaller.clicked.connect(lambda: self.canvas.zoom_to(self.canvas.crop.zoom / 1.15))
-        larger.clicked.connect(lambda: self.canvas.zoom_to(self.canvas.crop.zoom * 1.15))
-        self.zoom = QSlider(Qt.Horizontal)
-        self.zoom.setRange(0, SLIDER_STEPS)
-        self.zoom.valueChanged.connect(self._slid)
-        fit = QPushButton("Fit whole photo")
-        fit.setToolTip("Show all of it, with the card's colour around it")
-        fit.clicked.connect(self._fit)
-        fill = QPushButton("Fill card")
-        fill.setToolTip("The smallest size that leaves no gaps")
-        fill.clicked.connect(self._fill)
-        zoom_row.addWidget(smaller)
-        zoom_row.addWidget(self.zoom, 1)
-        zoom_row.addWidget(larger)
-        zoom_row.addSpacing(12)
-        zoom_row.addWidget(fit)
-        zoom_row.addWidget(fill)
-        lay.addLayout(zoom_row)
+        lay.addSpacing(16)
 
         foot = QHBoxLayout()
         foot.setSpacing(8)
-        other = QPushButton("Choose another photo…")
-        other.clicked.connect(self._choose_other)
-        remove = QPushButton("Remove photo")
-        remove.setProperty("kind", "danger")
-        remove.clicked.connect(self._remove)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        done = QPushButton("Done")
-        done.setProperty("kind", "primary")
-        done.setDefault(True)
-        done.setMinimumWidth(96)
-        done.clicked.connect(self.accept)
-        foot.addWidget(other)
-        foot.addWidget(remove)
+        foot.addWidget(Button("Choose another…", "secondary", "photo", height=34,
+                              slot=self._choose_other))
+        foot.addWidget(Button("Remove photo", "danger", "trash", height=34,
+                              slot=self._remove))
         foot.addStretch(1)
-        foot.addWidget(cancel)
+        foot.addWidget(Button("Cancel", "secondary", height=34, slot=self.reject))
+        done = Button("Done", "primary", height=34, slot=self.accept)
+        done.setFixedWidth(108)
         foot.addWidget(done)
         lay.addLayout(foot)
 
         self._syncing = False
         self._changed()
+        self.init_chrome(lambda: card.glass, kinds=("close",))
         self.canvas.setFocus()
 
     # ------------------------------------------------------------------ #
-    def showEvent(self, ev) -> None:
-        super().showEvent(ev)
-        ui = theme.current()
-        winapi.style_titlebar(int(self.winId()), ui.dark, ui.window, ui.text)
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        self.paint_backdrop(p)
+        p.end()
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self.place_chrome()
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.accept()
+        else:
+            super().keyPressEvent(ev)
 
     def _card_gone(self, *_a) -> None:
         self._gone = True
