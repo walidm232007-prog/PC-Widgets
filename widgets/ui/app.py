@@ -374,11 +374,17 @@ class NavButton(Cached, QAbstractButton):
     def __init__(self, text: str, glyph_kind: str, parent=None) -> None:
         super().__init__(parent)
         self.glyph_kind = glyph_kind
+        self.badge = ""             # a count, right-aligned, as macOS sidebars show
         self.setText(text)
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(38)
         self._hover = eased(self, 140)
+
+    def set_badge(self, text: str) -> None:
+        if text != self.badge:
+            self.badge = text
+            self.update()
 
     def enterEvent(self, _ev) -> None:
         ease_to(self._hover, 1.0)
@@ -392,7 +398,8 @@ class NavButton(Cached, QAbstractButton):
     def paint_key(self):
         if running(self._hover):
             return None
-        return (self.text(), self.glyph_kind, self.isChecked(), round(self._hover.t, 3))
+        return (self.text(), self.glyph_kind, self.badge, self.isChecked(),
+                round(self._hover.t, 3))
 
     def paint(self, p: QPainter) -> None:
         ui = theme.current()
@@ -409,6 +416,11 @@ class NavButton(Cached, QAbstractButton):
         p.setPen(QColor(ui.text if on else theme.mix(ui.text_dim, ui.text, self._hover.t)))
         p.drawText(QRectF(46, 0, r.width() - 50, r.height()),
                    Qt.AlignLeft | Qt.AlignVCenter, self.text())
+        if self.badge:
+            p.setFont(theme.font(9.5, QFont.Medium))
+            p.setPen(QColor(ui.text_dim))
+            p.drawText(QRectF(0, 0, r.width() - 14, r.height()),
+                       Qt.AlignRight | Qt.AlignVCenter, self.badge)
 
 
 class PeekButton(Cached, QAbstractButton):
@@ -521,6 +533,8 @@ class Sidebar(QWidget):
 
     def sync(self) -> None:
         board = self.win.board
+        n = len(board.cards)
+        self.nav["desktop"].set_badge(str(n) if n else "")
         if board.state.layer == "top":
             self.peek.setText("Always on top")
             self.peek.setEnabled(False)
@@ -537,15 +551,10 @@ class Sidebar(QWidget):
         p.setFont(theme.font(12.5, QFont.Bold))
         p.setPen(QColor(ui.text))
         p.drawText(QRectF(60, 12, 170, 20), Qt.AlignLeft | Qt.AlignVCenter, "PC Widgets")
-        n = len(self.win.board.cards)
-        status = (f"{n} widget{'s' if n != 1 else ''} on your desktop"
-                  if n else "Nothing on your desktop yet")
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(ui.good if n else ui.text_faint))
-        p.drawEllipse(QPointF(64, 41), 3, 3)
         p.setFont(theme.font(9))
         p.setPen(QColor(ui.text_dim))
-        p.drawText(QRectF(72, 32, 160, 18), Qt.AlignLeft | Qt.AlignVCenter, status)
+        p.drawText(QRectF(60, 32, 170, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                   "by Studio Hendrixx")
 
         if self._pill_y is not None and any(b.isChecked() for b in self.nav.values()):
             y = self._current_pill()
