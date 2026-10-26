@@ -165,6 +165,9 @@ def add_menu(card, menu) -> None:
         pick.triggered.connect(lambda: _pick_image(card))
         sub.addAction(pick)
         if card.config.get("image"):
+            adjust = QAction("Adjust background image…", sub)
+            adjust.triggered.connect(lambda: _adjust_image(card))
+            sub.addAction(adjust)
             clear = QAction("Clear background image", sub)
             clear.triggered.connect(lambda: card.set_appearance("image", None))
             sub.addAction(clear)
@@ -223,11 +226,12 @@ def _pick_custom(card, key: str) -> None:
 
 
 def _pick_image(card) -> None:
-    from PySide6.QtWidgets import QFileDialog
+    """Choose a picture, then position it - the editor opens straight away,
+    because a photo is almost never the card's shape."""
+    from ..ui import cropper
+    cropper.choose(card)
 
-    start = card.config.get("image") or ""
-    path, _f = QFileDialog.getOpenFileName(
-        card, "Choose a background image", start,
-        "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
-    if path:
-        card.set_appearance("image", path)
+
+def _adjust_image(card) -> None:
+    from ..ui import cropper
+    cropper.edit(card)

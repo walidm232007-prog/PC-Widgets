@@ -23,6 +23,9 @@ from typing import Optional
 
 APP_NAME = "PC Widgets"
 LNK = f"{APP_NAME}.lnk"
+# Starting with Windows brings the widgets back without opening the app window;
+# every other launcher opens it.
+BACKGROUND = "--background"
 
 
 def _project_root() -> str:
@@ -70,22 +73,28 @@ def icon_path() -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-def _make_shortcut(path: str) -> bool:
+def _make_shortcut(path: str, args: str = "main.py", style: int = 1) -> bool:
+    """``style`` is the shortcut's Run setting: 1 normal, 7 minimised.
+
+    Launchers that open the app window must be normal. Windows applies a
+    minimised Run setting to the first ordinary window the process shows, which
+    is now the app window - it would open straight onto the taskbar.
+    """
     root = _project_root()
     target = pythonw()
     icon = icon_path() or target
     script = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK_PATH); "
         "$s.TargetPath = $env:LNK_TARGET; "
-        "$s.Arguments = 'main.py'; "
+        "$s.Arguments = $env:LNK_ARGS; "
         "$s.WorkingDirectory = $env:LNK_CWD; "
         "$s.IconLocation = $env:LNK_ICON; "
         "$s.Description = 'Desktop widgets'; "
-        "$s.WindowStyle = 7; "          # minimised: nothing to see at launch
+        "$s.WindowStyle = [int]$env:LNK_STYLE; "
         "$s.Save()"
     )
-    env = dict(os.environ, LNK_PATH=path, LNK_TARGET=target,
-               LNK_CWD=root, LNK_ICON=icon)
+    env = dict(os.environ, LNK_PATH=path, LNK_TARGET=target, LNK_ARGS=args,
+               LNK_CWD=root, LNK_ICON=icon, LNK_STYLE=str(style))
     try:
         res = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -112,7 +121,28 @@ def is_enabled() -> bool:
 
 def enable() -> bool:
     os.makedirs(startup_dir(), exist_ok=True)
-    return _make_shortcut(startup_link())
+    # Minimised is harmless here: a background start shows no ordinary window.
+    return _make_shortcut(startup_link(), f"main.py {BACKGROUND}", style=7)
+
+
+def startup_link_is_current() -> bool:
+    """Does the Startup shortcut, if there is one, start the board quietly?
+
+    Shortcuts made before the app had a window launch plain ``main.py``, which
+    now opens the window - at every boot. A .lnk keeps its arguments as UTF-16
+    text, so the flag can be looked for in the file without a COM round trip.
+    """
+    try:
+        with open(startup_link(), "rb") as fh:
+            return BACKGROUND.encode("utf-16-le") in fh.read()
+    except OSError:
+        return True             # no shortcut, nothing to bring up to date
+
+
+def refresh_startup_link() -> None:
+    """Rewrite an out-of-date Startup shortcut. Cheap when there is nothing to do."""
+    if is_enabled() and not startup_link_is_current():
+        enable()
 
 
 def disable() -> bool:

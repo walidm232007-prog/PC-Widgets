@@ -14,12 +14,12 @@ front. The hotkey toggles between them.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Set, Type
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import card, winapi
-from .card import WidgetCard
+from .card import MARGIN, WidgetCard, card_size
 from .glass import GlassBackdrop
 from .palette import Palette, build as build_palette
 from .store import BoardState, Placement, save          # noqa: F401 (BoardState: fields())
@@ -63,6 +63,12 @@ def available() -> List[Type[WidgetCard]]:
 #  Board
 # --------------------------------------------------------------------------- #
 class Board(QObject):
+    # The app window, the tray menu and the cards' own menus can all change the
+    # board, so each listens here rather than assuming it made the change.
+    cards_changed = Signal()            # a card was added or removed
+    card_changed = Signal(object)       # one card's size or config changed
+    prefs_changed = Signal()            # theme, accent, layer, glass, peek...
+
     def __init__(self, state: BoardState) -> None:
         super().__init__()
         self.state = state
@@ -70,6 +76,7 @@ class Board(QObject):
         self.cards: List[WidgetCard] = []
         self.peeked = False
         self._saved_sig: Optional[tuple] = None
+        self._spotlit: Set[WidgetCard] = set()
 
         self.glass = GlassBackdrop()
         self.glass.refresh()
@@ -147,29 +154,96 @@ class Board(QObject):
                               self.palette.dark)
         card.moved.connect(self.persist)
         card.changed.connect(self.persist)
+        card.changed.connect(lambda c=card: self.card_changed.emit(c))
         card.removed.connect(self.remove)
         self.cards.append(card)
         return card
 
     # ------------------------------------------------------------------ #
-    def add(self, kind: str, size: str = "small") -> Optional[WidgetCard]:
+    def _free_spot(self, size: str):
+        """Window position for a new card in the first gap that fits it.
+
+        New cards all used to land at the same spot in the top-left corner,
+        stacking on whatever was already there - harmless from a tray menu used
+        once, but adding several from the gallery would pile them into one
+        heap. This walks the main screen in columns from the left, the way the
+        old default was anchored, and takes the first place clear of every card
+        with a little room around it.
+        """
+        cw, ch = card_size(size)
         wl, wt, wr, wb = winapi.work_area()
-        pl = Placement(kind, size, wl + 40, wt + 40)
+        gap, step, edge = 16, 20, 24
+        taken = []
+        for c in self.cards:
+            r = c.card_rect()
+            x, y = c.x() + r.left(), c.y() + r.top()
+            taken.append((x - gap, y - gap, x + r.width() + gap,
+                          y + r.height() + gap))
+        for x in range(wl + edge, wr - cw - edge + 1, step):
+            for y in range(wt + edge, wb - ch - edge + 1, step):
+                if not any(x < tx2 and tx1 < x + cw and y < ty2 and ty1 < y + ch
+                           for tx1, ty1, tx2, ty2 in taken):
+                    return x - int(MARGIN), y - int(MARGIN)
+        return wl + 40, wt + 40
+
+    def add(self, kind: str, size: str = "small") -> Optional[WidgetCard]:
+        x, y = self._free_spot(size)
+        pl = Placement(kind, size, x, y)
         card = self._spawn(pl)
         if card is None:
             return None
         card.snap()
         self._layer_one(card)
         self.persist()
+        self.cards_changed.emit()
         return card
 
-    def remove(self, card: WidgetCard) -> None:
+    def remove(self, card: WidgetCard) -> Optional[Placement]:
+        """Take a card off the board. Returns what it was, so it can be undone."""
         if card not in self.cards:
-            return
+            return None
+        pl = Placement(card.kind, card.size_class, card.x(), card.y(),
+                       dict(card.config))
         self.cards.remove(card)
+        self._spotlit.discard(card)
         card.close()
         card.deleteLater()
         self.persist()
+        self.cards_changed.emit()
+        return pl
+
+    def restore(self, pl: Placement) -> Optional[WidgetCard]:
+        """Put a removed card back exactly as it was - the app window's undo."""
+        card = self._spawn(Placement(pl.kind, pl.size, pl.x, pl.y, dict(pl.config)))
+        if card is None:
+            return None
+        self._layer_one(card)
+        self.persist()
+        self.cards_changed.emit()
+        return card
+
+    def spotlight(self, card: WidgetCard, ms: int = 2400) -> None:
+        """Point a card out: lift it above every window, ringed, then park it.
+
+        In the default layer a new card lands *behind* the app window that just
+        added it, which looks exactly like the Add button doing nothing. This is
+        also how "Show on desktop" finds one card among nine.
+        """
+        if card not in self.cards:
+            return
+        self._spotlit.add(card)
+        card.spotlit = True
+        winapi.bring_to_front(int(card.winId()), topmost=True)
+        card.force_update()
+        QTimer.singleShot(ms, lambda c=card: self._unspot(c))
+
+    def _unspot(self, card: WidgetCard) -> None:
+        self._spotlit.discard(card)
+        if card not in self.cards:
+            return
+        card.spotlit = False
+        self._layer_one(card)
+        card.force_update()
 
     def _signature(self) -> tuple:
         """What the saved file would contain, cheap enough to compare per tick.
@@ -216,6 +290,7 @@ class Board(QObject):
             winapi.apply_backdrop(int(c.winId()), self.state.backdrop,
                                   self.palette.dark)
         self.persist()
+        self.prefs_changed.emit()
 
     def set_accent(self, accent: str) -> None:
         self.state.accent = accent
@@ -223,6 +298,7 @@ class Board(QObject):
         for c in self.cards:
             c.set_palette_(self.palette)
         self.persist()
+        self.prefs_changed.emit()
 
     def set_opacity(self, value: float) -> None:
         self.state.opacity = max(0.35, min(1.0, value))
@@ -230,6 +306,7 @@ class Board(QObject):
             c.opacity_ = self.state.opacity
             c.update()
         self.persist()
+        self.prefs_changed.emit()
 
     def _check_fullscreen(self) -> None:
         """Go quiet while a game is in front, and catch up when it leaves."""
@@ -265,6 +342,7 @@ class Board(QObject):
             c.glass = self.glass if on else None
             c.update()
         self.persist()
+        self.prefs_changed.emit()
 
     def set_glass_tint(self, alpha: int) -> None:
         self.state.glass_tint = int(alpha)
@@ -272,18 +350,22 @@ class Board(QObject):
             c.glass_tint = int(alpha)
             c.update()
         self.persist()
+        self.prefs_changed.emit()
 
     def set_snap(self, snap: bool) -> None:
         self.state.snap = snap
         for c in self.cards:
             c.snap_to_grid = snap
         self.persist()
+        self.prefs_changed.emit()
 
     def set_locked(self, locked: bool) -> None:
         self.state.locked = locked
         for c in self.cards:
             c.locked = locked
+            c.update()              # Files hides its resize grip when locked
         self.persist()
+        self.prefs_changed.emit()
 
     def set_layer(self, layer: str) -> None:
         self.state.layer = layer
@@ -291,6 +373,7 @@ class Board(QObject):
         self.apply_layer()
         self._park.start(1500) if layer == "desktop" else self._park.stop()
         self.persist()
+        self.prefs_changed.emit()
 
     def _layer_one(self, card: WidgetCard) -> None:
         hwnd = int(card.winId())
@@ -304,12 +387,14 @@ class Board(QObject):
 
     def apply_layer(self) -> None:
         for c in self.cards:
-            self._layer_one(c)
+            if c not in self._spotlit:
+                self._layer_one(c)
 
     def _reassert_layer(self) -> None:
         if self.state.layer == "desktop" and not self.peeked:
             for c in self.cards:
-                winapi.send_to_bottom(int(c.winId()))
+                if c not in self._spotlit:
+                    winapi.send_to_bottom(int(c.winId()))
 
     def toggle_peek(self) -> None:
         """Summon the board over everything, or send it back down."""
@@ -317,6 +402,7 @@ class Board(QObject):
             return          # already permanently in front
         self.peeked = not self.peeked
         self.apply_layer()
+        self.prefs_changed.emit()
 
     # ------------------------------------------------------------------ #
     def close_all(self) -> None:

@@ -115,6 +115,9 @@ class OutlookWidget(WidgetCard):
         pal = self.palette_
         today = dt.date.today()
         large = self.size_class == "large"
+        # Reset per paint here rather than in paintEvent: the app window and
+        # the crop editor draw cards through paint_card, which skips that.
+        self._drawn = 0
 
         # --- header ----------------------------------------------------- #
         self.text(p, QRectF(r.left(), r.top(), r.width(), 18),
@@ -234,7 +237,3 @@ class OutlookWidget(WidgetCard):
         fm = p.fontMetrics()
         return (text if fm.horizontalAdvance(text) <= width
                 else fm.elidedText(text, Qt.ElideRight, int(max(10, width))))
-
-    def paintEvent(self, ev):
-        self._drawn = 0
-        super().paintEvent(ev)

@@ -15,6 +15,7 @@ chrome, the dragging, the menu and the persistence; the tile only draws.
 
 from __future__ import annotations
 
+import math
 import os
 
 from typing import Dict, Optional, Tuple
@@ -27,7 +28,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QMenu, QWidget
 
-from . import typography, winapi
+from . import imagefit, typography, winapi
 from .palette import Palette
 
 # --------------------------------------------------------------------------- #
@@ -223,7 +224,8 @@ class WidgetCard(QWidget):
         # base is what a theme change updates. See widgets/core/appearance.py.
         self._base_palette = palette
         self.palette_ = self._effective_palette()
-        self._img_cache: dict = {}      # (path, w, h) -> cover-fitted QImage
+        self._img_cache: dict = {}      # see _image_layer
+        self.spotlit = False             # ringed while the app points it out
         self.locked = False
         self.snap_to_grid = False        # free placement by default
         self.opacity_ = 1.0
@@ -323,53 +325,95 @@ class WidgetCard(QWidget):
         except Exception:
             pass
 
-    def _paint_image_bg(self, p: QPainter, r: QRectF, path) -> bool:
-        """Draw a chosen picture as the card background. Returns whether it did.
+    def _image_layer(self, p: QPainter, r: QRectF):
+        """The background picture cut and scaled for this card, or None.
 
-        Cover-fitted and centre-cropped so the card is always filled whatever
-        the photo's shape, clipped to the squircle so the rounded corners hold,
-        then framed with a soft top-and-bottom scrim. The scrim is what keeps
-        white text off a bright sky legible without flattening the middle of the
-        image - the same trick iOS uses for widgets over a photo. A missing or
-        unreadable file falls straight through to the normal background.
+        Returns ``(piece, covers)``: the visible part of the picture placed by
+        the card's saved crop (see :mod:`widgets.core.imagefit`), and whether it
+        fills the whole card. A missing or unreadable file is None, so the card
+        falls straight through to its normal background.
+
+        Cached on everything that changes the result: the file, the card's size,
+        the crop, and how many device pixels each card pixel covers. That last
+        one is not 1 when the crop editor draws the card enlarged - keying on it
+        gives the editor a sharp picture without costing the desktop anything -
+        and a few entries are kept so the editor and the desktop drawing the same
+        card in turn don't evict each other on every frame.
         """
         if not self.allow_image:
-            return False
+            return None
         src = self.config.get("image")
         if not src:
-            return False
+            return None
         if not os.path.isfile(src):
             self._say_image(f"file is gone: {src}")
-            return False
+            return None
 
-        key = (src, int(r.width()), int(r.height()))
-        scaled = self._img_cache.get(key)
-        if scaled is None:
-            img = QImage(src)
-            if img.isNull():
+        crop = imagefit.from_config(self.config)
+        t = p.worldTransform()
+        dev = math.hypot(t.m11(), t.m12()) or 1.0
+        key = (src, round(r.width(), 2), round(r.height(), 2), crop.key(),
+               round(dev, 3))
+        hit = self._img_cache.pop(key, None)
+        if hit is None:
+            img = imagefit.load(src)
+            if img is None:
                 self._say_image(f"could not decode {src}")
-                return False
+                return None
             self._say_image(f"loaded {img.width()}x{img.height()} from {src}")
-            scaled = img.scaled(int(r.width()), int(r.height()),
-                                Qt.KeepAspectRatioByExpanding,
-                                Qt.SmoothTransformation)
-            self._img_cache = {key: scaled}     # only the current size is wanted
-        sx = max(0, (scaled.width() - int(r.width())) // 2)
-        sy = max(0, (scaled.height() - int(r.height())) // 2)
+            piece = imagefit.render(img, r.width(), r.height(), crop, dev)
+            if piece is None:
+                return None
+            hit = (piece, imagefit.covers(img.width(), img.height(),
+                                          r.width(), r.height(), crop))
+        self._img_cache[key] = hit                  # most recent last
+        while len(self._img_cache) > 4:
+            self._img_cache.pop(next(iter(self._img_cache)))
+        return hit
 
-        path2 = squircle(r, RADIUS)
+    def _draw_image_layer(self, p: QPainter, r: QRectF, piece) -> None:
+        """Paint a cut picture, clipped to the squircle, under a soft scrim.
+
+        The scrim - darker at the top and bottom - is what keeps white text off
+        a bright sky legible without flattening the middle of the image, the same
+        trick iOS uses for widgets over a photo. It covers only the picture, so a
+        photo zoomed out to fit doesn't put dark bands across the card's colour.
+
+        The picture is snapped to whole device pixels. It was scaled to exactly
+        the size it is drawn at, and a fractional offset would make the painter
+        resample it - a half-pixel blur across the whole photo.
+        """
+        tx, ty, tw, th = piece.target
+        vx, vy, vw, vh = piece.visible
         p.save()
-        p.setClipPath(path2)
-        p.drawImage(r, scaled, QRectF(sx, sy, r.width(), r.height()))
-        scrim = QLinearGradient(r.left(), r.top(), r.left(), r.bottom())
+        p.setClipPath(squircle(r, RADIUS))
+        t = p.worldTransform()
+        inv, ok = t.inverted()
+        at = QPointF(r.left() + tx, r.top() + ty)
+        if ok:
+            dp = t.map(at)
+            at = inv.map(QPointF(round(dp.x()), round(dp.y())))
+        dev = math.hypot(t.m11(), t.m12()) or 1.0
+        p.drawImage(QRectF(at.x(), at.y(), piece.image.width() / dev,
+                           piece.image.height() / dev), piece.image)
+
+        vis = QRectF(r.left() + vx, r.top() + vy, vw, vh)
+        scrim = QLinearGradient(vis.left(), vis.top(), vis.left(), vis.bottom())
         scrim.setColorAt(0.0, QColor(0, 0, 0, 105))
         scrim.setColorAt(0.32, QColor(0, 0, 0, 24))
         scrim.setColorAt(0.7, QColor(0, 0, 0, 24))
         scrim.setColorAt(1.0, QColor(0, 0, 0, 120))
         p.setBrush(QBrush(scrim))
         p.setPen(Qt.NoPen)
-        p.drawRect(r)
+        p.drawRect(vis)
         p.restore()
+
+    def _paint_image_bg(self, p: QPainter, r: QRectF, path=None) -> bool:
+        """Draw the chosen picture as the card background. Returns whether it did."""
+        layer = self._image_layer(p, r)
+        if layer is None:
+            return False
+        self._draw_image_layer(p, r, layer[0])
         return True
 
     def _effective_palette(self) -> Palette:
@@ -398,13 +442,32 @@ class WidgetCard(QWidget):
             self.config.pop(key, None)
         else:
             self.config[key] = value
+        if key == "image":
+            # A crop belongs to the picture it was made for.
+            self.config.pop("crop", None)
+        self.palette_ = self._effective_palette()
+        self.on_appearance_changed()
+        self.changed.emit()
+        self.update()
+
+    def set_image(self, path: Optional[str], crop: Optional[dict] = None) -> None:
+        """Set or clear the background picture and where it sits, as one change.
+
+        One write rather than two ``set_appearance`` calls, so the layout is never
+        saved holding a new picture with the old picture's crop.
+        """
+        for key, value in (("image", path), ("crop", crop if path else None)):
+            if value is None:
+                self.config.pop(key, None)
+            else:
+                self.config[key] = value
         self.palette_ = self._effective_palette()
         self.on_appearance_changed()
         self.changed.emit()
         self.update()
 
     def reset_appearance(self) -> None:
-        for key in ("bg", "fg", "fill", "image"):
+        for key in ("bg", "fg", "fill", "image", "crop"):
             self.config.pop(key, None)
         self.palette_ = self._effective_palette()
         self.on_appearance_changed()
@@ -433,13 +496,16 @@ class WidgetCard(QWidget):
         self.paint_card(p)
         p.end()
 
-    def paint_card(self, p: QPainter, opacity: Optional[float] = None) -> None:
+    def paint_card(self, p: QPainter, opacity: Optional[float] = None,
+                   shadow: bool = True) -> None:
         """Draw the whole card onto ``p``: chrome, material, then the content.
 
         Split out of ``paintEvent`` so a tile can render itself into an offscreen
         image and then read those pixels back. That is the only way to blur what
         is *behind* something - a QWidget's own painter cannot be read from - and
-        it is what the media player's frosted transport needs.
+        it is what the media player's frosted transport needs. The app window and
+        the crop editor draw cards through it too; the editor leaves the shadow
+        off, since there the card sits inside a picture rather than on a desktop.
         """
         # Antialiasing alone only smooths *shapes*. Glyphs need TextAntialiasing
         # as well, and without it type is rendered with hard pixel edges - which
@@ -457,7 +523,7 @@ class WidgetCard(QWidget):
         # Stacked translucent copies, each a little larger and lower. Cheap,
         # and it lifts the card off the wallpaper the way a real widget sits.
         p.setPen(Qt.NoPen)
-        for i in range(SHADOW_LAYERS, 0, -1):
+        for i in range(SHADOW_LAYERS if shadow else 0, 0, -1):
             grow = i * 1.7
             alpha = max(2, int(SHADOW_ALPHA / (i * 0.85)))
             p.setBrush(QColor(0, 0, 0, alpha))
@@ -468,22 +534,25 @@ class WidgetCard(QWidget):
         # --- the card -------------------------------------------------- #
         path = squircle(r, RADIUS)
 
-        # Frosted material: the blurred desktop showing through, then a tint on
-        # top. The blur is clipped to the squircle, which is the whole reason
-        # it's done in-process rather than handed to DWM.
         # Three backgrounds, in order of precedence: a chosen picture, a flat
-        # colour, or the frosted desktop. A picture and a solid colour both opt
-        # out of the glass entirely - that is the whole point of choosing them.
-        image = self._paint_image_bg(p, r, path)
+        # colour, or the frosted desktop. A picture that fills the card opts out
+        # of the other two entirely - that is the whole point of choosing one -
+        # while a picture zoomed out to fit shows the card's own background
+        # around it.
+        layer = self._image_layer(p, r)
+        image = layer is not None
         frosted = False
-        if not image and not self.solid_bg and self.glass is not None:
-            p.save()
-            p.setClipPath(path)
-            frosted = self.glass.paint_into(
-                p, r, self.x() + int(MARGIN), self.y() + int(MARGIN))
-            p.restore()
+        if not (image and layer[1]):
+            # Frosted material: the blurred desktop showing through, then a tint
+            # on top. The blur is clipped to the squircle, which is the whole
+            # reason it's done in-process rather than handed to DWM.
+            if not self.solid_bg and self.glass is not None:
+                p.save()
+                p.setClipPath(path)
+                frosted = self.glass.paint_into(
+                    p, r, self.x() + int(MARGIN), self.y() + int(MARGIN))
+                p.restore()
 
-        if not image:
             fill = QColor(pal.card)
             if self.solid_bg:
                 fill.setAlpha(255)
@@ -496,6 +565,9 @@ class WidgetCard(QWidget):
                 fill.setAlpha(224 if pal.dark else 232)
             p.setBrush(fill)
             p.drawPath(path)
+
+        if image:
+            self._draw_image_layer(p, r, layer[0])
 
         # A soft inner light along the top - the sheen that makes frosted
         # glass read as glass. It belongs only *on* glass: over a flat colour it
@@ -517,6 +589,14 @@ class WidgetCard(QWidget):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(ring, 1.5))
             p.drawPath(path)
+            p.setPen(Qt.NoPen)
+
+        # The app pointing a card out - just added, or "Show on desktop". Drawn
+        # whether or not positions are locked: it is not a drag affordance.
+        if self.spotlit:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(pal.accent), 3.0))
+            p.drawPath(squircle(r.adjusted(1.5, 1.5, -1.5, -1.5), RADIUS - 1.5))
             p.setPen(Qt.NoPen)
 
         inner = QRectF(r.left() + PAD, r.top() + PAD,

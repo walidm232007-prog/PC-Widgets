@@ -41,12 +41,15 @@ python main.py --app
 ```
 
 That drops a **PC Widgets** shortcut in this folder. `--shortcut` puts one on the
-Desktop, `--install-startup` makes it start with Windows (all three are also in
-the tray menu once it's running).
+Desktop, `--install-startup` makes it start with Windows (the flags combine, and
+all three are also in the app once it's running).
 
+- **The app window** opens when you launch it: a gallery to add widgets from,
+  your widgets with their sizes, colours and background photos, and settings.
+  Closing it leaves the widgets on the desktop.
+- **Tray icon**: click it to open the app window; right-click for a quick menu.
 - **Ctrl+Alt+W** brings the whole board to the front, and sends it back down.
 - **Right-click a widget** for its size, its settings, or to remove it.
-- **Tray icon** adds widgets, switches theme and accent, and changes the layer.
 - **Drag anywhere.** Positions save themselves; the board comes back exactly as
   you left it.
 

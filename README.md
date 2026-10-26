@@ -36,10 +36,72 @@ uses the Core Audio peak meter instead of a real spectrum.
 
 Double-click **PC Widgets** — the launcher sits at the top of this folder once
 you've run `--app`, and `--shortcut` puts a copy on your Desktop. (`run.bat`
-works as a fallback.)
+works as a fallback.) It puts your widgets on the desktop and opens the app
+window, where everything is chosen and changed. Closing the window leaves the
+widgets where they are; click the tray icon, or launch PC Widgets again, to
+bring it back.
 
 **Ctrl+Alt+W** brings the whole board to the front and sends it back down again.
-The tray icon adds widgets, switches theme and accent, and changes the layer.
+Right-click the tray icon for a quick menu with the common settings.
+
+## The app window
+
+Three pages, down the side:
+
+- **Gallery** — every widget, previewed live over your own wallpaper. Pick a
+  size and press **Add**: the widget lands in the first clear spot on the main
+  screen and is lifted above your windows for a moment, ringed in the accent
+  colour, so you can see where it went. A badge shows which ones you already
+  have.
+- **On your desktop** — the widgets you have. Select one to change its size,
+  frosted or solid background, background and text colours, and background
+  photo. **Show on desktop** points it out; **More settings…** opens the same
+  menu as right-clicking it (location, watchlist, time style and so on);
+  **Remove widget** takes it off, with an Undo.
+- **Settings** — theme, accent, frosted glass and its strength, opacity, where
+  widgets sit (on the desktop, floating, always on top), snap and lock, start
+  with Windows, and Quit.
+
+The previews are the real tiles painted offscreen, not artwork, so the gallery
+can't drift from what a widget actually looks like. Nothing in the window keeps
+its own copy of the board: a change made from a card's right-click menu or the
+tray shows up in the window, and the other way round.
+
+Launching the app while it's already running doesn't start a second board. The
+new copy finds the running one's hidden control window, hands it the right to
+come to the foreground, asks it to open its window and exits — about a tenth of
+a second.
+
+## Background photos
+
+Every widget except Now Playing can have a photo behind it — **Choose photo…**
+in the app, or right-click → Appearance → Background image…. A photo is almost
+never the card's shape, so the editor opens straight away: the whole photo with
+the card cut out of it, everything outside dimmed, and inside it **the real
+card** — the photo as the card will paint it, with the card's own text, scrim and
+corners on top. Placing a photo so the time doesn't land across someone's face
+needs the time to be there while you do it.
+
+Drag to move it, scroll to zoom (toward the cursor), double-click to reset.
+**Fill card** is the smallest size with no gaps; **Fit whole photo** shows all
+of it, with the card's own colour around it. The widget on the desktop follows
+along as you edit, and Cancel puts everything back. **Adjust…** (or
+right-click → Adjust background image…) reopens the editor later.
+
+A crop is saved as the point of the photo that sits at the card's centre plus a
+zoom, not as a rectangle cut out of it. A rectangle only fits one shape — switch
+a medium card to large and a crop saved as "this 2:1 strip" would distort or be
+thrown away — whereas a centre and a zoom carry over to any size, Files' free
+size included. Zoom is relative to *cover*, so 1.0 is exactly the centre-crop
+every card used before this existed, and a card with no crop saved looks just as
+it always did. The editor and the card place the photo through the same
+function (`widgets/core/imagefit.py`), so what the editor shows is, to the pixel,
+what the card paints.
+
+Photos are decoded the right way up (phone photos are usually stored sideways
+with an EXIF note) and no larger than 2400 px on the long side: a 48-megapixel
+photo decoded at full size is ~190 MB of pixels to fill a card a few hundred
+wide.
 
 ## Starting with Windows
 
@@ -78,7 +140,19 @@ silently runs at every boot. The shortcut lives at:
 ```
 
 It points at `pythonw.exe` rather than `python.exe`, so nothing flashes up at
-login, and the single-instance guard means launching it twice does nothing.
+login, and runs `main.py --background`: the widgets come back with the PC, but
+the app window stays closed until you ask for it. A Startup shortcut made by an
+older version runs plain `main.py`, which would now open the window at every
+boot, so the app checks the shortcut when it starts and rewrites it if needed.
+(The check reads the `.lnk` file directly — it stores its arguments as UTF-16
+text — so it costs nothing when there's nothing to fix.)
+
+The other launchers open the window, so they're set to run in a normal window
+rather than minimised. That matters more than it looks: Windows applies a
+shortcut's "Run: Minimised" to the first ordinary window the process shows,
+which would put the app window straight onto the taskbar. The window also undoes
+that itself, because a board started minimised at boot shows its first ordinary
+window whenever you first open the app, hours later.
 `tools/make_icon.py` generates `assets/widgets.ico` at nine sizes — Windows picks
 a different one for the taskbar, the Start menu and Explorer, and a 16px tile
 drawn at 16px keeps its corners where one downscaled from 256px turns to mush.
@@ -355,11 +429,21 @@ python main.py --selftest
 Renders every widget at every size it supports, in both themes, to
 `_selftest/*.png` plus a contact sheet per theme — so the design can be looked at
 and iterated on without launching anything. The weather and stocks tiles are
-given fixed sample data so a render never depends on the network or on the
-market being open.
+given fixed sample data (`widgets/core/samples.py`, which the gallery uses too)
+so a render never depends on the network or on the market being open. The app
+window's three pages are rendered as well, as `_selftest/_app_*.png`.
 
 It also asserts that a free drop leaves a card exactly where it was released, and
-that snap mode still snaps — the regression that matters most here.
+that snap mode still snaps — the regression that matters most here — plus that a
+cropped photo always fills its card and lands on the part asked for, that the
+crop editor keeps on Done and restores on Cancel, and that the gallery's Add,
+Remove and Undo really change the board.
+
+The checks that save a layout redirect *both* copies of it — `%APPDATA%` and the
+mirror in `.boardstate/` — to a scratch folder. They used to redirect only
+`%APPDATA%`, so a selftest run wrote its test board over the real mirror and
+then deleted it; on a machine where the board can't write `%APPDATA%`, the next
+launch would have come up with whatever stale layout was left there.
 
 Note that offscreen renders can't catch everything: the acrylic-backdrop problem
 above was only visible in a real screenshot, because DWM composites the material
@@ -392,7 +476,11 @@ class MyWidget(WidgetCard):
 
 The card handles chrome, dragging, snapping, the menu and persistence. Tiles only
 draw. `label`, `text`, `bar` and the palette are provided; add it to
-`load_builtin_tiles()` and it appears in the tray's Add menu.
+`load_builtin_tiles()` and it appears in the tray's Add menu and in the gallery
+(under "More" until it's given a section and a one-line description in
+`CATALOG` in `widgets/ui/app.py`). If it needs network data to look like
+anything, give it sample data in `widgets/core/samples.py` so its gallery
+preview isn't an empty card.
 
 ## Licence and credits
 

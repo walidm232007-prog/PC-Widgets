@@ -1,9 +1,11 @@
 """
 tray.py
 =======
-The tray icon: add widgets, switch theme, change layer, quit. Also hosts the
-global hotkey, because ``RegisterHotKey`` needs a window handle to deliver
-``WM_HOTKEY`` to and the tray owns a hidden one for exactly this purpose.
+The tray icon: click it for the app window, right-click for the quick menu -
+add widgets, switch theme, change layer, quit. Also hosts the global hotkey,
+because ``RegisterHotKey`` needs a window handle to deliver ``WM_HOTKEY`` to and
+the tray owns a hidden one for exactly this purpose. The same hidden window is
+how a second launch of the app reaches this one (see :mod:`main`).
 """
 
 from __future__ import annotations
@@ -41,12 +43,15 @@ def _icon(accent: str = "#3b82f6") -> QIcon:
 
 
 class _HotkeyFilter(QAbstractNativeEventFilter):
-    """Turns WM_HOTKEY into a Python callback."""
+    """Turns WM_HOTKEY - and a second launch's knock - into Python callbacks."""
 
-    def __init__(self, hotkey_id: int, callback) -> None:
+    def __init__(self, hotkey_id: int, callback, show_msg: int = 0,
+                 on_show=None) -> None:
         super().__init__()
         self.hotkey_id = hotkey_id
         self.callback = callback
+        self.show_msg = show_msg
+        self.on_show = on_show
 
     def nativeEventFilter(self, event_type, message):
         try:
@@ -57,6 +62,9 @@ class _HotkeyFilter(QAbstractNativeEventFilter):
                 msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
                 if msg.message == winapi.WM_HOTKEY and msg.wParam == self.hotkey_id:
                     self.callback()
+                elif self.show_msg and msg.message == self.show_msg and self.on_show:
+                    self.on_show()
+                    return True, 0
         except Exception:
             pass
         return False, 0
@@ -70,18 +78,43 @@ class WidgetTray(QSystemTrayIcon):
         self._hk_window: QWidget | None = None
         self._hk_filter: _HotkeyFilter | None = None
         self._hk_id = 0
+        self._window = None
+        self._menu: QMenu | None = None
 
-        self.setToolTip("PC Widgets — Ctrl+Alt+W to peek")
-        self.activated.connect(
-            lambda r: self.board.toggle_peek()
-            if r == QSystemTrayIcon.Trigger else None
-        )
+        self.setToolTip("PC Widgets — click to open · Ctrl+Alt+W to peek")
+        self.activated.connect(self._activated)
+        # Settings can change from the app window too; keep the ticks honest.
+        board.prefs_changed.connect(self.rebuild_menu)
         self.rebuild_menu()
         self.show()
+
+    def _activated(self, reason) -> None:
+        # A click opens the app, the way every other tray icon behaves; peeking
+        # is still on the hotkey, the menu and a middle click.
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.show_window()
+        elif reason == QSystemTrayIcon.MiddleClick:
+            self.board.toggle_peek()
+
+    def show_window(self, page: str | None = None) -> None:
+        """Open the app window, building it the first time it is asked for -
+        a board started with Windows may never need it."""
+        if self._window is None:
+            from .ui.app import MainWindow
+            self._window = MainWindow(self.board, self)
+        self._window.bring_up(page)
 
     # ------------------------------------------------------------------ #
     def rebuild_menu(self) -> None:
         m = QMenu()
+
+        open_app = QAction("Open PC Widgets", m)
+        f = open_app.font()
+        f.setBold(True)
+        open_app.setFont(f)
+        open_app.triggered.connect(lambda: self.show_window())
+        m.addAction(open_app)
+        m.addSeparator()
 
         add = m.addMenu("Add widget")
         for cls in available():
@@ -181,11 +214,18 @@ class WidgetTray(QSystemTrayIcon):
         quit_a.triggered.connect(self._quit)
         m.addAction(quit_a)
 
+        # The old menu may be the one whose action is running right now, so it
+        # is retired with deleteLater rather than dropped on the spot.
+        old, self._menu = self._menu, m
         self.setContextMenu(m)
+        if old is not None:
+            old.deleteLater()
 
     # ------------------------------------------------------------------ #
     def _add(self, kind: str, size: str) -> None:
-        self.board.add(kind, size)
+        card = self.board.add(kind, size)
+        if card is not None:
+            self.board.spotlight(card)
 
     def _set_startup(self, on: bool) -> None:
         ok = startup.set_enabled(on)
@@ -233,24 +273,33 @@ class WidgetTray(QSystemTrayIcon):
 
     def _quit(self) -> None:
         self.remove_hotkey()
+        if self._window is not None:
+            self._window.hide()
         self.board.close_all()
         self.hide()
         QCoreApplication.instance().quit()
 
     # ------------------------------------------------------------------ #
     def install_hotkey(self, hotkey_id: int, mods: int, vk: int) -> bool:
-        """RegisterHotKey needs a real HWND, so keep a hidden one alive."""
+        """RegisterHotKey needs a real HWND, so keep a hidden one alive.
+
+        The window is titled so a second launch can find it with FindWindow,
+        and the filter goes in whether or not the hotkey registers - another
+        app holding Ctrl+Alt+W must not also stop the launcher opening the app.
+        """
         self._hk_window = QWidget()
         self._hk_window.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+        self._hk_window.setWindowTitle(winapi.CONTROL_TITLE)
         self._hk_window.resize(1, 1)
         self._hk_window.show()
         self._hk_window.hide()
 
         self._hk_id = hotkey_id
         ok = winapi.register_hotkey(int(self._hk_window.winId()), hotkey_id, mods, vk)
-        if ok:
-            self._hk_filter = _HotkeyFilter(hotkey_id, self.board.toggle_peek)
-            self.app.installNativeEventFilter(self._hk_filter)
+        self._hk_filter = _HotkeyFilter(
+            hotkey_id, self.board.toggle_peek,
+            winapi.register_message(winapi.SHOW_MESSAGE), self.show_window)
+        self.app.installNativeEventFilter(self._hk_filter)
         return ok
 
     def remove_hotkey(self) -> None:

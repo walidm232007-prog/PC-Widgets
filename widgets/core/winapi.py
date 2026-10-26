@@ -54,6 +54,9 @@ MONITOR_DEFAULTTONEAREST = 2
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_SYSTEMBACKDROP_TYPE = 38
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWA_BORDER_COLOR = 34
+DWMWA_CAPTION_COLOR = 35
+DWMWA_TEXT_COLOR = 36
 BACKDROP = {"off": 1, "mica": 2, "acrylic": 3, "tabbed": 4}
 
 MOD_ALT = 0x0001
@@ -62,6 +65,12 @@ MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
+
+# How a second launch finds the running board and asks it to open its window:
+# the board's hidden hotkey window carries this title, and listens for this
+# registered message.
+CONTROL_TITLE = "PC Widgets control"
+SHOW_MESSAGE = "PCWidgets.ShowWindow"
 
 if hasattr(user32, "SetWindowLongPtrW"):
     _get_style, _set_style = user32.GetWindowLongPtrW, user32.SetWindowLongPtrW
@@ -75,6 +84,8 @@ user32.GetForegroundWindow.restype = wt.HWND
 user32.FindWindowW.restype = wt.HWND
 user32.FindWindowExW.restype = wt.HWND
 user32.SetParent.restype = wt.HWND
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.RegisterWindowMessageW.restype = wt.UINT
 
 
 # --------------------------------------------------------------------------- #
@@ -326,6 +337,82 @@ def attach_to_wallpaper(hwnd: int) -> bool:
 def detach_from_wallpaper(hwnd: int) -> None:
     try:
         user32.SetParent(wt.HWND(hwnd), None)
+    except Exception:
+        pass
+
+
+def _colorref(hex_colour: str) -> int:
+    h = hex_colour.lstrip("#")
+    return int(h[0:2], 16) | (int(h[2:4], 16) << 8) | (int(h[4:6], 16) << 16)
+
+
+def style_titlebar(hwnd: int, dark: bool, caption: Optional[str] = None,
+                   text: Optional[str] = None) -> None:
+    """A title bar that matches the window under it.
+
+    Dark mode works from Windows 10 20H1; the caption and text colours are
+    Windows 11 only, and on anything older the call simply fails and the bar
+    stays the system's - which is why every result is ignored.
+    """
+    try:
+        val = ctypes.c_int(1 if dark else 0)
+        dwmapi.DwmSetWindowAttribute(wt.HWND(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                     ctypes.byref(val), ctypes.sizeof(val))
+        for attr, colour in ((DWMWA_CAPTION_COLOR, caption),
+                             (DWMWA_TEXT_COLOR, text)):
+            if colour:
+                ref = wt.DWORD(_colorref(colour))
+                dwmapi.DwmSetWindowAttribute(wt.HWND(hwnd), attr,
+                                             ctypes.byref(ref), ctypes.sizeof(ref))
+    except Exception:
+        pass
+
+
+def register_message(name: str) -> int:
+    """A message number unique to ``name``, the same in every process."""
+    try:
+        return int(user32.RegisterWindowMessageW(name))
+    except Exception:
+        return 0
+
+
+def signal_window(title: str, message: int) -> bool:
+    """Post ``message`` to another process's window, found by its title.
+
+    Also hands that process the right to come to the foreground. Windows only
+    lets the process the user just interacted with take focus - here that is
+    the second launch, not the running board - so without passing it on, the
+    board's window would only flash in the taskbar instead of appearing.
+    """
+    try:
+        hwnd = user32.FindWindowW(None, title)
+        if not hwnd or not message:
+            return False
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value:
+            user32.AllowSetForegroundWindow(pid.value)
+        return bool(user32.PostMessageW(hwnd, message, 0, 0))
+    except Exception:
+        return False
+
+
+def is_minimised(hwnd: int) -> bool:
+    try:
+        return bool(user32.IsIconic(wt.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def set_app_id(app_id: str) -> None:
+    """Give the process its own taskbar identity.
+
+    Without one the app window is grouped under pythonw.exe and shows Python's
+    icon on the taskbar, whatever icon the window itself sets.
+    """
+    try:
+        ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID(
+            ctypes.c_wchar_p(app_id))
     except Exception:
         pass
 

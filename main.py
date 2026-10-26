@@ -1,9 +1,13 @@
 """
 PC Widgets - iPhone/Mac-style widgets for the Windows desktop.
 
-    python main.py              show the board
-    python main.py --selftest   render every widget offscreen to _selftest/*.png
-    python main.py --reset      forget the layout
+    python main.py               show the board and open the app window
+    python main.py --background  show the board only (how Windows starts it)
+    python main.py --selftest    render every widget offscreen to _selftest/*.png
+    python main.py --reset       forget the layout
+
+Launching it while it is already running opens the running copy's window
+rather than starting a second board.
 
 Qt's high-DPI scaling is switched off for the same reason as the desk gremlin:
 widget positions are Win32 screen coordinates in physical pixels, and mixing
@@ -13,6 +17,7 @@ were dropped. Cards are drawn through the monitor's DPI scale instead.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import shutil
@@ -25,6 +30,8 @@ ERROR_ALREADY_EXISTS = 183
 MUTEX_NAME = "Local\\PCWidgetsSingleInstance"
 HOTKEY_ID = 0xB01D
 VK_W = 0x57
+APP_ID = "PCWidgets.Board"
+BACKGROUND_FLAGS = {"--background", "--tray"}
 
 
 def _already_running() -> bool:
@@ -50,6 +57,7 @@ def selftest() -> int:
     from PySide6.QtWidgets import QApplication
 
     from widgets.core import palette as pal_mod
+    from widgets.core import samples
     from widgets.core.board import REGISTRY, load_builtin_tiles
     from widgets.core.card import MARGIN, pixel_size
     from widgets.core.glass import GlassBackdrop
@@ -96,17 +104,17 @@ def selftest() -> int:
                 except Exception:
                     pass
                 if kind == "weather":
-                    _stub_weather(card)
+                    samples.weather(card)
                 if kind == "stocks":
-                    _stub_stocks(card)
+                    samples.stocks(card)
                 if kind == "workspace":
-                    _stub_workspace(card)
+                    samples.workspace(card)
                 if kind == "media":
-                    _stub_media(card)
+                    samples.media(card)
                 if kind == "outlook":
-                    _stub_outlook(card)
+                    samples.outlook(card)
                 if kind == "comms":
-                    _stub_comms(card)
+                    samples.comms(card)
                 # The card sized itself, including any reserved overhang.
                 w, h = card.width(), card.height()
                 img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
@@ -137,6 +145,8 @@ def selftest() -> int:
     _check_agent_bus()
     _check_appearance()
     _check_layout_mirror()
+    _check_crop()
+    _check_app_window()
     print("all good.")
     return 0
 
@@ -440,6 +450,33 @@ def _check_appearance() -> None:
           "Stocks clash guard, clock image + reset, time weight/italic/width")
 
 
+@contextlib.contextmanager
+def _sandboxed_layout():
+    """Point *both* copies of the layout at a scratch directory for a check.
+
+    Only %APPDATA% used to be redirected, so the checks that save a layout
+    wrote their test board over the real mirror beside the app - and the mirror
+    check then deleted it. On this machine the mirror is the copy that is
+    current, because the board process cannot write %APPDATA%, so a single
+    selftest run could hand the next launch a layout weeks out of date.
+    """
+    import tempfile
+    from widgets.core import store
+
+    real_appdata = os.environ.get("APPDATA")
+    real_mirror = store._mirror_dir
+    sandbox = tempfile.mkdtemp(prefix="pcwidgets-selftest-")
+    os.environ["APPDATA"] = sandbox
+    store._mirror_dir = lambda: os.path.join(sandbox, ".boardstate")
+    try:
+        yield sandbox
+    finally:
+        store._mirror_dir = real_mirror
+        if real_appdata is not None:
+            os.environ["APPDATA"] = real_appdata
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+
 def _check_layout_mirror() -> None:
     """The saved layout must survive one of its two locations being unreadable.
 
@@ -449,13 +486,9 @@ def _check_layout_mirror() -> None:
     process has repeatedly been unable to read or write %APPDATA%, so the layout
     is mirrored beside the app and read from whichever copy is newest.
     """
-    import tempfile
     from widgets.core import store as st
 
-    real_appdata = os.environ.get("APPDATA")
-    sandbox = tempfile.mkdtemp()
-    os.environ["APPDATA"] = sandbox
-    try:
+    with _sandboxed_layout():
         cfg = {"bg": "#000000", "fill": "solid", "image": "C:/pic.jpg"}
         state = st.BoardState(
             placements=[st.Placement("clock", "medium", 40, 40, dict(cfg))])
@@ -473,11 +506,182 @@ def _check_layout_mirror() -> None:
         os.remove(st._mirror_path())     # and the other way round
         assert st.load().placements[0].config == cfg
         print("  layout mirror: survives losing either copy")
+
+
+def _check_crop() -> None:
+    """A background photo must sit where its crop says, on any card shape.
+
+    Four properties: a photo zoomed to fill can never leave a gap, whatever
+    centre is saved; zooming toward the cursor keeps that point still; the
+    pixels really land on the part of the photo asked for; and the editor
+    keeps the crop on Done and restores everything on Cancel - including when
+    the photo itself was swapped mid-edit.
+    """
+    import tempfile
+
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from widgets.core import imagefit
+    from widgets.core.board import REGISTRY
+    from widgets.core.imagefit import Crop
+    from widgets.core.palette import build
+    from widgets.ui import cropper
+
+    iw, ih = 1200, 600
+    for cw, ch in ((168, 168), (348, 168), (348, 348)):
+        for z in (1.0, 2.5, 8.0):
+            for x in (-3.0, 0.0, 0.5, 1.0, 4.0):
+                l, t, w, h = imagefit.place(iw, ih, cw, ch, Crop(x, 1 - x, z))
+                assert (l <= 0.01 and t <= 0.01 and l + w >= cw - 0.01
+                        and t + h >= ch - 0.01), (
+                    f"gap on a {cw}x{ch} card at zoom {z}, centre {x}")
+        lo, _hi = imagefit.zoom_range(iw, ih, cw, ch)
+        l, t, w, h = imagefit.place(iw, ih, cw, ch, Crop(0.9, 0.1, lo))
+        assert (l >= -0.01 and t >= -0.01 and l + w <= cw + 0.01
+                and t + h <= ch + 0.01), "a photo zoomed out to fit spilled out"
+
+    c0 = Crop(0.5, 0.5, 2.0)
+    l, t, w, h = imagefit.place(iw, ih, 348, 168, c0)
+    u, v = (200 - l) / w, (90 - t) / h
+    l, t, w, h = imagefit.place(
+        iw, ih, 348, 168, imagefit.zoomed(iw, ih, 348, 168, c0, 3.0, (200, 90)))
+    assert abs(l + u * w - 200) < 0.01 and abs(t + v * h - 90) < 0.01, (
+        "zooming drifted away from the cursor")
+
+    assert imagefit.to_config(Crop()) is None, "a default crop was saved"
+    assert imagefit.from_config({"crop": {"x": "nan"}}) == Crop()
+    back = imagefit.from_config({"crop": imagefit.to_config(Crop(0.25, 0.75, 2.0))})
+    assert back == Crop(0.25, 0.75, 2.0), f"crop did not round-trip: {back}"
+
+    tmp = tempfile.mkdtemp(prefix="pcwidgets-crop-")
+    try:
+        pic = os.path.join(tmp, "quad.png")
+        img = QImage(iw, ih, QImage.Format_RGB32)
+        p = QPainter(img)
+        for (x, y), col in (((0, 0), "#ff0000"), ((600, 0), "#00ff00"),
+                            ((0, 300), "#0000ff"), ((600, 300), "#ffff00")):
+            p.fillRect(x, y, 600, 300, QColor(col))
+        p.end()
+        img.save(pic)
+        pal = build("dark", "blue")
+        Clock = REGISTRY["clock"]
+
+        def centre(size, crop):
+            card = Clock(pal, size, {"image": pic, "crop": crop})
+            r = card.card_rect()
+            out = QImage(card.width(), card.height(),
+                         QImage.Format_ARGB32_Premultiplied)
+            out.fill(QColor("#000000"))
+            pp = QPainter(out)
+            assert card._paint_image_bg(pp, r), "the photo was not drawn"
+            pp.end()
+            card.deleteLater()
+            c = out.pixelColor(int(r.center().x()), int(r.center().y()))
+            return c.red(), c.green(), c.blue()
+
+        r_, g_, b_ = centre("medium", {"x": 0.25, "y": 0.25, "zoom": 2.0})
+        assert r_ > 150 and g_ < 60 and b_ < 60, f"top-left crop showed {r_, g_, b_}"
+        r_, g_, b_ = centre("medium", {"x": 0.75, "y": 0.75, "zoom": 2.0})
+        assert r_ > 150 and g_ > 150 and b_ < 60, f"bottom-right crop showed {r_, g_, b_}"
+        # The same crop on another shape still shows the same part of the photo.
+        r_, g_, b_ = centre("small", {"x": 0.25, "y": 0.75, "zoom": 2.0})
+        assert b_ > 150 and r_ < 60, f"crop lost its place on a small card: {r_, g_, b_}"
+
+        card = Clock(pal, "medium", {"image": pic})
+        dlg = cropper.CropDialog(card, pic, imagefit.load(pic))
+        dlg.canvas.zoom_to(2.0, (40.0, 40.0))
+        dlg.accept()
+        assert card.config.get("crop") and card.config["image"] == pic, (
+            "Done did not keep the crop")
+        kept = dict(card.config)
+        other = os.path.join(tmp, "other.png")
+        swap = QImage(400, 400, QImage.Format_RGB32)
+        swap.fill(QColor("#808080"))
+        swap.save(other)
+        dlg = cropper.CropDialog(card, other, imagefit.load(other))
+        dlg.canvas.nudge(-50, 0)
+        assert card.config["image"] == other, "the editor is not previewing live"
+        dlg.reject()
+        assert card.config == kept, "Cancel did not put the photo and crop back"
+        card.deleteLater()
     finally:
-        if real_appdata is not None:
-            os.environ["APPDATA"] = real_appdata
-        shutil.rmtree(sandbox, ignore_errors=True)
-        shutil.rmtree(st._mirror_dir(), ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  crop: fills at any centre and zoom, zooms about the cursor, lands on "
+          "the requested part, editor keeps on Done and restores on Cancel")
+
+
+def _check_app_window() -> None:
+    """The app window: a gallery tile for every widget, and Add, Remove and
+    Undo really change the board. Renders each page, in both themes, to
+    ``_selftest/_app_*.png`` so it can be looked at."""
+    import time as _t
+
+    from PySide6.QtCore import QCoreApplication, QEvent, QRectF, Qt
+    from PySide6.QtWidgets import QApplication
+
+    from widgets.core import store
+    from widgets.core.board import REGISTRY, Board
+    from widgets.core.card import WidgetCard
+    from widgets.ui.app import MainWindow
+
+    # Earlier checks queued their cards for deletion; let that happen before
+    # any event processing here, so none of them gets to run a timer first.
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def pump(sec: float) -> None:
+        end = _t.monotonic() + sec
+        while _t.monotonic() < end:
+            QApplication.processEvents()
+            _t.sleep(0.005)
+
+    def area(c):
+        r = c.card_rect()
+        return QRectF(c.x() + r.left(), c.y() + r.top(), r.width(), r.height())
+
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_selftest")
+    real_start = WidgetCard.start
+    WidgetCard.start = lambda self: None        # never put a card on screen
+    try:
+        with _sandboxed_layout():
+            board = Board(store.BoardState())
+            for timer in (board._autosave, board._watch, board._glass_timer,
+                          board._park):
+                timer.stop()
+            win = MainWindow(board)
+            win.setAttribute(Qt.WA_DontShowOnScreen)
+            win.show()
+            assert {t.kind for t in win.gallery.tiles} == set(REGISTRY), (
+                "the gallery is missing a widget")
+
+            tile = next(t for t in win.gallery.tiles if t.kind == "clock")
+            tile._add()
+            tile._add()
+            assert [c.kind for c in board.cards] == ["clock", "clock"], (
+                "Add did not put cards on the board")
+            a, b = board.cards
+            assert not area(a).intersects(area(b)), (
+                "a new widget landed on top of an existing one")
+            assert len(win.desktop.rows) == 2, "the desktop page missed a card"
+
+            win.desktop.select(b)
+            win.desktop.inspector._remove()
+            assert len(board.cards) == 1, "Remove left the card on the board"
+            win.toast_box._act()                 # the toast's Undo
+            assert len(board.cards) == 2, "Undo did not bring the card back"
+
+            for theme in ("dark", "light"):
+                board.set_theme(theme)
+                for page in ("gallery", "desktop", "settings"):
+                    win.show_page(page)
+                    pump(0.6)
+                    win.grab().save(os.path.join(out, f"_app_{theme}_{page}.png"))
+            win.hide()
+            win.deleteLater()
+            board.close_all()
+    finally:
+        WidgetCard.start = real_start
+    print("  app window: a tile per widget, Add places clear of other cards, "
+          "Remove and Undo round-trip; pages in _selftest/_app_*.png")
 
 
 def _check_audio_gate(pal) -> None:
@@ -777,17 +981,11 @@ def _check_persistence(pal) -> None:
     moved card and a changed preference both write; and an empty board can never
     erase a real one.
     """
-    import shutil
-    import tempfile
-
     from widgets.core import store
     from widgets.core.board import Board
     from widgets.tiles.clock import ClockWidget
 
-    real_appdata = os.environ.get("APPDATA")
-    sandbox = tempfile.mkdtemp(prefix="pcwidgets-selftest-")
-    os.environ["APPDATA"] = sandbox
-    try:
+    with _sandboxed_layout():
         board = Board(store.BoardState())
         board._autosave.stop()          # drive persist() by hand, not on a timer
         card = ClockWidget(pal, "small")
@@ -821,118 +1019,6 @@ def _check_persistence(pal) -> None:
         print("  persistence: writes, skips no-ops, saves moves and preferences, "
               "refuses to erase a layout")
         card.deleteLater()
-    finally:
-        if real_appdata:
-            os.environ["APPDATA"] = real_appdata
-        shutil.rmtree(sandbox, ignore_errors=True)
-
-
-def _stub_weather(card) -> None:
-    """Give the weather tile deterministic data for rendering."""
-    from widgets.tiles.weather import Day, Forecast
-    card.data = Forecast(
-        place="London, GB", temp=21.0, feels=20.0, code=2,
-        days=[Day("Wed", 2, 22, 14), Day("Thu", 61, 19, 13),
-              Day("Fri", 0, 24, 15), Day("Sat", 95, 20, 12),
-              Day("Sun", 3, 18, 11), Day("Mon", 71, 9, 2),
-              Day("Tue", 45, 14, 8)],
-    )
-
-
-def _stub_stocks(card) -> None:
-    """Deterministic quotes, so a render never waits on a market API."""
-    import math
-    from widgets.tiles.stocks import Quote
-
-    def wave(base, amp, n=60, phase=0.0):
-        return [base + math.sin(i / 7.0 + phase) * amp + i * amp / n
-                for i in range(n)]
-
-    card.quotes = [
-        Quote("AAPL", "Apple Inc.", 311.00, 309.38, spark=wave(309, 1.6)),
-        Quote("MSFT", "Microsoft", 487.46, 492.83, spark=wave(492, -2.2, phase=2)),
-        Quote("^GSPC", "S&P 500", 7723.55, 7736.7, spark=wave(7735, -6, phase=1)),
-        Quote("BTC-USD", "Bitcoin", 64842.03, 64053.0, spark=wave(64100, 260, phase=3)),
-        Quote("NVDA", "NVIDIA", 182.4, 178.9, spark=wave(179, 1.4, phase=4)),
-        Quote("TSLA", "Tesla", 421.8, 430.2, spark=wave(430, -3.1, phase=5)),
-    ]
-
-
-def _stub_outlook(card) -> None:
-    """A realistic week, including an event in progress."""
-    import datetime as _dt
-    from widgets.core.calsource import Agenda, Event
-    now = _dt.datetime.now()
-    t = now.replace(minute=0, second=0, microsecond=0)
-
-    def ev(offset_h, mins, title, loc="", cal="work", all_day=False):
-        s = t + _dt.timedelta(hours=offset_h)
-        return Event(s, s + _dt.timedelta(minutes=mins), title, loc, all_day, cal)
-
-    card.agenda = Agenda(events=[
-        ev(-0.5, 60, "Design review", "Teams", "work"),
-        ev(2, 30, "1:1 with Sam", "Teams", "work"),
-        ev(4, 45, "Deploy window", "", "ops"),
-        ev(25, 60, "Dentist", "Bay Street", "personal"),
-        ev(27, 90, "Sprint planning", "Room 4", "work"),
-        ev(50, 30, "Coffee with Alex", "Nero", "personal"),
-        ev(74, 60, "Retro", "Teams", "work"),
-    ], source="ics", fetched=_dt.datetime.now().timestamp())
-    card._fetching = True          # don't kick off a live fetch
-
-
-def _stub_media(card) -> None:
-    """A track mid-play, with a position, so the bar and times are visible."""
-    from widgets.core.media import NowPlaying
-    card.np = NowPlaying(
-        title="Take me to the future", artist="Kavinsky", source="Spotify",
-        playing=True, position=57.0, duration=145.0, available=True,
-        backend="stub")
-
-
-def _stub_comms(card) -> None:
-    """A short exchange, including a live claim - the states worth looking at."""
-    import sys as _sys
-    mb = _sys.modules.get("agentmail")
-    if mb is None:
-        return
-    now = _t_now = __import__("time").time()
-
-    def m(ago, sender, to, kind, subject, body=""):
-        return mb.Message(id=f"{int(ago)}", ts=now - ago, sender=sender, to=to,
-                          kind=kind, subject=subject, body=body,
-                          thread="frosted-transport")
-
-    card.messages = [
-        m(2400, "claude", "codex", "note", "Media transport is frosted glass now",
-          "Each disc blurs what is behind it, including the disc underneath."),
-        m(1900, "codex", "claude", "ask", "Should the bays use the same blur?",
-          "It would cost a buffer per bay."),
-        m(1100, "claude", "codex", "answer", "No - keep the bays cheap",
-          "The workspace repaints 11x a second."),
-        m(420, "codex", "all", "claim", "editing the avatar rig"),
-        m(90, "codex", "claude", "done", "Codex avatar landed"),
-    ]
-    card.claims = {"widgets/core/avatars.py": ("codex", now - 420, "avatar rig")}
-    card._sig = "stub"          # stop on_tick replacing it with the real mailbox
-
-
-def _stub_workspace(card) -> None:
-    """One bay working, one idle - the state worth looking at."""
-    import time as _t
-    from widgets.core.agents import AgentState
-    now = _t.time()
-    card.states = [
-        AgentState("claude", "Claude", active=True, event="PostToolUse",
-                   tool="Edit", count=9, started=now - 154, ts=now, seen=True,
-                   elapsed=154.0),
-        AgentState("codex", "Codex", active=False, event="Stop", tool="",
-                   count=4, started=now - 400, ts=now - 300, seen=True),
-    ]
-    card.phase = 1.15
-    card._emit_sparks("claude")
-    for _ in range(3):
-        card.on_tick()
 
 
 def _contact_sheet(out: str, made) -> None:
@@ -966,15 +1052,23 @@ def _contact_sheet(out: str, made) -> None:
 # --------------------------------------------------------------------------- #
 #  Normal launch
 # --------------------------------------------------------------------------- #
-def run() -> int:
+def run(open_window: bool = True) -> int:
+    import threading
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
-    from widgets.core import store, winapi
+    from widgets.core import startup, store, winapi
     from widgets.core.board import Board, load_builtin_tiles
     from widgets.tray import WidgetTray
 
+    winapi.set_app_id(APP_ID)           # before any window exists
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    app.setApplicationName("PC Widgets")
+    if startup.icon_path():
+        app.setWindowIcon(QIcon(startup.icon_path()))
 
     load_builtin_tiles()
     state = store.load(winapi.work_area())
@@ -984,46 +1078,77 @@ def run() -> int:
     tray = WidgetTray(board, app)
     tray.install_hotkey(HOTKEY_ID, winapi.MOD_CONTROL | winapi.MOD_ALT, VK_W)
     app.aboutToQuit.connect(board.persist)
+    if open_window:
+        QTimer.singleShot(0, tray.show_window)
+
+    # A Startup shortcut made before the app had a window would open it at
+    # every boot. Checking costs a file read; fixing it, once, is a PowerShell
+    # call - so off the GUI thread.
+    threading.Thread(target=startup.refresh_startup_link, daemon=True).start()
 
     print(f"{len(board.cards)} widgets on the board. "
-          f"Ctrl+Alt+W brings them to the front. Tray icon to add more.")
+          f"Ctrl+Alt+W brings them to the front. Tray icon to open the app.")
     return app.exec()
+
+
+def _knock() -> bool:
+    """Ask the copy that is already running to open its window.
+
+    Retried for a few seconds: a launch right behind another can arrive while
+    that board is still building and has no window to receive the knock yet.
+    """
+    import time
+
+    from widgets.core import winapi
+    msg = winapi.register_message(winapi.SHOW_MESSAGE)
+    for _ in range(10):
+        if winapi.signal_window(winapi.CONTROL_TITLE, msg):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def main() -> int:
     args = set(sys.argv[1:])
     if "--selftest" in args:
         return selftest()
-    if args & {"--install-startup", "--startup", "--autostart"}:
+    # The shortcut flags combine - the README's "fix all three in one go" is
+    # `--app --shortcut --install-startup` - so each one runs, then it exits.
+    shortcut_flags = {"--install-startup", "--startup", "--autostart",
+                      "--remove-startup", "--shortcut", "--app"}
+    if args & shortcut_flags:
         from widgets.core import startup
-        ok = startup.enable()
-        print(f"start with Windows: {'on' if ok else 'FAILED'}"
-              f"  ({startup.startup_link()})")
+        ok = True
+        if args & {"--install-startup", "--startup", "--autostart"}:
+            done = startup.enable()
+            ok &= done
+            print(f"start with Windows: {'on' if done else 'FAILED'}"
+                  f"  ({startup.startup_link()})")
+        if "--remove-startup" in args:
+            startup.disable()
+            print("start with Windows: off")
+        if "--shortcut" in args:
+            path = startup.create_desktop_shortcut()
+            ok &= bool(path)
+            print(f"desktop shortcut: {path or 'FAILED'}")
+        if "--app" in args:
+            path = startup.create_app_shortcut()
+            ok &= bool(path)
+            print(f"launcher in folder: {path or 'FAILED'}")
         return 0 if ok else 1
-    if "--remove-startup" in args:
-        from widgets.core import startup
-        startup.disable()
-        print("start with Windows: off")
-        return 0
-    if "--shortcut" in args:
-        from widgets.core import startup
-        path = startup.create_desktop_shortcut()
-        print(f"desktop shortcut: {path or 'FAILED'}")
-        return 0 if path else 1
-    if "--app" in args:
-        from widgets.core import startup
-        path = startup.create_app_shortcut()
-        print(f"launcher in folder: {path or 'FAILED'}")
-        return 0 if path else 1
     if "--reset" in args:
         from widgets.core import store, winapi
         store.save(store.default_board(winapi.work_area()))
         print("layout reset.")
         return 0
+    background = bool(args & BACKGROUND_FLAGS)
     if _already_running():
-        print("PC Widgets is already running.")
+        if not background and _knock():
+            print("PC Widgets is already running - opened its window.")
+        else:
+            print("PC Widgets is already running.")
         return 0
-    return run()
+    return run(open_window=not background)
 
 
 if __name__ == "__main__":

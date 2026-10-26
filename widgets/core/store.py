@@ -73,6 +73,7 @@ class BoardState:
     snap: bool = False              # free placement by default
     glass: bool = True              # frosted wallpaper behind each card
     glass_tint: int = 112           # alpha of the tint over the blur
+    close_hint_shown: bool = False  # "closing the window keeps the widgets", said once
     placements: List[Placement] = field(default_factory=list)
 
 
