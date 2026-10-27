@@ -677,6 +677,37 @@ def _check_app_window() -> None:
                     pump(0.6)
                     win.grab().save(os.path.join(out, f"_app_{theme}_{page}.png"))
 
+            # The window is cut to the widgets' shape: solid inside, see-through
+            # past the corner's curve, with its shadow in a margin round it that
+            # resizes the window - and the margin goes when it is maximised.
+            from widgets.ui import chrome, theme as look
+            assert win.testAttribute(Qt.WA_TranslucentBackground), "the window is not layered"
+            m = win.frame_margin()
+            assert m == look.WINDOW_SHADOW, f"the shadow margin is {m}"
+            shot = win.grab().toImage()
+            body = win.body_rect()
+            solid = shot.pixelColor(body.center()).alpha()
+            corner = shot.pixelColor(body.left() + 2, body.top() + 2).alpha()
+            far = shot.pixelColor(0, 0).alpha()
+            assert solid == 255 and corner < 250 and far == 0, (
+                f"window shape: body {solid}, past the curve {corner}, margin corner {far}")
+            mid_y = body.center().y()
+            for pt, want in ((QPointF(body.center()), None),
+                             (QPointF(m - 4, mid_y), chrome.HTLEFT),
+                             (QPointF(body.right() + 4, mid_y), chrome.HTRIGHT),
+                             (QPointF(body.left() + 3, body.top() + 3), chrome.HTTOPLEFT),
+                             (QPointF(body.right() - 2, body.bottom() - 2),
+                              chrome.HTBOTTOMRIGHT)):
+                got = win.edge_hit(pt)
+                assert got == want, f"edge at {pt.x(), pt.y()} answered {got}, not {want}"
+            win.showMaximized()
+            pump(0.2)
+            assert win.frame_margin() == 0 and win.edge_hit(QPointF(2, 2)) is None, (
+                "a maximised window kept its margin")
+            win.showNormal()
+            pump(0.2)
+            assert win.frame_margin() == m, "the margin did not come back on restore"
+
             # A wheel notch glides through many positions rather than jumping,
             # and lands exactly where one notch should.
             win.show_page("gallery")
@@ -702,7 +733,8 @@ def _check_app_window() -> None:
     finally:
         WidgetCard.start = real_start
     print("  app window: a tile per widget, Add places clear of other cards, "
-          "Remove and Undo round-trip, wheel scrolling glides; pages in "
+          "Remove and Undo round-trip, cut to the widgets' shape with a margin "
+          "that resizes and goes when maximised, wheel scrolling glides; pages in "
           "_selftest/_app_*.png")
 
 

@@ -48,7 +48,7 @@ Right-click the tray icon for a quick menu with the common settings.
 
 Three pages, down the side:
 
-- **Gallery** — every widget, previewed live over your own wallpaper. Pick a
+- **Gallery** — every widget, previewed live and at actual size. Pick a
   size and press **Add**: the widget lands in the first clear spot on the main
   screen and is lifted above your windows for a moment, ringed in the accent
   colour, so you can see where it went. A badge shows which ones you already
@@ -67,27 +67,45 @@ can't drift from what a widget actually looks like. Nothing in the window keeps
 its own copy of the board: a change made from a card's right-click menu or the
 tray shows up in the window, and the other way round.
 
-**The look.** The window is made of the widgets' own material: the blurred
-wallpaper under a heavy tint (the idea behind Windows 11's Mica), the sidebar
-more see-through than the content, raised cards with an edge lit from above and
-a real soft shadow, and controls that ease between states instead of snapping
-(`widgets/ui/theme.py`). The stock title bar is replaced by drawn caption
-buttons, but the window keeps everything Windows hangs off a real frame - the
-shadow, rounded corners, Aero Snap, Win+arrow, the minimise and maximise
-animations - by keeping the frame styles and making the frame zero-sized
-instead (`widgets/ui/chrome.py`).
+**The look.** Solid, and shaped like the widgets. In the dark theme the window
+is pure black with dark-grey panels on it; in the light theme it is pure white
+with light-grey ones: the sidebar, the gallery's cards, the grouped settings
+lists. Every panel is cut with the widgets' own corner, the same continuous
+curve at the same 26 px radius, and so is the window itself. A panel inside
+another (the sidebar inside the window, a preview inside its card) has its
+radius cut by the gap between them, so the two curves run parallel instead of
+pinching. There is no blur or translucency: on flat colour only the shapes and
+the type are left to read, so both have to be exact. Buttons and the small
+controls are capsules, and every control eases between states instead of
+snapping (`widgets/ui/theme.py`).
+
+Windows can't draw that corner: the corners it rounds are a fixed 8 px, and
+circular. So the window is a layered one, transparent per pixel, that draws its
+own outline, and its own soft shadow in a transparent margin round it. The
+stock title bar is replaced by drawn caption buttons, but the window keeps what
+Windows hangs off a real frame (Aero Snap, Win+arrow, the system menu, resizing
+from the edges) by keeping the frame styles and making the frame zero-sized
+instead. It resizes from the shadow just outside its edge too, where Windows 11
+keeps its own invisible resize border. Maximised or snapped, it fills its space
+exactly, with square corners, as Windows 11's own windows do. The shadow's
+faintest fringe is cut to nothing, because in a layered window any pixel that
+isn't fully transparent takes the mouse (`widgets/ui/chrome.py`).
 
 **Scrolling.** The mouse wheel glides rather than stepping: each notch eases
 over about a fifth of a second, ticking at the refresh rate of the screen the
 window is on - 5 ms on a 200 Hz panel. A glide is only as smooth as a frame is
-cheap, and the frosted backdrop means a scroll can't just shift pixels: every
-frame repaints everything in view. So cards, controls, text and the backdrop
-each paint once into a cached image and are blitted until something about them
-changes, which took a scroll frame from about 12 ms to about 3 ms. For the same
-reason the window carries no stylesheet (one on a window routes every widget
-inside it through Qt's slower stylesheet style), live thumbnails refresh one at
-a time and never mid-scroll, and the gallery's hover lift waits until a scroll
-has settled rather than lifting every card the content glides under.
+cheap, and content drawn over the window's own backdrop means a scroll can't
+just shift pixels: every frame repaints everything in view. So cards, controls,
+text and the backdrop each paint once into a cached image and are blitted until
+something about them changes, which took a scroll frame from about 12 ms to
+under 3 ms to paint. A layered window then costs a little more to put on
+screen, since Windows takes its own copy of whatever changed, so the backdrop
+under a scroll is filled as plain colour rather than copied from its picture;
+a typical frame comes to under 4 ms all in. For the same reason the window carries no
+stylesheet (one on a window routes every widget inside it through Qt's slower
+stylesheet style), live thumbnails refresh one at a time and never mid-scroll,
+and the gallery's hover highlight waits until a scroll has settled rather than
+lighting every card the content glides under.
 
 Launching the app while it's already running doesn't start a second board. The
 new copy finds the running one's hidden control window, hands it the right to
@@ -347,7 +365,7 @@ here. Both are applied by DWM to the whole *window*, and the window is
 deliberately larger than the card so the corners have room to antialias and the
 shadow has somewhere to fall. A DWM material paints that transparent gutter too,
 which puts every card in a grey block. DWM can round the window itself, but only
-at its own ~8px radius, nowhere near the 28px the cards use.
+at its own ~8px radius, nowhere near the 26px the cards use.
 
 So `glass.py` does the blur instead, which is possible because of *where* these
 widgets live: parked on the desktop layer, the thing behind them is the
@@ -458,8 +476,10 @@ window's three pages are rendered as well, as `_selftest/_app_*.png`.
 It also asserts that a free drop leaves a card exactly where it was released, and
 that snap mode still snaps — the regression that matters most here — plus that a
 cropped photo always fills its card and lands on the part asked for, that the
-crop editor keeps on Done and restores on Cancel, and that the gallery's Add,
-Remove and Undo really change the board.
+crop editor keeps on Done and restores on Cancel, that the gallery's Add,
+Remove and Undo really change the board, and that the app window is cut to the
+widgets' shape - solid inside, see-through past the corner's curve - with a
+shadow margin that resizes the window and goes when it is maximised.
 
 The checks that save a layout redirect *both* copies of it — `%APPDATA%` and the
 mirror in `.boardstate/` — to a scratch folder. They used to redirect only

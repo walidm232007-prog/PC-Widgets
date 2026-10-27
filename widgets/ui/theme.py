@@ -3,23 +3,25 @@ theme.py
 ========
 The look of the app window and its dialogs.
 
-The window is made of the same stuff as the widgets: frosted glass over the
-wallpaper. Its background is the blurred desktop under a heavy tint - the idea
-behind Windows 11's Mica and macOS's window tinting - with the sidebar more
-see-through than the content, so it reads as a separate sheet. On top sit
-*surfaces*: translucent fills with an edge that is lit from above (brighter on
-the top edge than the bottom) and a real soft shadow underneath. Flat fills
-with a uniform 1px outline are most of what makes a desktop app look like a web
-admin page; light and depth are most of what makes one look finished.
+Solid, and shaped like the widgets. The window is pure black in the dark theme
+and pure white in the light one; everything on it - the sidebar, the gallery's
+cards, the grouped settings lists - is a panel of flat grey, a few steps off
+the window's colour, with the widgets' own corner: the same continuous curve at
+the same radius (see ``smooth``). A panel inside another follows its curve
+concentrically, its radius shrunk by the gap between them, so nested corners
+run parallel instead of pinching. No translucency, no blur, no gradients: on a
+flat colour the only things left to read are the shapes and the type, so both
+have to be exact.
 
-The greys are Apple's: neutral rather than bluish, and the label colours are
-white or black at descending alpha (see typography.py) rather than separate
-greys, so text sits correctly on whatever tint the wallpaper gives the window.
+The greys are neutral rather than bluish, and the label colours are white or
+black at descending alpha (see typography.py) rather than separate greys, so
+text sits correctly on the window and on every panel alike.
 
 Controls Qt has no good-looking version of are drawn here: buttons, a segmented
 control, a switch, colour swatches, keycaps and the coloured icon tiles of a
-settings list. Every interactive one eases between states rather than snapping,
-which costs little and is a large part of why native apps feel expensive.
+settings list. Buttons and the other small controls are capsules. Every
+interactive one eases between states rather than snapping, which costs little
+and is a large part of why native apps feel expensive.
 
 There is one active theme at a time, held here rather than passed to every
 control, so a theme change is one call and a repaint.
@@ -46,7 +48,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import typography
+from ..core.card import RADIUS, squircle
 from ..core.palette import Palette, _mix
+
+# Panels share the widgets' corner exactly. INSET is the gap between the
+# window's edge and a panel inside it (the sidebar), whose own corner is the
+# window's less that gap, so the two curves stay parallel.
+CORNER = RADIUS
+INSET = 8.0
 
 
 def rgba(r: int, g: int, b: int, a: float = 1.0) -> str:
@@ -73,16 +82,13 @@ def mix(a: str, b: str, t: float) -> QColor:
 class Ui:
     dark: bool
     accent: str
-    tint: str            # over the blurred wallpaper, content side
-    tint_side: str       # sidebar - more of the wallpaper shows through
-    solid: str           # the same, opaque, for when there is no wallpaper
-    solid_side: str
-    surface: str         # raised cards and grouped lists
+    base: str            # the window: black, or white
+    surface: str         # panels on it: the sidebar, cards, grouped lists
     surface_hi: str      # ... hovered
-    edge_top: str        # card edge, lit from above
-    edge_bottom: str
-    well: str            # sunken areas: previews, fields
-    control: str         # button and track fills
+    edge: str            # hairline round a panel
+    frame: str           # hairline round the window itself
+    well: str            # behind a widget preview; a step away from the widgets' own fill
+    control: str         # button and track fills, on a panel
     control_hi: str
     pill: str            # the selected segment, the selected nav item
     line: str            # separators
@@ -92,7 +98,7 @@ class Ui:
     danger: str
     good: str
     hud: str             # floating toolbars and toasts
-    shadow: int          # drop-shadow strength, 0-255
+    shadow: int          # the window's drop shadow, 0-255
 
     @property
     def accent_soft(self) -> str:
@@ -106,37 +112,31 @@ class Ui:
 
 
 def build(palette: Palette) -> Ui:
+    # Opaque greys throughout, so a panel is the same colour over the window,
+    # over another panel or in a cached picture. The well behind a preview is
+    # lighter than the panel in the dark theme and darker in the light one:
+    # either way, away from the widgets' own near-black or white.
     if palette.dark:
         return Ui(dark=True, accent=palette.accent,
-                  tint=rgba(13, 13, 17, 0.86), tint_side=rgba(26, 26, 32, 0.70),
-                  solid="#121216", solid_side="#1b1b20",
-                  surface=rgba(255, 255, 255, 0.045),
-                  surface_hi=rgba(255, 255, 255, 0.075),
-                  edge_top=rgba(255, 255, 255, 0.15),
-                  edge_bottom=rgba(255, 255, 255, 0.04),
-                  well=rgba(0, 0, 0, 0.30),
-                  control=rgba(255, 255, 255, 0.07),
-                  control_hi=rgba(255, 255, 255, 0.12),
-                  pill=rgba(255, 255, 255, 0.15),
+                  base="#000000", surface="#141416", surface_hi="#1b1b1e",
+                  edge=rgba(255, 255, 255, 0.06), frame=rgba(255, 255, 255, 0.13),
+                  well="#1e1e21",
+                  control="#232327", control_hi="#2d2d32", pill="#3d3d43",
                   line=rgba(255, 255, 255, 0.08),
-                  text="#f5f5f7", text_dim=rgba(235, 235, 245, 0.62),
-                  text_faint=rgba(235, 235, 245, 0.32),
+                  text="#f5f5f7", text_dim=rgba(235, 235, 245, 0.60),
+                  text_faint=rgba(235, 235, 245, 0.30),
                   danger="#ff453a", good="#30d158",
-                  hud=rgba(28, 28, 33, 0.92), shadow=120)
+                  hud="#1c1c1f", shadow=150)
     return Ui(dark=False, accent=palette.accent,
-              tint=rgba(247, 247, 250, 0.90), tint_side=rgba(236, 236, 242, 0.76),
-              solid="#f5f5f7", solid_side="#ebebef",
-              surface=rgba(255, 255, 255, 0.80),
-              surface_hi=rgba(255, 255, 255, 0.95),
-              edge_top=rgba(0, 0, 0, 0.05), edge_bottom=rgba(0, 0, 0, 0.10),
-              well=rgba(0, 0, 0, 0.05),
-              control=rgba(0, 0, 0, 0.05), control_hi=rgba(0, 0, 0, 0.085),
-              pill=rgba(255, 255, 255, 1.0),
+              base="#ffffff", surface="#f4f4f6", surface_hi="#eeeef1",
+              edge=rgba(0, 0, 0, 0.05), frame=rgba(0, 0, 0, 0.11),
+              well="#e6e6ea",
+              control="#e6e6ea", control_hi="#dcdce1", pill="#ffffff",
               line=rgba(0, 0, 0, 0.08),
               text="#1d1d1f", text_dim=rgba(60, 60, 67, 0.64),
               text_faint=rgba(60, 60, 67, 0.34),
               danger="#ff3b30", good="#34c759",
-              hud=rgba(36, 36, 40, 0.92), shadow=56)
+              hud="#1c1c1f", shadow=80)
 
 
 _current: Optional[Ui] = None
@@ -191,13 +191,7 @@ def stylesheet(ui: Ui) -> str:
     QSlider::handle:horizontal {{ background: #ffffff; width: 18px; height: 18px;
                                   margin: -7px 0; border-radius: 9px;
                                   border: 1px solid rgba(0,0,0,0.20); }}
-    QLineEdit#Search {{ background: {css(ui.control)}; color: {ui.text};
-                        border: 1px solid {css(ui.line)}; border-radius: 10px;
-                        padding: 7px 10px 7px 32px;
-                        selection-background-color: {ui.accent};
-                        selection-color: #ffffff; }}
-    QLineEdit#Search:focus {{ border: 1px solid {ui.accent}; }}
-    QToolTip {{ background: {ui.solid_side}; color: {ui.text};
+    QToolTip {{ background: {ui.surface}; color: {ui.text};
                 border: 1px solid {css(ui.line)}; padding: 5px 9px; }}
     """
 
@@ -209,13 +203,13 @@ def qpalette(ui: Ui) -> QPalette:
     whatever the app's theme says.
     """
     pal = QPalette()
-    for role, colour in ((QPalette.Window, ui.solid), (QPalette.Base, ui.solid_side),
-                         (QPalette.AlternateBase, ui.solid_side),
-                         (QPalette.Button, ui.solid_side),
+    for role, colour in ((QPalette.Window, ui.base), (QPalette.Base, ui.surface),
+                         (QPalette.AlternateBase, ui.surface),
+                         (QPalette.Button, ui.surface),
                          (QPalette.WindowText, ui.text), (QPalette.Text, ui.text),
                          (QPalette.ButtonText, ui.text),
                          (QPalette.PlaceholderText, ui.text_faint),
-                         (QPalette.ToolTipBase, ui.solid_side),
+                         (QPalette.ToolTipBase, ui.surface),
                          (QPalette.ToolTipText, ui.text),
                          (QPalette.Highlight, ui.accent),
                          (QPalette.HighlightedText, "#ffffff")):
@@ -405,6 +399,7 @@ class Text(Cached, QWidget):
         super().__init__(parent)
         self._text = text
         self._font = font(size, weight)
+        self._font_key = self._font.key()       # asked for on every paint; slow to build
         self._tone = tone
         self._wrap = wrap
         self._align = align
@@ -466,7 +461,7 @@ class Text(Cached, QWidget):
 
     def paint_key(self):
         m = self.contentsMargins()
-        return (self._text, self._font.key(), self._tone, int(self._align), self._wrap,
+        return (self._text, self._font_key, self._tone, int(self._align), self._wrap,
                 self.isEnabled(), m.left(), m.top(), m.right(), m.bottom())
 
     def paint(self, p: QPainter) -> None:
@@ -513,38 +508,15 @@ def ease_to(anim: QVariantAnimation, target: float) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Material: noise, shadows, surfaces
+#  Shapes, shadows, panels
 # --------------------------------------------------------------------------- #
-_noise: Dict[bool, QPixmap] = {}
+def smooth(rect: QRectF, radius: float = CORNER) -> QPainterPath:
+    """A panel's outline: the widgets' continuous corner (card.squircle).
 
-
-def noise(dark: bool) -> Optional[QPixmap]:
-    """A faint grain to lay over the window's material.
-
-    Apple's materials carry a little noise; it is what stops a large soft
-    gradient from banding, and why one reads as frosted glass rather than as a
-    flat colour. Generated once - numpy if available, otherwise nothing at all.
+    The window, the sidebar, the cards and the grouped lists are all cut with
+    this, so the app reads as made of the same pieces as the widgets it places.
     """
-    if dark in _noise:
-        return _noise[dark]
-    try:
-        import numpy as np
-    except Exception:
-        _noise[dark] = None
-        return None
-    n = 160
-    rng = np.random.default_rng(7)
-    v = rng.integers(0, 256, (n, n), dtype=np.uint16)
-    a = 10 if dark else 7
-    px = np.empty((n, n, 4), dtype=np.uint8)
-    pv = (v * a // 255).astype(np.uint8)            # premultiplied grey
-    px[..., 0] = pv
-    px[..., 1] = pv
-    px[..., 2] = pv
-    px[..., 3] = a
-    img = QImage(px.data, n, n, n * 4, QImage.Format_RGBA8888_Premultiplied).copy()
-    _noise[dark] = QPixmap.fromImage(img)
-    return _noise[dark]
+    return squircle(rect, radius)
 
 
 _shadows: Dict[tuple, Tuple[QImage, int]] = {}
@@ -632,41 +604,106 @@ def rounded(rect: QRectF, radius: float) -> QPainterPath:
     return path
 
 
-def paint_surface(p: QPainter, rect: QRectF, radius: float, hover: float = 0.0,
-                  shadow: bool = True, lift: float = 0.0, fill: Optional[QColor] = None) -> None:
-    """A raised card: soft shadow, translucent fill, and an edge lit from above.
+def paint_surface(p: QPainter, rect: QRectF, radius: float = CORNER, hover: float = 0.0,
+                  fill: Optional[QColor] = None, edge: bool = True) -> None:
+    """A panel: flat grey in the widgets' shape, with a hairline round it.
 
-    ``hover`` brightens the fill and the edge; ``lift`` (0..1) deepens and
-    widens the shadow - a card coming up toward you, which is the hover state
-    that makes a grid of cards feel physical.
+    ``hover`` (0..1) lifts the grey a step toward the text colour and firms up
+    the hairline, which is faint enough at rest to vanish against the window
+    and still sharpens the curve, which a flat fill alone leaves soft.
     """
     ui = current()
-    if shadow:
-        # Two shadows, resting and lifted, cross-faded. Interpolating the blur
-        # itself would render a new one on every frame of the animation.
-        base = ui.shadow
-        if lift < 1.0:
-            p.save()
-            p.setOpacity(p.opacity() * (1.0 - lift))
-            paint_shadow(p, rect, radius, blur=14, alpha=int(base * 0.55), dy=4)
-            p.restore()
-        if lift > 0.0:
-            p.save()
-            p.setOpacity(p.opacity() * lift)
-            paint_shadow(p, rect, radius, blur=24, alpha=int(base * 0.9), dy=9)
-            p.restore()
-    path = rounded(rect, radius)
-    p.fillPath(path, fill if fill is not None else mix(ui.surface, ui.surface_hi, hover))
-    edge = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-    top = mix(ui.edge_top, rgba(255, 255, 255, 0.24) if ui.dark else rgba(0, 0, 0, 0.07),
-              hover)
-    edge.setColorAt(0.0, top)
-    edge.setColorAt(1.0, QColor(ui.edge_bottom))
-    p.save()
-    p.setBrush(Qt.NoBrush)
-    p.setPen(QPen(edge, 1.0))
-    p.drawPath(rounded(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
-    p.restore()
+    p.fillPath(smooth(rect, radius),
+               fill if fill is not None else mix(ui.surface, ui.surface_hi, hover))
+    if edge:
+        line = QColor(ui.edge)
+        line.setAlphaF(min(1.0, line.alphaF() * (1.0 + 1.5 * hover)))
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(line, 1.0))
+        p.drawPath(smooth(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
+        p.restore()
+
+
+# The window's own shadow falls in a transparent margin this wide round it.
+WINDOW_SHADOW = 24
+_window_shadows: Dict[tuple, Tuple[QImage, int, int]] = {}
+
+
+def _window_shadow(radius: float, strength: int) -> Optional[Tuple[QImage, int, int]]:
+    """The window's drop shadow as a nine-slice: (image, pad, k).
+
+    A window can be any size, and blurring a full-size mask on every step of a
+    resize costs tens of milliseconds a step. But a shadow is the same all the
+    way along a straight edge, so it is rendered once, round a small square with
+    the window's corners whose sides are long enough for their middles to be a
+    true straight-edge shadow, and then stretched: the four corners copied, and
+    the middle pixel of each side drawn out along the window's edge.
+
+    Two layers, as a real shadow has: a broad soft one, and a tight one that
+    seats the edge. Alpha too faint to see is cut to nothing, which matters more
+    than it looks: in a layered window every pixel that isn't fully transparent
+    takes the mouse, so an invisible fringe would swallow clicks meant for
+    whatever is behind the window.
+    """
+    key = (round(radius, 1), int(strength))
+    hit = _window_shadows.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    pad = WINDOW_SHADOW
+    span = int(radius * 1.6) + 24           # the curve, then ~3 sigma of straight edge
+    side = span * 2 + 1
+    n = side + pad * 2
+
+    def layer(dy: float, blur: int, alpha: float):
+        shape = QImage(n, n, QImage.Format_Alpha8)
+        shape.fill(0)
+        sp = QPainter(shape)
+        sp.setRenderHint(QPainter.Antialiasing, True)
+        sp.setPen(Qt.NoPen)
+        sp.setBrush(QColor(0, 0, 0, 255))
+        sp.drawPath(squircle(QRectF(pad, pad + dy, side, side), radius))
+        sp.end()
+        bpl = shape.bytesPerLine()
+        raw = np.frombuffer(shape.constBits(), dtype=np.uint8, count=bpl * n)
+        return _blur_alpha(raw.reshape(n, bpl)[:, :n], blur) / 255.0 * alpha
+
+    soft = layer(4.0, 7, strength / 255.0)
+    tight = layer(1.0, 1, strength / 255.0 * 0.5)
+    a = (1.0 - (1.0 - soft) * (1.0 - tight)) * 255.0
+    a[a < 3.0] = 0.0
+    px = np.zeros((n, n, 4), dtype=np.uint8)
+    px[..., 3] = np.clip(a + 0.5, 0, 255).astype(np.uint8)
+    img = QImage(px.data, n, n, n * 4, QImage.Format_RGBA8888_Premultiplied).copy()
+    _window_shadows[key] = (img, pad, pad + span)
+    return _window_shadows[key]
+
+
+def paint_window_shadow(p: QPainter, rect: QRectF, radius: float, strength: int) -> None:
+    """The shadow of a window whose visible body is ``rect``, falling into the
+    ``WINDOW_SHADOW`` margin round it. The middle, under the body, is skipped."""
+    hit = _window_shadow(radius, strength)
+    if hit is None:
+        return
+    img, pad, k = hit
+    x0, y0 = round(rect.left()) - pad, round(rect.top()) - pad
+    x1, y1 = round(rect.right()) + pad, round(rect.bottom()) + pad
+    w, h = x1 - x0 - 2 * k, y1 - y0 - 2 * k
+    if w < 0 or h < 0:
+        return
+    far = k + 1                          # where the far corners start in the image
+    for sx, sy, dx, dy, dw, dh in (
+            (0, 0, x0, y0, k, k), (far, 0, x1 - k, y0, k, k),
+            (0, far, x0, y1 - k, k, k), (far, far, x1 - k, y1 - k, k, k)):
+        p.drawImage(QRectF(dx, dy, dw, dh), img, QRectF(sx, sy, k, k))
+    for sx, sy, sw, sh, dx, dy, dw, dh in (
+            (k, 0, 1, k, x0 + k, y0, w, k), (k, far, 1, k, x0 + k, y1 - k, w, k),
+            (0, k, k, 1, x0, y0 + k, k, h), (far, k, k, 1, x1 - k, y0 + k, k, h)):
+        p.drawImage(QRectF(dx, dy, dw, dh), img, QRectF(sx, sy, sw, sh))
 
 
 # --------------------------------------------------------------------------- #
@@ -864,14 +901,13 @@ def glyph(p: QPainter, kind: str, r: QRectF, colour, width: float = 1.6) -> None
 #  Buttons
 # --------------------------------------------------------------------------- #
 class Button(Cached, QAbstractButton):
-    """A finished button: gradient, an edge lit from above, eased hover, a pressed
-    state, and an optional glyph.
+    """A capsule button: a flat fill, eased hover, a pressed state, and an
+    optional glyph. With a glyph and no text it is a circle.
 
     ``kind``: "primary" (accent), "secondary" (quiet fill), "ghost" (no fill
     until hovered, accent text), "danger" (red text), "plain" (dim text) and
     "hud" (light text, for controls floating over a photo in either theme).
-    Primary buttons are pills unless told otherwise; the others have softer,
-    rounded-rectangle corners.
+    ``pill=False`` gives softer rounded-rectangle corners instead.
     """
 
     def __init__(self, text: str = "", kind: str = "secondary",
@@ -883,7 +919,7 @@ class Button(Cached, QAbstractButton):
         self.kind = kind
         self.glyph_kind = glyph_kind
         self._h = height
-        self.pill = (kind == "primary") if pill is None else pill
+        self.pill = True if pill is None else pill
         self._hover = eased(self, 140)
         self._flash: Optional[Tuple[str, str, str]] = None
         self.setCursor(Qt.PointingHandCursor)
@@ -963,27 +999,12 @@ class Button(Cached, QAbstractButton):
                 p.fillPath(path, QColor(ui.control))
                 ink = QColor(ui.text_faint)
             else:
-                grad = QLinearGradient(r.topLeft(), r.bottomLeft())
-                grad.setColorAt(0.0, base.lighter(118 + int(10 * t)))
-                grad.setColorAt(1.0, base.darker(104 if not down else 116))
-                p.fillPath(path, grad)
-                p.setPen(QPen(QColor(255, 255, 255, 60 + int(30 * t)), 1.0))
-                p.drawLine(QPointF(r.left() + rad * 0.7, r.top() + 1.0),
-                           QPointF(r.right() - rad * 0.7, r.top() + 1.0))
-                p.setPen(QPen(QColor(0, 0, 0, 50), 1.0))
-                p.setBrush(Qt.NoBrush)
-                p.drawPath(path)
+                fill = base.darker(112) if down else mix(base.name(), base.lighter(112).name(), t)
+                p.fillPath(path, fill)
                 ink = QColor("#ffffff")
         else:
             if self.kind == "secondary":
-                fill = mix(ui.control, ui.control_hi, t)
-                p.fillPath(path, fill)
-                edge = QLinearGradient(r.topLeft(), r.bottomLeft())
-                edge.setColorAt(0.0, QColor(ui.edge_top))
-                edge.setColorAt(1.0, QColor(ui.edge_bottom))
-                p.setPen(QPen(edge, 1.0))
-                p.setBrush(Qt.NoBrush)
-                p.drawPath(path)
+                p.fillPath(path, mix(ui.control, ui.control_hi, t))
                 ink = QColor(ui.text if self.isEnabled() else ui.text_faint)
             else:
                 hov = QColor(255, 255, 255, 30) if self.kind == "hud" else QColor(ui.control_hi)
@@ -1027,7 +1048,8 @@ class Button(Cached, QAbstractButton):
 #  Segmented control
 # --------------------------------------------------------------------------- #
 class Segmented(Cached, QWidget):
-    """macOS's segmented control: one choice of a few, the pill slides to it."""
+    """A segmented control: one choice of a few in a capsule track, the
+    selected pill sliding to it."""
 
     changed = Signal(str)
 
@@ -1118,18 +1140,15 @@ class Segmented(Cached, QWidget):
         ui = current()
         hints(p)
         r = QRectF(self.rect())
-        rad = min(9.0, r.height() / 2 - 1)
+        rad = r.height() / 2
         p.fillPath(rounded(r, rad), QColor(ui.control))
 
         n = len(self.options)
         seg = (r.width() - 4) / n
         pill = QRectF(2 + self._pill * seg, 2, seg, r.height() - 4)
-        paint_shadow(p, pill, rad - 2, blur=4, alpha=70 if ui.dark else 34, dy=1)
+        if not ui.dark:
+            paint_shadow(p, pill, rad - 2, blur=4, alpha=40, dy=1)
         p.fillPath(rounded(pill, rad - 2), QColor(ui.pill))
-        if ui.dark:
-            p.setPen(QPen(QColor(255, 255, 255, 34), 1.0))
-            p.drawLine(QPointF(pill.left() + rad, pill.top() + 0.8),
-                       QPointF(pill.right() - rad, pill.top() + 0.8))
 
         for i, (_k, label) in enumerate(self.options):
             cell = QRectF(2 + i * seg, 0, seg, r.height())
@@ -1465,9 +1484,9 @@ class SearchField(QLineEdit):
     def restyle(self) -> None:
         ui = current()
         self.setStyleSheet(
-            f"QLineEdit {{ background: {css(ui.control)}; color: {ui.text};"
-            f" border: 1px solid {css(ui.line)}; border-radius: 10px;"
-            f" padding: 7px 10px 7px 32px; selection-background-color: {ui.accent};"
+            f"QLineEdit {{ background: {css(ui.surface)}; color: {ui.text};"
+            f" border: 1px solid {css(ui.edge)}; border-radius: 17px;"
+            f" padding: 7px 14px 7px 34px; selection-background-color: {ui.accent};"
             f" selection-color: #ffffff; }}"
             f"QLineEdit:focus {{ border: 1px solid {ui.accent}; }}")
         pal = self.palette()
@@ -1477,14 +1496,15 @@ class SearchField(QLineEdit):
     def paintEvent(self, ev) -> None:
         super().paintEvent(ev)
         p = hints(QPainter(self))
-        glyph(p, "search", QRectF(11, (self.height() - 14) / 2.0, 14, 14),
+        glyph(p, "search", QRectF(13, (self.height() - 14) / 2.0, 14, 14),
               current().text_dim, 1.6)
         p.end()
 
 
 class Group(Cached, QWidget):
-    """An inset-grouped list section: a rounded surface whose rows are separated
-    by hairlines that start where the row's text does, as in iOS Settings."""
+    """An inset-grouped list section: a panel in the widgets' shape whose rows
+    are separated by hairlines that start where the row's text does, as in iOS
+    Settings."""
 
     def __init__(self, parent=None, inset: int = 16) -> None:
         super().__init__(parent)
@@ -1507,8 +1527,7 @@ class Group(Cached, QWidget):
     def paint(self, p: QPainter) -> None:
         ui = current()
         hints(p)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        paint_surface(p, r, 14.0, shadow=False)
+        paint_surface(p, QRectF(self.rect()))
         p.setPen(QPen(QColor(ui.line), 1.0))
         shown = [w for w in self.rows if not w.isHidden()]
         for w in shown[:-1]:

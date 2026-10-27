@@ -38,17 +38,18 @@ from ..core.card import RADIUS, squircle
 from ..core.imagefit import Crop
 from . import theme
 from .chrome import Chrome
-from .theme import Button, hints, paint_shadow, rounded
+from .theme import Button, hints, paint_shadow, rounded, smooth
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 SLIDER_STEPS = 1000
 WHEEL_STEP = 1.0015          # per eighth of a degree: ~1.2x per mouse-wheel notch
 HUD_H = 46                   # the floating zoom bar
 HUD_ROOM = 72                # canvas height kept clear of the card for it
+STAGE = "#161618"            # behind the photo, in either theme
 
 
 class HudBar(QWidget):
-    """The floating zoom bar: dark glass in both themes, over the photo."""
+    """The floating zoom bar: a dark capsule in both themes, over the photo."""
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -194,10 +195,10 @@ class CropCanvas(QWidget):
 
     def paintEvent(self, _ev) -> None:
         p = hints(QPainter(self))
-        well = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setClipPath(rounded(well, 16))
+        well = QRectF(self.rect())
+        p.setClipPath(smooth(well))
         # Photos are judged against dark, so the stage is dark in both themes.
-        p.fillRect(self.rect(), QColor("#0d0d10"))
+        p.fillRect(self.rect(), QColor(STAGE))
 
         frame, k = self.frame()
         iw, ih, cw, ch = self.dims()
@@ -238,9 +239,6 @@ class CropCanvas(QWidget):
             p.restore()
         p.setPen(QPen(QColor(255, 255, 255, 190), 1.25))
         p.drawPath(card_path)
-        p.setClipping(False)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1.0))
-        p.drawPath(rounded(well, 16))
         p.end()
 
     # -- input ----------------------------------------------------------- #
@@ -305,6 +303,7 @@ class CropDialog(Chrome, QDialog):
 
         ui = theme.current()
         self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowTitle(f"Background photo — {card.title}")
         ico = startup.icon_path()
         if ico:
@@ -312,7 +311,8 @@ class CropDialog(Chrome, QDialog):
         self.setPalette(theme.qpalette(ui))
         self.setStyleSheet(theme.stylesheet(ui))
         self.setFont(theme.font(10))
-        self.resize(820, 660)
+        m = theme.WINDOW_SHADOW
+        self.resize(820 + 2 * m, 660 + 2 * m)
 
         start = (imagefit.from_config(card.config)
                  if card.config.get("image") == path else Crop())
@@ -364,18 +364,14 @@ class CropDialog(Chrome, QDialog):
 
         self._syncing = False
         self._changed()
-        self.init_chrome(lambda: card.glass, kinds=("close",))
+        self.init_chrome(kinds=("close",))
         self.canvas.setFocus()
 
     # ------------------------------------------------------------------ #
-    def paintEvent(self, _ev) -> None:
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
-        self.paint_backdrop(p)
+        self.paint_backdrop(p, ev.rect())
         p.end()
-
-    def resizeEvent(self, ev) -> None:
-        super().resizeEvent(ev)
-        self.place_chrome()
 
     def keyPressEvent(self, ev) -> None:
         if ev.key() in (Qt.Key_Return, Qt.Key_Enter):

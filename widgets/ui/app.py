@@ -5,8 +5,8 @@ The PC Widgets window - everything the tray menu does, somewhere you can see it.
 
 Three pages:
 
-- **Gallery**: every widget, previewed live and at actual size over your own
-  wallpaper, one click to put it on the desktop.
+- **Gallery**: every widget, previewed live and at actual size, one click to
+  put it on the desktop.
 - **On your desktop**: the widgets you have, each with its size, colours and
   background photo, and a way to find or remove one.
 - **Settings**: theme, accent, glass, where widgets sit, start with Windows.
@@ -15,9 +15,10 @@ The widgets are the point and this window is only how you arrange them, so
 closing it hides it: the widgets stay on the desktop, and the tray icon or
 launching the app again brings the window straight back.
 
-It is built from the materials in theme.py on the frame in chrome.py: frosted
-glass over the wallpaper, raised surfaces lit from above, and controls that
-ease between states. Nothing here keeps its own copy of the board. Every page
+It is built from the pieces in theme.py on the frame in chrome.py: a solid
+black or white window cut to the widgets' own shape, grey panels with the same
+corners, and controls that ease between states. Nothing here keeps its own copy
+of the board. Every page
 reads the cards and preferences when it draws, and redraws when the board says
 something changed - a change can as easily come from a card's right-click menu
 or the tray as from this window.
@@ -45,7 +46,7 @@ from .chrome import Chrome
 from .theme import (
     Button, Cached, Group, IconTile, SearchField, Segmented, Swatch, SwatchRow,
     Switch, Text, ease_to, eased, glyph, hints, keycap_width, paint_keycap,
-    paint_shadow, paint_surface, rounded, running,
+    paint_shadow, paint_surface, rounded, running, smooth,
 )
 
 # Gallery names and one-liners. Two tiles are both titled "Calendar" on the
@@ -306,9 +307,10 @@ class Toast(QWidget):
 
     def place(self) -> None:
         host = self.parentWidget()
+        body = host.body_rect() if hasattr(host, "body_rect") else host.rect()
         side = getattr(host, "SIDE_W", 0)
-        x = side + (host.width() - side - self.width()) // 2
-        self.move(max(8, x), host.height() - self.height() - 14)
+        x = body.left() + side + (body.width() - side - self.width()) // 2
+        self.move(max(body.left() + 8, x), body.bottom() + 1 - self.height() - 14)
 
     def dismiss(self) -> None:
         ease_to(self._show, 0.0)
@@ -407,8 +409,8 @@ class NavButton(Cached, QAbstractButton):
         r = QRectF(self.rect())
         if not self.isChecked() and self._hover.t > 0:
             fill = QColor(ui.control)
-            fill.setAlphaF(fill.alphaF() * self._hover.t)
-            p.fillPath(rounded(r, 10), fill)
+            fill.setAlphaF(fill.alphaF() * self._hover.t * 0.7)
+            p.fillPath(rounded(r, 11), fill)
         on = self.isChecked()
         glyph(p, self.glyph_kind, QRectF(16, (r.height() - 17) / 2.0, 17, 17),
               ui.accent if on else ui.text_dim, 1.6)
@@ -448,18 +450,15 @@ class PeekButton(Cached, QAbstractButton):
     def paint(self, p: QPainter) -> None:
         ui = theme.current()
         hints(p)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        r = QRectF(self.rect())
         t = self._hover.t if self.isEnabled() else 0.0
-        p.fillPath(rounded(r, 12), theme.mix(ui.control, ui.control_hi, t))
-        p.setPen(QPen(QColor(ui.line), 1.0))
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(rounded(r, 12))
+        p.fillPath(rounded(r, r.height() / 2), theme.mix(ui.control, ui.control_hi, t))
         p.setFont(theme.font(10, QFont.Medium))
         p.setPen(QColor(ui.text if self.isEnabled() else ui.text_faint))
-        p.drawText(QRectF(14, 0, r.width() - 20, r.height()),
+        p.drawText(QRectF(18, 0, r.width() - 24, r.height()),
                    Qt.AlignLeft | Qt.AlignVCenter, self.text())
         if self.isEnabled():
-            x = r.right() - 9
+            x = r.right() - 12
             for key in reversed(self.KEYS):
                 w = keycap_width(key)
                 x -= w
@@ -468,6 +467,9 @@ class PeekButton(Cached, QAbstractButton):
 
 
 class Sidebar(QWidget):
+    """Navigation, on its own panel: the window paints the panel (chrome.py),
+    inset from the window's edge with its corners following the window's."""
+
     PAGES = (("gallery", "Gallery", "gallery"),
              ("desktop", "On your desktop", "desktop"),
              ("settings", "Settings", "settings"))
@@ -476,8 +478,9 @@ class Sidebar(QWidget):
         super().__init__()
         self.win = win
         self.setFixedWidth(win.SIDE_W)
+        g = int(theme.INSET)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 78, 14, 16)
+        lay.setContentsMargins(g + 10, 86, 10, g + 10)
         lay.setSpacing(2)
         self._icon = None
         ico = startup.icon_path()
@@ -546,24 +549,22 @@ class Sidebar(QWidget):
     def paintEvent(self, _ev) -> None:
         ui = theme.current()
         p = hints(QPainter(self))
+        x = theme.INSET + 16
         if self._icon is not None:
-            p.drawPixmap(20, 15, self._icon)
+            p.drawPixmap(round(x), 26, self._icon)
         p.setFont(theme.font(12.5, QFont.Bold))
         p.setPen(QColor(ui.text))
-        p.drawText(QRectF(60, 12, 170, 20), Qt.AlignLeft | Qt.AlignVCenter, "PC Widgets")
+        p.drawText(QRectF(x + 40, 23, 160, 20), Qt.AlignLeft | Qt.AlignVCenter, "PC Widgets")
         p.setFont(theme.font(9))
         p.setPen(QColor(ui.text_dim))
-        p.drawText(QRectF(60, 32, 170, 18), Qt.AlignLeft | Qt.AlignVCenter,
+        p.drawText(QRectF(x + 40, 43, 160, 18), Qt.AlignLeft | Qt.AlignVCenter,
                    "by Studio Hendrixx")
 
         if self._pill_y is not None and any(b.isChecked() for b in self.nav.values()):
             y = self._current_pill()
             b = next(iter(self.nav.values()))
             pill = QRectF(b.geometry().left(), y, b.width(), b.height())
-            p.fillPath(rounded(pill, 10), QColor(ui.control_hi))
-            p.setPen(QPen(QColor(255, 255, 255, 22 if ui.dark else 0), 1.0))
-            p.drawLine(QPointF(pill.left() + 10, pill.top() + 0.5),
-                       QPointF(pill.right() - 10, pill.top() + 0.5))
+            p.fillPath(rounded(pill, 11), QColor(ui.control))
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(ui.accent))
             p.drawRoundedRect(QRectF(pill.left() + 1, pill.center().y() - 8, 3, 16), 1.5, 1.5)
@@ -627,10 +628,12 @@ def page(header: PageHeader, body: QWidget) -> QWidget:
 #  Gallery
 # --------------------------------------------------------------------------- #
 class GalleryTile(Cached, QWidget):
-    """One widget in the gallery: a raised card that lifts toward you on hover,
-    its preview at actual size in a well, and size + Add underneath."""
+    """One widget in the gallery: a panel in the widgets' own shape, its preview
+    at actual size in a well whose corners follow the panel's, and size + Add
+    underneath."""
 
-    PAD_X, PAD_TOP, PAD_BOTTOM = 10, 6, 14       # room for the shadow
+    PAD_X, PAD_TOP, PAD_BOTTOM = 10, 10, 10      # half the gap between tiles
+    WELL_INSET = 10
     WELL_H = 220
     HEIGHT = 372
 
@@ -644,8 +647,7 @@ class GalleryTile(Cached, QWidget):
         self.size_key = "medium" if "medium" in sizes else sizes[0]
         self.setFixedHeight(self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._lift = eased(self, 180)
-        self._lift.valueChanged.connect(lambda _v: self._place())
+        self._hover = eased(self, 160)
 
         self.sizes = Segmented([(s, s.capitalize()) for s in sizes], self.size_key,
                                self, height=30)
@@ -661,13 +663,12 @@ class GalleryTile(Cached, QWidget):
 
     # -- geometry -------------------------------------------------------- #
     def card(self) -> QRectF:
-        lift = 3.0 * self._lift.t
-        return QRectF(self.PAD_X, self.PAD_TOP - lift, self.width() - self.PAD_X * 2,
+        return QRectF(self.PAD_X, self.PAD_TOP, self.width() - self.PAD_X * 2,
                       self.height() - self.PAD_TOP - self.PAD_BOTTOM)
 
     def well(self) -> QRectF:
-        c = self.card()
-        return QRectF(c.left() + 10, c.top() + 10, c.width() - 20, self.WELL_H)
+        c, g = self.card(), self.WELL_INSET
+        return QRectF(c.left() + g, c.top() + g, c.width() - 2 * g, self.WELL_H)
 
     def _place(self) -> None:
         c = self.card()
@@ -684,22 +685,23 @@ class GalleryTile(Cached, QWidget):
         self._place()
 
     def enterEvent(self, _ev) -> None:
-        # Content gliding under a still pointer would lift every card it
+        # Content gliding under a still pointer would light every card it
         # passes, each one an animation competing with the scroll for the
-        # same frames - so the lift waits until the page settles (sync_hover).
+        # same frames - so the hover waits until the page settles (sync_hover).
         if not self.win.gallery.area.scrolling():
-            ease_to(self._lift, 1.0)
+            ease_to(self._hover, 1.0)
 
     def leaveEvent(self, _ev) -> None:
-        ease_to(self._lift, 0.0)
+        ease_to(self._hover, 0.0)
 
     def sync_hover(self) -> None:
-        ease_to(self._lift, 1.0 if self.underMouse() else 0.0)
+        ease_to(self._hover, 1.0 if self.underMouse() else 0.0)
 
     def paint_key(self):
-        if running(self._lift) or self._lift.t > 0.001:
+        if running(self._hover):
             return None
-        return (self._preview.cacheKey() if self._preview is not None else 0, self.count)
+        return (self._preview.cacheKey() if self._preview is not None else 0, self.count,
+                round(self._hover.t, 3))
 
     # -- content --------------------------------------------------------- #
     def _size_changed(self, key: str) -> None:
@@ -740,12 +742,11 @@ class GalleryTile(Cached, QWidget):
     def paint(self, p: QPainter) -> None:
         ui = theme.current()
         hints(p)
-        t = self._lift.t
         c = self.card()
-        paint_surface(p, c, 18.0, hover=t, lift=t)
+        paint_surface(p, c, hover=self._hover.t)
 
         well = self.well()
-        path = rounded(well, 12.0)
+        path = smooth(well, theme.CORNER - self.WELL_INSET)
         p.save()
         p.setClipPath(path)
         p.fillRect(well, QColor(ui.well))
@@ -754,18 +755,13 @@ class GalleryTile(Cached, QWidget):
                                 well.top() + (well.height() - self._preview.height()) / 2.0),
                         self._preview)
         p.restore()
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 18) if ui.dark else QColor(0, 0, 0, 22), 1.0))
-        p.drawPath(rounded(well.adjusted(0.5, 0.5, -0.5, -0.5), 11.5))
 
         if self.count:
             text = "On desktop" if self.count == 1 else f"{self.count} on desktop"
             f = theme.font(8.75, QFont.DemiBold)
             tw = QFontMetricsF(f).horizontalAdvance(text)
-            chip = QRectF(well.left() + 10, well.top() + 10, tw + 34, 24)
-            p.fillPath(rounded(chip, 12), QColor(0, 0, 0, 120))
-            p.setPen(QPen(QColor(255, 255, 255, 34), 1.0))
-            p.drawPath(rounded(chip.adjusted(0.5, 0.5, -0.5, -0.5), 11.5))
+            chip = QRectF(well.left() + 12, well.top() + 12, tw + 34, 24)
+            p.fillPath(rounded(chip, 12), QColor(ui.accent))
             glyph(p, "check", QRectF(chip.left() + 9, chip.top() + 6, 12, 12), "#ffffff", 1.8)
             p.setFont(f)
             p.setPen(QColor("#ffffff"))
@@ -932,22 +928,21 @@ class DeskRow(Cached, QAbstractButton):
         hints(p)
         r = QRectF(self.rect()).adjusted(1, 3, -1, -3)
         if self.isChecked():
-            paint_surface(p, r, 14.0, hover=0.6, shadow=False)
+            paint_surface(p, r, 20.0)
         elif self._hover.t > 0:
-            fill = QColor(ui.control)
-            fill.setAlphaF(fill.alphaF() * self._hover.t)
-            p.fillPath(rounded(r, 14), fill)
+            p.save()
+            p.setOpacity(self._hover.t * 0.6)
+            p.fillPath(smooth(r, 20.0), QColor(ui.surface))
+            p.restore()
+        # The thumbnail sits 10px in, so its corners follow the row's.
         tw, th = self.THUMB
         box = QRectF(r.left() + 10, r.center().y() - th / 2.0, tw, th)
         p.save()
-        p.setClipPath(rounded(box, 9))
+        p.setClipPath(smooth(box, 10.0))
         p.fillRect(box, QColor(ui.well))
         if self._thumb is not None:
             p.drawImage(box.topLeft(), self._thumb)
         p.restore()
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 20) if ui.dark else QColor(0, 0, 0, 20), 1.0))
-        p.drawPath(rounded(box.adjusted(0.5, 0.5, -0.5, -0.5), 8.5))
 
         x = box.right() + 14
         text_w = r.right() - x - 12
@@ -967,7 +962,7 @@ class DeskRow(Cached, QAbstractButton):
 
 
 class Stage(Cached, QWidget):
-    """The selected widget, large, over the stretch of wallpaper it sits on."""
+    """The selected widget, large, in a well with the widgets' corners."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -988,18 +983,14 @@ class Stage(Cached, QWidget):
         ui = theme.current()
         hints(p)
         well = self.well()
-        paint_shadow(p, well, 16, blur=16, alpha=int(ui.shadow * 0.7), dy=4)
         p.save()
-        p.setClipPath(rounded(well, 16))
+        p.setClipPath(smooth(well))
         p.fillRect(well, QColor(ui.well))
         if self._img is not None and not self._img.isNull():
             p.drawImage(QPointF(well.left() + (well.width() - self._img.width()) / 2.0,
                                 well.top() + (well.height() - self._img.height()) / 2.0),
                         self._img)
         p.restore()
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 22) if ui.dark else QColor(0, 0, 0, 22), 1.0))
-        p.drawPath(rounded(well.adjusted(0.5, 0.5, -0.5, -0.5), 15.5))
 
 
 def form_row(title: str, control: QWidget, stacked: bool = False) -> QWidget:
@@ -1008,13 +999,13 @@ def form_row(title: str, control: QWidget, stacked: bool = False) -> QWidget:
     row = QWidget()
     if stacked:
         lay = QVBoxLayout(row)
-        lay.setContentsMargins(16, 12, 12, 12)
+        lay.setContentsMargins(16, 12, 14, 12)
         lay.setSpacing(8)
         lay.addWidget(label(title, 10.25, QFont.Medium))
         lay.addWidget(control)
     else:
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(16, 9, 12, 9)
+        lay.setContentsMargins(16, 9, 14, 9)
         lay.setSpacing(12)
         lay.addWidget(label(title, 10.25, QFont.Medium))
         lay.addStretch(1)
@@ -1092,7 +1083,7 @@ class Inspector(QWidget):
         self.photo_group = Group()
         prow = QWidget()
         pl = QHBoxLayout(prow)
-        pl.setContentsMargins(16, 10, 12, 10)
+        pl.setContentsMargins(16, 10, 14, 10)
         pl.setSpacing(8)
         self.photo_name = label("", 9.75, tone="dim", elide=True)
         self.choose = Button("Choose…", "secondary", "photo", slot=self._choose, height=30)
@@ -1360,7 +1351,7 @@ def setting_row(glyph_kind: str, colour: str, title: str, desc: str,
                 control: QWidget) -> QWidget:
     row = QWidget()
     h = QHBoxLayout(row)
-    h.setContentsMargins(14, 11, 14, 11)
+    h.setContentsMargins(16, 11, 16, 11)
     h.setSpacing(12)
     h.addWidget(IconTile(glyph_kind, colour), 0, Qt.AlignVCenter)
     text = QVBoxLayout()
@@ -1375,7 +1366,7 @@ def setting_row(glyph_kind: str, colour: str, title: str, desc: str,
 
 
 class SettingsPage(QWidget):
-    INSET = 54          # separators start under the text, past the icon tile
+    INSET = 56          # separators start under the text, past the icon tile
 
     def __init__(self, win: "MainWindow") -> None:
         super().__init__()
@@ -1411,8 +1402,8 @@ class SettingsPage(QWidget):
         self.glass = Switch()
         self.glass.toggled.connect(board.set_glass)
         look.add(setting_row("drop", "#0a84ff", "Frosted glass",
-                             "The blurred wallpaper showing through each widget - "
-                             "and this window.", self.glass), self.INSET)
+                             "The blurred wallpaper showing through each widget.",
+                             self.glass), self.INSET)
         self.tint = Segmented(GLASS)
         self.tint.changed.connect(lambda v: board.set_glass_tint(int(v)))
         look.add(setting_row("sliders", "#30b0c7", "Glass strength",
@@ -1547,6 +1538,7 @@ class MainWindow(Chrome, QWidget):
         self.board = board
         self.tray = tray
         self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowTitle("PC Widgets")
         ico = startup.icon_path()
         if ico:
@@ -1580,17 +1572,18 @@ class MainWindow(Chrome, QWidget):
         self._live = QTimer(self)
         self._live.timeout.connect(self._tick)
         self._live.start(4000)
-        self.init_chrome(lambda: board.glass if board.state.glass else None,
-                         side=lambda: self.SIDE_W)
+        self.init_chrome(side=lambda: self.SIDE_W)
         self.show_page("gallery")
 
     def _fit_to_screen(self) -> None:
+        # Sizes are of the visible window; the shadow's margin goes round them.
         screen = QApplication.primaryScreen()
         area = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1040)
+        m = theme.WINDOW_SHADOW
         w, h = min(1200, area.width() - 60), min(860, area.height() - 60)
-        self.resize(w, h)
-        self.setMinimumSize(min(1060, w), min(640, h))
-        self.move(area.center() - QPoint(w // 2, h // 2))
+        self.resize(w + 2 * m, h + 2 * m)
+        self.setMinimumSize(min(1060, w) + 2 * m, min(640, h) + 2 * m)
+        self.move(area.center() - QPoint(w // 2 + m, h // 2 + m))
 
     def _apply_look(self) -> None:
         # No stylesheet on the window: one there routes every widget inside it
@@ -1677,9 +1670,9 @@ class MainWindow(Chrome, QWidget):
             self.desktop.refresh_thumbs()
 
     # -- window events --------------------------------------------------- #
-    def paintEvent(self, _ev) -> None:
+    def paintEvent(self, ev) -> None:
         p = QPainter(self)
-        self.paint_backdrop(p)
+        self.paint_backdrop(p, ev.rect())
         p.end()
 
     def showEvent(self, ev) -> None:
@@ -1689,7 +1682,6 @@ class MainWindow(Chrome, QWidget):
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
-        self.place_chrome()
         if self.toast_box.isVisible():
             self.toast_box.place()
 

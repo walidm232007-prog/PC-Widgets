@@ -417,42 +417,45 @@ def is_maximised(hwnd: int) -> bool:
         return False
 
 
-class MARGINS(ctypes.Structure):
-    _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
-                ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
-
-
-DWMWCP_ROUND = 2
+DWMWCP_DONOTROUND = 1
+DWMWA_COLOR_NONE = 0xFFFFFFFE
 
 
 def native_frame(hwnd: int, dark: bool) -> None:
-    """Give a frameless window back what Windows hangs off a real frame.
+    """Give a frameless, layered window back what Windows hangs off a real frame.
 
-    Qt's frameless windows drop the frame styles, and with them the drop shadow,
-    the rounded corners, Aero Snap, Win+arrow and the minimise and maximise
-    animations. Putting the styles back restores all of those; the window's
-    WM_NCCALCSIZE handler then makes the frame zero-sized so none of it is
-    drawn (see widgets/ui/chrome.py). Extending the DWM frame by a pixel is what
-    keeps the shadow once the frame has no size.
+    Qt's frameless windows drop the frame styles, and with them Aero Snap,
+    Win+arrow, resizing from the edges and the system menu. Putting the styles
+    back restores those; the window's WM_NCCALCSIZE handler then makes the frame
+    zero-sized so none of it is drawn (see widgets/ui/chrome.py).
+
+    The window draws its own corners and shadow, so Windows is told to keep its
+    hands off both: no rounding - which would clip the painted shadow's corners
+    at 8 px - and no accent-coloured border.
     """
     try:
         h = wt.HWND(hwnd)
         style = _get_style(h, GWL_STYLE)
         _set_style(h, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU
                    | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
-        margins = MARGINS(0, 0, 1, 0)
-        dwmapi.DwmExtendFrameIntoClientArea(h, ctypes.byref(margins))
-        corner = ctypes.c_int(DWMWCP_ROUND)
-        dwmapi.DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE,
-                                     ctypes.byref(corner), ctypes.sizeof(corner))
-        val = ctypes.c_int(1 if dark else 0)
-        dwmapi.DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                     ctypes.byref(val), ctypes.sizeof(val))
+        for attr, value in ((DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.c_int(DWMWCP_DONOTROUND)),
+                            (DWMWA_BORDER_COLOR, wt.DWORD(DWMWA_COLOR_NONE)),
+                            (DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.c_int(1 if dark else 0))):
+            dwmapi.DwmSetWindowAttribute(h, attr, ctypes.byref(value), ctypes.sizeof(value))
         user32.SetWindowPos(h, None, 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
                             | SWP_NOACTIVATE | SWP_FRAMECHANGED)
     except Exception:
         pass
+
+
+def is_arranged(hwnd: int) -> bool:
+    """Whether a window is snapped to part of the screen. Windows 10 1903 and
+    later; False wherever the question can't be asked."""
+    try:
+        return bool(user32.IsWindowArranged(wt.HWND(hwnd)))
+    except Exception:
+        return False
 
 
 def set_dark_frame(hwnd: int, dark: bool) -> None:

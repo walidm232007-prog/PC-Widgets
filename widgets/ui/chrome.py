@@ -1,15 +1,21 @@
 """
 chrome.py
 =========
-The app window's frame: a custom title area that is still a Windows window.
+The app window's frame: drawn, shaped like a widget, and still a Windows window.
 
-The stock title bar is a strip of system UI laid over the design, and it can't
-take a material, so it goes: the content runs to the top edge, with drawn
-caption buttons and a strip to drag by. Removing a frame the naive way - a
-frameless Qt window - also removes everything Windows hangs off one: the drop
-shadow, the rounded corners, Aero Snap, Win+arrow and the minimise and maximise
-animations. That is most of the difference between a window that feels native
-and a web page in a box. So the frame styles are put back and the frame is made
+The stock title bar is a strip of system UI laid over the design, so it goes:
+the content runs to the top edge, with drawn caption buttons and a strip to
+drag by. And the window takes the widgets' own outline - their continuous
+corner, at their radius - which Windows can't draw: the corners it rounds are a
+fixed 8 px, and plainly circular. So the window is a layered one
+(``Qt.WA_TranslucentBackground``) and everything about its shape is painted
+here: the body cut to the widgets' curve, and the drop shadow - which Windows
+only draws for opaque windows - in a transparent margin round it.
+
+Removing a frame the naive way - a frameless Qt window - also removes what
+Windows hangs off one: Aero Snap, Win+arrow, resizing from the edges, the system
+menu. That is most of the difference between a window that feels native and a
+web page in a box. So the frame styles are put back and the frame is made
 zero-sized instead (winapi.native_frame):
 
 - WM_NCCALCSIZE answers "the client area is the whole window", so no frame is
@@ -18,25 +24,25 @@ zero-sized instead (winapi.native_frame):
   overhang would otherwise be client area cut off at the edges. (Qt sizes a
   maximised frameless window to the work area exactly instead, so a fixed
   inset would leave a gap; clipping is right either way.)
-- WM_NCHITTEST answers "resize" in a thin band around the edge, since a
-  zero-sized frame has no resize border of its own.
+- WM_NCHITTEST answers "resize" all round the visible edge: across the shadow
+  outside it - where Windows 11 keeps its own invisible resize border - a few
+  pixels inside it, and over the corner's curve. A zero-sized frame has no
+  resize border of its own.
 
 Dragging hands over to Windows' own move loop (QWindow.startSystemMove), so
-snapping to screen edges works exactly as it does for any other window.
-
-The backdrop is the frosted material: the blurred wallpaper - the same one the
-widgets use - under a heavy tint, with the sidebar's tint lighter so more of
-the wallpaper shows through it, and a faint grain over both.
+snapping to screen edges works exactly as it does for any other window. A
+maximised or snapped window fills its space exactly, as Windows 11's own do: no
+margin, no shadow, and square corners.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
-from typing import Callable, Sequence
+from typing import Callable, Optional, Sequence
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QWidget
 
 from ..core import winapi
@@ -53,41 +59,51 @@ class NCCALCSIZE_PARAMS(ctypes.Structure):
 
 
 class CaptionButtons(QWidget):
-    """Minimise, maximise and close, drawn the way Windows 11 draws them."""
+    """Minimise, maximise and close: Windows' line glyphs on rounded pads, set
+    in from the corner far enough to sit inside its curve.
 
-    W, H = 46, 38
+    The widget itself runs right up to the corner, so on a maximised window the
+    very corner pixel of the screen still closes it, as on any other window.
+    """
+
+    W, H = 40, 32           # one pad
+    INSET = 10              # from the body's top and right edges
 
     def __init__(self, window: QWidget, kinds: Sequence[str]) -> None:
         super().__init__(window)
         self.win = window
         self.kinds = list(kinds)
-        self.setFixedSize(self.W * len(self.kinds), self.H)
+        self.setFixedSize(self.W * len(self.kinds) + self.INSET, self.H + self.INSET)
         self.setMouseTracking(True)
         self._hover = -1
         self._down = -1
 
     def _hit(self, x: float) -> int:
-        i = int(x // self.W)
-        return i if 0 <= i < len(self.kinds) and 0 <= x < self.width() else -1
+        if not 0 <= x < self.width():
+            return -1
+        return min(len(self.kinds) - 1, int(x // self.W))
+
+    def pad(self, i: int) -> QRectF:
+        return QRectF(i * self.W + 2, self.INSET, self.W - 4, self.H)
 
     def paintEvent(self, _ev) -> None:
         ui = theme.current()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, False)
+        p = theme.hints(QPainter(self))
         for i, kind in enumerate(self.kinds):
-            r = QRectF(i * self.W, 0, self.W, self.H)
+            r = self.pad(i)
             hot, down = i == self._hover, i == self._down
             ink = QColor(ui.text)
             if hot and kind == "close":
-                p.fillRect(r, QColor("#b5281b" if down else "#c42b1c"))
+                p.fillPath(theme.rounded(r, 9), QColor("#b5281b" if down else "#c42b1c"))
                 ink = QColor("#ffffff")
             elif hot:
-                p.fillRect(r, QColor(ui.control if down else ui.control_hi))
+                p.fillPath(theme.rounded(r, 9), QColor(ui.control_hi if down else ui.control))
             elif not self.win.isActiveWindow():
                 ink = QColor(ui.text_dim)
             p.setPen(QPen(ink, 1.0))
             p.setBrush(Qt.NoBrush)
             cx, cy = round(r.center().x()), round(r.center().y())
+            p.setRenderHint(QPainter.Antialiasing, False)
             if kind == "min":
                 p.drawLine(cx - 5, cy, cx + 5, cy)
             elif kind == "max":
@@ -101,7 +117,7 @@ class CaptionButtons(QWidget):
                 p.setRenderHint(QPainter.Antialiasing, True)
                 p.drawLine(QPointF(cx - 5, cy - 5), QPointF(cx + 5, cy + 5))
                 p.drawLine(QPointF(cx + 5, cy - 5), QPointF(cx - 5, cy + 5))
-                p.setRenderHint(QPainter.Antialiasing, False)
+            p.setRenderHint(QPainter.Antialiasing, True)
         p.end()
 
     def mouseMoveEvent(self, ev) -> None:
@@ -163,97 +179,168 @@ class DragStrip(QWidget):
 
 
 class Chrome:
-    """Mixin for a QWidget or QDialog: frameless, still a proper Windows window,
-    painted on the frosted material.
+    """Mixin for a QWidget or QDialog: frameless, cut to the widgets' shape,
+    still a proper Windows window.
 
-    The subclass sets ``Qt.FramelessWindowHint`` before the native window exists,
-    calls :meth:`init_chrome` once built, :meth:`place_chrome` from
-    ``resizeEvent``, and :meth:`paint_backdrop` from ``paintEvent``.
+    The subclass sets ``Qt.FramelessWindowHint`` and
+    ``Qt.WA_TranslucentBackground`` before the native window exists, gives
+    itself a layout, then calls :meth:`init_chrome` once built,
+    :meth:`place_chrome` from ``resizeEvent``, and :meth:`paint_backdrop` from
+    ``paintEvent``. The layout's margins are kept at what it set plus the
+    shadow margin, so its content always lands on the visible body.
     """
 
-    EDGE = 6            # resize band, in pixels
-    TITLE_H = 46        # the draggable strip
+    EDGE = 5                # resize band inside the visible edge, in pixels
+    GRIP = 28               # how far from a corner, along either edge, resizes diagonally
+    TITLE_H = 46            # the draggable strip
 
-    def init_chrome(self, glass: Callable[[], object] = lambda: None,
-                    kinds: Sequence[str] = ("min", "max", "close"),
+    def init_chrome(self, kinds: Sequence[str] = ("min", "max", "close"),
                     side: Callable[[], int] = lambda: 0) -> None:
-        """``glass`` returns the GlassBackdrop to frost with, or None when the
-        glass is switched off; ``side`` the sidebar's width, if there is one."""
-        self._glass = glass
+        """``side`` gives the sidebar's width, if the window has one: it sits on
+        a panel of its own, inset from the window's edge."""
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._side = side
+        lay = self.layout()
+        self._base_margins = lay.contentsMargins() if lay is not None else None
+        self._margin = -1
+        self._backdrop_key = None
+        self._inner_key = None
         self.caption = CaptionButtons(self, kinds)
         self.drag = DragStrip(self)
-        self._moved = QTimer(self)
-        self._moved.setSingleShot(True)
-        self._moved.timeout.connect(self.update)
         winapi.native_frame(int(self.winId()), theme.current().dark)
+        self.sync_frame()
+
+    # -- the visible body ------------------------------------------------ #
+    def frame_margin(self) -> int:
+        """The transparent margin round the body: room for the shadow, or 0
+        when maximised or snapped."""
+        return max(0, self._margin)
+
+    def body_rect(self) -> QRect:
+        m = self.frame_margin()
+        return self.rect().adjusted(m, m, -m, -m)
+
+    def corner(self) -> float:
+        return theme.CORNER if self.frame_margin() else 0.0
+
+    def _wanted_margin(self) -> int:
+        if self.isMaximized() or self.isFullScreen():
+            return 0
+        if self.testAttribute(Qt.WA_WState_Created) and winapi.is_arranged(int(self.winId())):
+            return 0
+        return theme.WINDOW_SHADOW
+
+    def sync_frame(self) -> None:
+        """Put the margin, the layout and the caption where the window's state
+        - normal, maximised, snapped - says they go."""
+        m = self._wanted_margin()
+        if m == self._margin:
+            return
+        self._margin = m
+        lay = self.layout()
+        if lay is not None and self._base_margins is not None:
+            b = self._base_margins
+            lay.setContentsMargins(b.left() + m, b.top() + m, b.right() + m, b.bottom() + m)
         self.place_chrome()
+        self.update()
 
     def place_chrome(self) -> None:
         if not hasattr(self, "caption"):
             return
-        self.caption.move(self.width() - self.caption.width(), 0)
-        self.drag.setGeometry(0, 0, self.width() - self.caption.width(), self.TITLE_H)
+        body = self.body_rect()
+        self.caption.move(body.right() + 1 - self.caption.width(), body.top())
+        self.drag.setGeometry(body.left(), body.top(),
+                              body.width() - self.caption.width(), self.TITLE_H)
         self.drag.raise_()
         self.caption.raise_()
 
-    def paint_backdrop(self, p: QPainter) -> None:
-        """The material, from a cached picture of it.
+    # -- painting -------------------------------------------------------- #
+    def paint_backdrop(self, p: QPainter, rect: QRect) -> None:
+        """The window's shape, shadow and panels, from a cached picture.
 
-        Built once for the window's size and place on screen and blitted after
-        that. Every frame of a scroll repaints the backdrop under the moving
-        content, and a single opaque copy is the cheapest thing that can be
-        drawn there; blending the wallpaper, two tints and the grain each time
-        is not.
+        Built once per size and state. Every frame of a scroll repaints the
+        backdrop under the moving content, and almost all of that is plain
+        window colour: that part is filled - the cheapest thing that can be
+        drawn - and only what lies over an edge, a corner or the sidebar is
+        copied from the picture, straight, with no blending.
         """
-        side = int(self._side())
-        glass = self._glass()
-        origin = self.mapToGlobal(QPoint(0, 0))
-        stamp = (glass.image.cacheKey() if glass is not None and glass.image is not None
-                 else 0)
-        key = (self.width(), self.height(), origin.x(), origin.y(), side, stamp,
+        key = (self.width(), self.height(), self._margin, int(self._side()),
                theme._generation)
-        if getattr(self, "_backdrop_key", None) != key:
-            self._backdrop = self._compose_backdrop(side, glass, origin)
+        if self._backdrop_key != key:
+            self._backdrop = self._compose_backdrop()
+            self._plain = self._plain_region()
             self._backdrop_key = key
-        p.drawPixmap(0, 0, self._backdrop)
+        dirty = QRegion(rect)
+        plain = dirty.intersected(self._plain)
+        rest = dirty.subtracted(self._plain)
+        p.save()
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        if not plain.isEmpty():
+            p.setClipRegion(plain)
+            p.fillRect(plain.boundingRect(), QColor(theme.current().base))
+        if not rest.isEmpty():
+            p.setClipRegion(rest)
+            box = rest.boundingRect()
+            p.drawPixmap(box, self._backdrop, box)
+        p.restore()
 
-    def _compose_backdrop(self, side: int, glass, origin) -> QPixmap:
+    def _plain_region(self) -> QRegion:
+        """Where the backdrop is nothing but the window's colour: the body
+        clear of its hairline, its corners and the sidebar."""
+        body = self.body_rect()
+        side = int(self._side())
+        plain = QRegion(body.adjusted(side, 1, -1, -1))
+        c = int(theme.CORNER * 1.6) + 2         # the corner's curve, and a little
+        for x in (body.left(), body.right() + 1 - c):
+            for y in (body.top(), body.bottom() + 1 - c):
+                plain = plain.subtracted(QRegion(x, y, c, c))
+        return plain
+
+    def _compose_backdrop(self) -> QPixmap:
         ui = theme.current()
         pm = QPixmap(max(1, self.width()), max(1, self.height()))
-        p = QPainter(pm)
-        r = QRectF(pm.rect())
-        content = QRectF(side, 0, r.width() - side, r.height())
-        sidebar = QRectF(0, 0, side, r.height())
-        p.fillRect(r, QColor(ui.solid))
-        drew = glass is not None and glass.paint_into(p, r, origin.x(), origin.y())
-        if drew:
-            p.fillRect(content, QColor(ui.tint))
-            if side:
-                p.fillRect(sidebar, QColor(ui.tint_side))
-        elif side:
-            p.fillRect(sidebar, QColor(ui.solid_side))
-        grain = theme.noise(ui.dark)
-        if grain is not None:
-            p.drawTiledPixmap(r.toRect(), grain)
+        pm.fill(Qt.transparent)
+        p = theme.hints(QPainter(pm))
+        body = QRectF(self.body_rect())
+        radius = self.corner()
+        if radius:
+            theme.paint_window_shadow(p, body, radius, ui.shadow)
+            p.fillPath(theme.smooth(body, radius), QColor(ui.base))
+        else:
+            p.fillRect(body, QColor(ui.base))
+        side = int(self._side())
         if side:
-            p.setPen(QPen(QColor(ui.line), 1.0))
-            p.drawLine(QPointF(side - 0.5, 0), QPointF(side - 0.5, r.height()))
+            g = theme.INSET
+            theme.paint_surface(p, QRectF(body.left() + g, body.top() + g, side - g,
+                                          body.height() - 2 * g), theme.CORNER - g)
+        if radius:
+            p.setPen(QPen(QColor(ui.frame), 1.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(theme.smooth(body.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
         p.end()
         return pm
 
+    # -- window events --------------------------------------------------- #
+    def showEvent(self, ev) -> None:
+        super().showEvent(ev)
+        if hasattr(self, "caption"):
+            self.sync_frame()
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        if hasattr(self, "caption"):
+            self.sync_frame()
+            self.place_chrome()
+
     def moveEvent(self, ev) -> None:
-        # The material is the wallpaper *behind* the window, so it changes as
-        # the window moves - repainted once the move settles rather than on
-        # every step of a drag, which would redraw the whole window 60 times a
-        # second for a difference too soft to follow.
         super().moveEvent(ev)
-        if hasattr(self, "_moved"):
-            self._moved.start(90)
+        if hasattr(self, "caption"):
+            self.sync_frame()       # snapping to an edge can move a window without resizing it
 
     def changeEvent(self, ev) -> None:
         super().changeEvent(ev)
         if hasattr(self, "caption"):
+            self.sync_frame()
             self.caption.update()           # maximise glyph, inactive dimming
 
     def nativeEvent(self, event_type, message):
@@ -268,35 +355,45 @@ class Chrome:
                         rc.left, rc.top = max(rc.left, wl), max(rc.top, wt_)
                         rc.right, rc.bottom = min(rc.right, wr), min(rc.bottom, wb)
                     return True, 0
-                if msg.message == WM_NCHITTEST and not winapi.is_maximised(msg.hWnd):
-                    code = self._edge_hit(msg)
-                    if code:
+                if msg.message == WM_NCHITTEST:
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    left, top, _r, _b = winapi.window_rect(msg.hWnd)
+                    code = self.edge_hit(QPointF(x - left, y - top))
+                    if code is not None:
                         return True, code
         except Exception:
             pass
         return super().nativeEvent(event_type, message)
 
-    def _edge_hit(self, msg) -> int:
-        x = ctypes.c_short(msg.lParam & 0xFFFF).value
-        y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-        left, top, right, bottom = winapi.window_rect(msg.hWnd)
-        e = self.EDGE
-        at_l, at_r = x < left + e, x >= right - e
-        at_t, at_b = y < top + e, y >= bottom - e
-        if at_t and at_l:
-            return HTTOPLEFT
-        if at_t and at_r:
-            return HTTOPRIGHT
-        if at_b and at_l:
-            return HTBOTTOMLEFT
-        if at_b and at_r:
-            return HTBOTTOMRIGHT
-        if at_l:
+    def edge_hit(self, pt: QPointF) -> Optional[int]:
+        """The resize direction for a point in window coordinates, or None
+        where the point is ordinary client area.
+
+        Windows only asks about points the window actually covers - a layered
+        window lets the mouse through wherever it is fully transparent - so
+        everything outside the body that asks is the shadow, and resizes.
+        """
+        if not self.frame_margin():
+            return None                 # maximised or snapped: nothing to pull
+        body = QRectF(self.body_rect())
+        key = (body.width(), body.height(), body.left())
+        if self._inner_key != key:
+            e = self.EDGE
+            self._inner = theme.smooth(body.adjusted(e, e, -e, -e), theme.CORNER - e)
+            self._inner_key = key
+        if self._inner.contains(pt):
+            return None
+        dl, dr = pt.x() - body.left(), body.right() - pt.x()
+        dt, db = pt.y() - body.top(), body.bottom() - pt.y()
+        g = self.GRIP
+        if min(dl, dr) < g and min(dt, db) < g:
+            if dt < db:
+                return HTTOPLEFT if dl < dr else HTTOPRIGHT
+            return HTBOTTOMLEFT if dl < dr else HTBOTTOMRIGHT
+        nearest = min(dl, dr, dt, db)
+        if nearest == dl:
             return HTLEFT
-        if at_r:
+        if nearest == dr:
             return HTRIGHT
-        if at_t:
-            return HTTOP
-        if at_b:
-            return HTBOTTOM
-        return 0
+        return HTTOP if nearest == dt else HTBOTTOM
