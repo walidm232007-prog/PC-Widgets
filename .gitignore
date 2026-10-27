@@ -1,16 +1,19 @@
 # --------------------------------------------------------------------------- #
 #  Fonts - the important one
 # --------------------------------------------------------------------------- #
-# SF Pro is Apple's. Its licence covers designing for Apple platforms and does
-# not permit redistribution, so the files must never be committed. The app runs
-# without them: the type stack falls back to Inter, then Helvetica Neue, then
-# Segoe UI Variable. fonts/README.txt tells anyone cloning this where to get
-# them, and is deliberately NOT ignored.
+# Only a font whose licence allows redistribution may be committed. Inter is
+# under the SIL Open Font License and ships with the app, its licence beside it
+# in fonts/LICENSE-Inter.txt. Everything else in fonts/ stays out - above all
+# Apple's SF Pro, whose licence covers designing for Apple platforms and does
+# not permit redistribution. fonts/README.txt explains, and is deliberately NOT
+# ignored.
 fonts/*.otf
 fonts/*.ttf
 fonts/*.ttc
 fonts/*.woff
 fonts/*.woff2
+!fonts/InterVariable.ttf
+!fonts/InterVariable-Italic.ttf
 
 # --------------------------------------------------------------------------- #
 #  Local, generated, or machine-specific

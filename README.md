@@ -26,11 +26,11 @@ The shortcuts are not in the repository — a Windows `.lnk` stores an absolute
 path, so it would only ever be right on one machine. The command above builds
 them for yours.
 
-Two things are deliberately missing and the app handles both: **SF Pro** (Apple's
-font, not redistributable — `fonts/README.txt` says where to get it, and the type
-falls back to Inter, then Helvetica Neue, then Segoe UI Variable) and the
-**optional audio packages** in `requirements.txt`, without which the visualiser
-uses the Core Audio peak meter instead of a real spectrum.
+The typeface comes with it: **Inter** ships in `fonts/`, under the SIL Open Font
+License, and is loaded for this app only. One thing is deliberately left out and
+the app handles it: the **optional audio packages** in `requirements.txt`,
+without which the visualiser uses the Core Audio peak meter instead of a real
+spectrum.
 
 ## Everyday use
 
@@ -286,58 +286,40 @@ a board once cascaded into the top-left corner and stayed there.
 
 ## Typography
 
-The widgets are set in **SF Pro** — Apple's actual system font, loaded from
-`fonts/` at startup via `addApplicationFont`. That registers the faces with this
-process only: nothing is installed, nothing else on the machine changes, and
-deleting the folder cleanly falls back down the stack.
+The widgets are set in **Inter**, Rasmus Andersson's open-source typeface. Its
+two variable files ship in `fonts/` and are loaded at startup via
+`addApplicationFont`, which registers them with this process only: nothing is
+installed and nothing else on the machine changes. Inter replaced Apple's SF Pro,
+whose licence covers designing for Apple platforms and doesn't allow shipping it
+with a Windows app; Inter is the closest free relative, and its licence (the SIL
+Open Font License) lets it travel with the code.
 
 `typography.py` reproduces three things, and only the first is the typeface:
 
 - **Optical sizes.** Apple sets 20pt and up in SF Pro *Display* and smaller text
   in SF Pro *Text*; the display cut is more tightly spaced and finer-detailed.
-  The resolver switches at that break.
-- **Tracking.** The part people miss, and it matters more than the face. SF
+  Inter's variable font has the same split as a continuous `opsz` axis, from its
+  text cut at 14 to its Display cut at 32, and the resolver sets it from the
+  point size: captions get the text cut, the clock's digits the display one. A
+  fallback with separate Text and Display faces switches at Apple's 20pt.
+- **Tracking.** The part people miss, and it matters more than the face. Apple
   applies a size-dependent letter-spacing curve — loose at caption sizes,
   tightening to about −3% by a 40pt number. `TRACKING` is Apple's published
-  table; `tracking_percent()` interpolates it. Large numerals set at default
-  spacing are the clearest giveaway that type isn't Apple's.
+  table for SF; `tracking_percent()` interpolates it, and Inter gets the same
+  curve. Large numerals set at default spacing are the clearest giveaway that
+  type isn't Apple's.
 - **Label hierarchy.** Apple's label colours are pure white/black at descending
   alpha (100% / 60% / 30%), not separate tinted greys. Bluish greys are a large
   part of why a widget can look wrong even with the right face.
 
-If `fonts/` is empty the stack falls back through Inter, Helvetica Neue (SF's
-direct ancestor and Apple's system font through iOS 7–8), then Segoe UI Variable.
+If `fonts/` is missing the stack falls back through Helvetica Neue (SF's direct
+ancestor and Apple's system font through iOS 7–8), then Segoe UI Variable.
 
-**Weights available:** Text Regular and Semibold, Display Bold and Light. Apple
-ships more (Display Regular/Medium/Semibold, Text Medium/Bold), but see the note
-below — Qt resolves a request to the nearest available weight in the family, so a
-Semibold display request renders as Display Bold. The difference is slight.
-
-<details>
-<summary>Getting SF Pro off Apple's .dmg on Windows</summary>
-
-Apple distributes SF Pro as a macOS disk image, and there's no HFS-aware
-archiver here. `scratchpad/sfpro_extract.py` does it with the standard library:
-UDIF image → HFS+ volume → `SF Pro.pkg` (a xar archive) → Payload (gzip cpio) →
-fonts. Three things each cost a run:
-
-1. **UDIF block tables.** Each BLKX carries a `firstSectorNumber` its chunks'
-   output sectors are relative to, and a `dataOffset` its input offsets are
-   relative to. Ignore either and the volume assembles into plausible garbage
-   that still contains valid magic numbers — it looks fine until a decompressor
-   chokes halfway through a stream.
-2. **The Payload's declared encoding is `application/octet-stream`** even though
-   the bytes are plainly gzip, so compression has to be sniffed, not trusted.
-3. **The cpio is `odc`, not `newc`.** Different magic and a completely different
-   header layout, so a newc parser finds zero records and reports no fonts
-   rather than failing.
-
-What it can't do is follow HFS+ extents. The 207 MB Payload is fragmented, so a
-linear read runs out about 73 MB in — which still yields ~103 MB of cpio and 17
-of the faces, including every one the widgets draw with. Recovering the rest
-would mean writing an HFS+ catalog and extent reader for a handful of extra
-weights.
-</details>
+**Weights:** all of them. The variable files carry every weight from Thin to
+Black, upright and italic, so the clock's time styles are drawn from real faces
+rather than synthesised. Width is the exception: Inter has no width axis, so the
+clock's Condensed and Wide are a horizontal scale. Qt can only set the
+optical-size axis from 6.7; on PySide6 6.6 everything draws in the text cut.
 
 ## Style
 
@@ -538,10 +520,9 @@ MIT — see [LICENSE](LICENSE). Third-party terms are set out in
   CC BY 4.0.
 - **Sky photographs** from [Unsplash](https://unsplash.com), under the Unsplash
   License. Photographers credited in `assets/weather/CREDITS.md`.
-- **SF Pro is not included.** Apple's licence doesn't permit redistributing the
-  files, so `.gitignore` excludes them and the type stack falls back to Inter,
-  Helvetica Neue, then Segoe UI Variable. See `fonts/README.txt` to add them
-  locally.
+- **Inter**, the typeface in `fonts/`, is © The Inter Project Authors and ships
+  under the SIL Open Font License 1.1 (`fonts/LICENSE-Inter.txt`). Apple's SF
+  Pro is not used or included: its licence doesn't permit either.
 - **The stocks widget reads an undocumented Yahoo Finance endpoint**, which is
   against their terms of service and can break without warning. Swap it if that
   matters to you — THIRD-PARTY.md lists alternatives.
@@ -554,6 +535,7 @@ Not affiliated with, authorised by, or endorsed by Apple.
 python tools/prepublish.py
 ```
 
-Refuses to pass if a font file or anything credential-shaped would be committed,
-if `LICENSE` still has a placeholder name, or if the notices are missing. Exit 0
+Refuses to pass if anything credential-shaped or a font file other than the
+bundled Inter would be committed, if Inter would go without its licence, if
+`LICENSE` still has a placeholder name, or if the notices are missing. Exit 0
 means it's safe to push.

@@ -608,8 +608,8 @@ class WidgetCard(QWidget):
     # -- painting helpers shared by every tile --------------------------- #
     def font(self, size: float, weight: int = QFont.Normal,
              italic: bool = False, stretch: int = 0) -> QFont:
-        """Apple-set type: optical size picked by point size, plus SF's
-        size-dependent tracking. See :mod:`widgets.core.typography`.
+        """Apple-set type in Inter: optical size picked by point size, plus
+        Apple's size-dependent tracking. See :mod:`widgets.core.typography`.
 
         ``italic`` and ``stretch`` pass through for the clock's time styling."""
         return typography.font(size, weight, italic=italic, stretch=stretch)

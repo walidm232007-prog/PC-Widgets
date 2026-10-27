@@ -55,25 +55,10 @@ all three are also in the app once it's running).
 
 ## About the fonts
 
-The board is designed around Apple's SF Pro, but the font files aren't included —
-Apple's licence covers designing for Apple platforms, not handing the files
-around. It looks good without them: the type stack falls back to Inter, then
-Helvetica Neue, then Segoe UI Variable, and the tracking curve and optical sizes
-that do most of the work are built in either way.
-
-If you want the real thing, it's a free download:
-
-1. [developer.apple.com/fonts](https://developer.apple.com/fonts/) → **SF Pro**
-   (needs a free Apple ID).
-2. Open the `.dmg`, run the installer, or pull the `.otf` files out of it.
-3. Copy these four into the `fonts/` folder next to this file:
-   - `SF-Pro-Text-Regular.otf`
-   - `SF-Pro-Text-Semibold.otf`
-   - `SF-Pro-Display-Light.otf`
-   - `SF-Pro-Display-Bold.otf`
-
-They're loaded privately, for this app only — nothing is installed system-wide
-and nothing else on the machine changes. Restart the board to pick them up.
+Nothing to download: the board is set in Inter, which comes with it in the
+`fonts/` folder. It's open source, under the SIL Open Font License, and loaded
+privately for this app only — nothing is installed system-wide and nothing else
+on the machine changes.
 
 ## Where your settings live
 

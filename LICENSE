@@ -23,6 +23,7 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 
 This licence covers the source code in this repository only. Third-party
-material used or fetched by it - Qt/PySide6, the weather photographs, the
-weather and market data feeds, and the SF Pro typefaces which are deliberately
-NOT distributed here - carries its own terms. See THIRD-PARTY.md.
+material used, bundled or fetched by it - Qt/PySide6, the Inter typeface in
+fonts/ (SIL Open Font License 1.1, see fonts/LICENSE-Inter.txt), the weather
+photographs, and the weather and market data feeds - carries its own terms. See
+THIRD-PARTY.md.

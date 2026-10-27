@@ -161,8 +161,8 @@ def set_current(ui: Ui) -> None:
 #  Type
 # --------------------------------------------------------------------------- #
 def font(size: float = 10.0, weight=QFont.Normal) -> QFont:
-    """The cards' type - SF optical sizes and tracking - so the window and the
-    widgets read as one family."""
+    """The cards' type - Inter, with its optical sizes and Apple's tracking -
+    so the window and the widgets read as one family."""
     return typography.font(size, weight)
 
 

@@ -33,6 +33,14 @@ FORBIDDEN_EXT = {
     ".lnk": "Windows shortcut (holds absolute paths to one machine)",
 }
 
+# The fonts that may be published, each with the licence that has to travel
+# with it. Inter is under the SIL OFL, which allows bundling it with software
+# as long as its licence goes along.
+ALLOWED_FONTS = {
+    "fonts/InterVariable.ttf": "fonts/LICENSE-Inter.txt",
+    "fonts/InterVariable-Italic.ttf": "fonts/LICENSE-Inter.txt",
+}
+
 # Things that look like credentials. Each pattern is deliberately narrow enough
 # not to fire on ordinary prose.
 SECRETS = [
@@ -127,6 +135,8 @@ def is_ignored(rel: str, rules: list) -> bool:
 # --------------------------------------------------------------------------- #
 def check_forbidden(files: list, tracked: bool) -> None:
     for rel in files:
+        if rel in ALLOWED_FONTS:
+            continue
         ext = os.path.splitext(rel)[1].lower()
         why = FORBIDDEN_EXT.get(ext)
         if why:
@@ -134,6 +144,15 @@ def check_forbidden(files: list, tracked: bool) -> None:
                 fail(f"{rel} would be published - {why}")
             else:
                 note(f"{rel} is present but untracked ({why}) - keep it that way")
+
+
+def check_font_licences(files: list) -> None:
+    """A bundled font is only publishable with its licence beside it."""
+    published = set(files)
+    for rel, licence in ALLOWED_FONTS.items():
+        if rel in published and licence not in published:
+            fail(f"{rel} would be published without {licence} - its licence "
+                 "must travel with it")
 
 
 def check_secrets(files: list) -> None:
@@ -221,6 +240,7 @@ def main() -> int:
         check_forbidden(ignored, tracked=False)
         files = would_ship        # only scan what would actually be published
 
+    check_font_licences(files)
     check_secrets(files)
     check_paths(files)
     check_licence()
@@ -235,7 +255,7 @@ def main() -> int:
             print(f"  STOP  {p}")
         print(f"\n{len(problems)} blocker(s). Do not publish yet.")
         return 1
-    print("  ok    nothing forbidden, no secrets, licence and notices in place")
+    print("  ok    nothing forbidden, no secrets, licences and notices in place")
     print("\nSafe to publish.")
     return 0
 

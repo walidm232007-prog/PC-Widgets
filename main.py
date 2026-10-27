@@ -134,6 +134,7 @@ def selftest() -> int:
         print(f"  {theme}: {len(tiles)} renders")
 
     _contact_sheet(out, made)
+    _check_typeface()
     _check_placement(pal_mod.build("dark", "blue"))
     _check_persistence(pal_mod.build("dark", "blue"))
     _check_ticks(pal_mod.build("dark", "blue"))
@@ -222,6 +223,30 @@ def _check_agent_bus() -> None:
                 pass
     print(f"  agent bus: written to {len(bus_dirs())} locations, survives "
           "losing either, freshest wins")
+
+
+def _check_typeface() -> None:
+    """The board must be set in the bundled Inter, at the right optical size.
+
+    The fonts ship in fonts/, where .gitignore keeps every other font file out.
+    An exception there that stops matching, or a loader that skips the folder,
+    would leave a clone drawing in a fallback face with nothing to say so.
+    """
+    from PySide6.QtGui import QFont
+
+    from widgets.core import typography
+
+    r = typography.resolve()
+    assert r == {"display": "Inter Variable", "text": "Inter Variable"}, (
+        f"the type resolved to {r}, not the bundled Inter")
+    if typography._OPSZ is not None:
+        big = typography.font(40, QFont.DemiBold).variableAxisValue(typography._OPSZ)
+        small = typography.font(11).variableAxisValue(typography._OPSZ)
+        assert (big, small) == (32.0, 14.0), (
+            f"optical size {big} at 40pt and {small} at 11pt - the clock would "
+            "lose its display cut")
+    print("  typeface: bundled Inter wins the stack; display cut at 40pt, text "
+          "cut at 11pt")
 
 
 def _check_vendored_closure() -> None:

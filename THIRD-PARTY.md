@@ -64,18 +64,23 @@ If that matters for how you use or redistribute this, replace the source in
 `widgets/tiles/stocks.py`. Feeds with terms that permit this kind of use include
 Stooq's CSV endpoint, and Finnhub or Twelve Data with a user-supplied free key.
 
-## SF Pro typefaces — Apple, and deliberately absent
+## Inter typeface — SIL Open Font License 1.1
 
-The board is designed around Apple's SF Pro, and **the font files are not in this
-repository** — `.gitignore` excludes them. Apple's licence covers designing user
-interfaces for Apple platforms and does not permit redistributing the files.
+The board is set in [Inter](https://rsms.me/inter/), by Rasmus Andersson and the
+Inter Project Authors. Its two variable files, `fonts/InterVariable.ttf` and
+`fonts/InterVariable-Italic.ttf`, ship unmodified from the official 4.1 release,
+with the licence beside them in `fonts/LICENSE-Inter.txt`.
 
-Nothing breaks without them. `widgets/core/typography.py` falls back through
-Inter, Helvetica Neue and Segoe UI Variable, and the parts that do most of the
-work — Apple's tracking curve and the optical-size split at 20pt — are
-implemented here, not in the font. `fonts/README.txt` explains how to add them
-locally; they are then loaded per-process with `addApplicationFont`, so nothing
-is ever installed system-wide.
+The OFL allows the fonts to be bundled with software, redistributed and used
+commercially, as long as the licence goes with them and the fonts aren't sold on
+their own. They are loaded per-process with `addApplicationFont`, so nothing is
+ever installed system-wide.
+
+**Apple's SF Pro is not used.** The board was first designed around it, but
+Apple's licence covers designing user interfaces for Apple platforms and does not
+permit redistributing the files, so Inter replaced it. `.gitignore` still keeps
+any stray copy out of the repository, and `tools/prepublish.py` refuses to
+publish one.
 
 ## Audio capture — PyAudioWPatch (optional)
 
