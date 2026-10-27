@@ -462,6 +462,9 @@ class WeatherWidget(WidgetCard):
             path.addEllipse(QRectF(x + w * 0.20, y, w * 0.52, h * 0.92))
             path.addEllipse(QRectF(x + w * 0.50, y + h * 0.26, w * 0.50, h * 0.74))
             path.addRect(QRectF(x + w * 0.16, y + h * 0.52, w * 0.70, h * 0.46))
+            # The puffs overlap, and simplified() keeps what the fill rule fills:
+            # under the default odd-even rule every overlap came out as a hole.
+            path.setFillRule(Qt.WindingFill)
             p.setPen(Qt.NoPen)
             p.setBrush(cloud)
             p.drawPath(path.simplified())
