@@ -193,9 +193,12 @@ shortcut's "Run: Minimised" to the first ordinary window the process shows,
 which would put the app window straight onto the taskbar. The window also undoes
 that itself, because a board started minimised at boot shows its first ordinary
 window whenever you first open the app, hours later.
-`tools/make_icon.py` generates `assets/widgets.ico` at nine sizes — Windows picks
-a different one for the taskbar, the Start menu and Explorer, and a 16px tile
-drawn at 16px keeps its corners where one downscaled from 256px turns to mush.
+The icon is the mark, four white tiles. `widgets/core/mark.py` draws it for the
+tray, the app window's sidebar (where the light theme gives it the text colour,
+since white would vanish on the pale panel) and `tools/make_icon.py`, which
+generates `assets/widgets.ico` at nine sizes — Windows picks a different one
+for the taskbar, the Start menu and Explorer, and a 16px tile drawn at 16px
+keeps its corners where one downscaled from 256px turns to mush.
 
 The **Now Playing** widget reads the system media session through the `winrt-*`
 namespace packages. **A copy ships in `vendor/`** and is loaded ahead of anything

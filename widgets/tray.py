@@ -10,36 +10,25 @@ how a second launch of the app reaches this one (see :mod:`main`).
 
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QPointF, QRectF, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, Qt
+from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
-from .core import startup, winapi
+from .core import mark, startup, winapi
 from .core.board import Board, available
 from .core.palette import ACCENTS
 
 
-def _icon(accent: str = "#3b82f6") -> QIcon:
-    """Four rounded tiles - the universal 'widgets' mark.
+def _icon() -> QIcon:
+    """The mark: four white tiles (core/mark.py).
 
     Prefers the generated multi-size .ico so the tray, the taskbar and the
     shortcut all show the identical mark; falls back to painting it.
     """
-    from .core import startup as _startup
-    ico = _startup.icon_path()
+    ico = startup.icon_path()
     if ico:
         return QIcon(ico)
-    pm = QPixmap(64, 64)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.setPen(Qt.NoPen)
-    boxes = [(6, 6, 24, 24), (34, 6, 24, 24), (6, 34, 24, 24), (34, 34, 24, 24)]
-    for i, (x, y, w, h) in enumerate(boxes):
-        p.setBrush(QColor(accent) if i in (0, 3) else QColor(160, 172, 190, 220))
-        p.drawRoundedRect(QRectF(x, y, w, h), 7, 7)
-    p.end()
-    return QIcon(pm)
+    return QIcon(mark.pixmap(64))
 
 
 class _HotkeyFilter(QAbstractNativeEventFilter):
@@ -72,7 +61,7 @@ class _HotkeyFilter(QAbstractNativeEventFilter):
 
 class WidgetTray(QSystemTrayIcon):
     def __init__(self, board: Board, app) -> None:
-        super().__init__(_icon(board.palette.accent))
+        super().__init__(_icon())
         self.board = board
         self.app = app
         self._hk_window: QWidget | None = None
@@ -265,11 +254,9 @@ class WidgetTray(QSystemTrayIcon):
 
     def _set_theme(self, key: str) -> None:
         self.board.set_theme(key)
-        self.setIcon(_icon(self.board.palette.accent))
 
     def _set_accent(self, key: str) -> None:
         self.board.set_accent(key)
-        self.setIcon(_icon(self.board.palette.accent))
 
     def _quit(self) -> None:
         self.remove_hotkey()

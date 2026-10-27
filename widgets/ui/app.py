@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from ..core import appearance, startup, winapi
+from ..core import appearance, mark, startup, winapi
 from ..core.board import REGISTRY, Board
 from ..core.palette import ACCENTS
 from . import cropper, previews, theme
@@ -482,10 +482,6 @@ class Sidebar(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(g + 10, 86, 10, g + 10)
         lay.setSpacing(2)
-        self._icon = None
-        ico = startup.icon_path()
-        if ico:
-            self._icon = QIcon(ico).pixmap(30, 30)
 
         self.nav: Dict[str, NavButton] = {}
         group = QButtonGroup(self)
@@ -550,8 +546,8 @@ class Sidebar(QWidget):
         ui = theme.current()
         p = hints(QPainter(self))
         x = theme.INSET + 16
-        if self._icon is not None:
-            p.drawPixmap(round(x), 26, self._icon)
+        # The mark is white, and takes the text colour on the light panel.
+        mark.paint(p, QRectF(x, 26, 30, 30), mark.WHITE if ui.dark else ui.text)
         p.setFont(theme.font(12.5, QFont.Bold))
         p.setPen(QColor(ui.text))
         p.drawText(QRectF(x + 40, 23, 160, 20), Qt.AlignLeft | Qt.AlignVCenter, "PC Widgets")
