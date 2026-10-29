@@ -33,6 +33,17 @@ Dragging hands over to Windows' own move loop (QWindow.startSystemMove), so
 snapping to screen edges works exactly as it does for any other window. A
 maximised or snapped window fills its space exactly, as Windows 11's own do: no
 margin, no shadow, and square corners.
+
+A window with a sidebar has it frosted, running to the window's edge with a
+hairline between it and the page. Frosted the way Windows 11's Mica is: Mica
+isn't see-through either - it is the desktop wallpaper, blurred and tinted, as
+though the window were a pane laid over the desktop - so it is the board's own
+blurred wallpaper (glass.py), the slice that lies behind the sidebar, under a
+grey tint and a faint grain. That slice changes as the window moves, so the
+glass is a picture of its own, a sidebar wide: rebuilt when the window moves or
+the wallpaper changes, and blitted under every other repaint. DWM's own
+materials can't be used for the reason the widgets can't use them: they fill
+the whole window, the transparent shadow margin included.
 """
 
 from __future__ import annotations
@@ -42,7 +53,7 @@ import ctypes.wintypes as wt
 from typing import Callable, Optional, Sequence
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QRegion
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QWidget
 
 from ..core import winapi
@@ -195,15 +206,19 @@ class Chrome:
     TITLE_H = 46            # the draggable strip
 
     def init_chrome(self, kinds: Sequence[str] = ("min", "max", "close"),
-                    side: Callable[[], int] = lambda: 0) -> None:
-        """``side`` gives the sidebar's width, if the window has one: it sits on
-        a panel of its own, inset from the window's edge."""
+                    side: Callable[[], int] = lambda: 0,
+                    glass: Callable[[], object] = lambda: None) -> None:
+        """``side`` gives the sidebar's width, if the window has one, and
+        ``glass`` the GlassBackdrop it is frosted with - or None, for a sidebar
+        of plain grey."""
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._side = side
+        self._glass = glass
         lay = self.layout()
         self._base_margins = lay.contentsMargins() if lay is not None else None
         self._margin = -1
         self._backdrop_key = None
+        self._glass_key = None
         self._inner_key = None
         self.caption = CaptionButtons(self, kinds)
         self.drag = DragStrip(self)
@@ -219,6 +234,11 @@ class Chrome:
     def body_rect(self) -> QRect:
         m = self.frame_margin()
         return self.rect().adjusted(m, m, -m, -m)
+
+    def side_rect(self) -> QRect:
+        """The sidebar's column of the body, its hairline included."""
+        body = self.body_rect()
+        return QRect(body.left(), body.top(), int(self._side()), body.height())
 
     def corner(self) -> float:
         return theme.CORNER if self.frame_margin() else 0.0
@@ -256,13 +276,14 @@ class Chrome:
 
     # -- painting -------------------------------------------------------- #
     def paint_backdrop(self, p: QPainter, rect: QRect) -> None:
-        """The window's shape, shadow and panels, from a cached picture.
+        """The window's shape, shadow and sidebar, from cached pictures.
 
         Built once per size and state. Every frame of a scroll repaints the
         backdrop under the moving content, and almost all of that is plain
         window colour: that part is filled - the cheapest thing that can be
-        drawn - and only what lies over an edge, a corner or the sidebar is
-        copied from the picture, straight, with no blending.
+        drawn - and only what lies over an edge or a corner is copied from the
+        picture, straight, with no blending. The sidebar's glass is a picture
+        of its own, laid over the rest only where the repaint reaches it.
         """
         key = (self.width(), self.height(), self._margin, int(self._side()),
                theme._generation)
@@ -283,6 +304,64 @@ class Chrome:
             box = rest.boundingRect()
             p.drawPixmap(box, self._backdrop, box)
         p.restore()
+        side = self.side_rect()
+        if side.width() > 0 and side.intersects(rect):
+            p.drawPixmap(side.topLeft(), self._side_glass())
+
+    def _side_glass(self) -> QPixmap:
+        """The sidebar: the slice of blurred wallpaper behind it, tinted and
+        grained, cut to the window's corners on the left, with the hairline on
+        its right edge and the window's own outline redrawn over it.
+
+        Keyed on where the sidebar is on screen as well as its size, since the
+        slice is whatever lies behind it - and on the wallpaper, for a new one.
+        """
+        ui = theme.current()
+        side = self.side_rect()
+        body = QRectF(self.body_rect())
+        radius = self.corner()
+        at = self.mapToGlobal(side.topLeft())
+        glass = self._glass()
+        image = getattr(glass, "image", None)
+        key = (side.width(), side.height(), at.x(), at.y(), radius, theme._generation,
+               image.cacheKey() if image is not None else 0)
+        if self._glass_key == key:
+            return self._glass_pm
+        w, h = max(1, side.width()), max(1, side.height())
+
+        # Opaque first: where the window hangs off the edge of the desktop
+        # there is no wallpaper to sample, and a see-through gap in a layered
+        # window is a hole straight through it.
+        raw = QPixmap(w, h)
+        raw.fill(QColor(ui.side_solid))
+        rp = QPainter(raw)
+        rp.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        if glass is not None and glass.paint_into(rp, QRectF(0, 0, w, h), at.x(), at.y()):
+            rp.fillRect(QRectF(0, 0, w, h), QColor(ui.side_glass))
+            grain = theme.noise(ui.dark)
+            if grain is not None:
+                rp.drawTiledPixmap(0, 0, w, h, grain)
+        rp.end()
+
+        pm = QPixmap(w, h)
+        pm.fill(Qt.transparent)
+        p = theme.hints(QPainter(pm))
+        # A clip path is drawn aliased, so the corner is cut by filling the
+        # window's own outline with the glass as a brush, which is smoothed.
+        outline = body.translated(-side.left(), -side.top())
+        if radius:
+            p.fillPath(theme.smooth(outline, radius), QBrush(raw))
+        else:
+            p.drawPixmap(0, 0, raw)
+        p.setPen(QPen(QColor(ui.side_line), 1.0))
+        p.drawLine(QPointF(w - 0.5, 0), QPointF(w - 0.5, h))
+        if radius:
+            p.setPen(QPen(QColor(ui.frame), 1.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(theme.smooth(outline.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
+        p.end()
+        self._glass_pm, self._glass_key = pm, key
+        return pm
 
     def _plain_region(self) -> QRegion:
         """Where the backdrop is nothing but the window's colour: the body
@@ -308,11 +387,6 @@ class Chrome:
             p.fillPath(theme.smooth(body, radius), QColor(ui.base))
         else:
             p.fillRect(body, QColor(ui.base))
-        side = int(self._side())
-        if side:
-            g = theme.INSET
-            theme.paint_surface(p, QRectF(body.left() + g, body.top() + g, side - g,
-                                          body.height() - 2 * g), theme.CORNER - g)
         if radius:
             p.setPen(QPen(QColor(ui.frame), 1.0))
             p.setBrush(Qt.NoBrush)
@@ -336,6 +410,11 @@ class Chrome:
         super().moveEvent(ev)
         if hasattr(self, "caption"):
             self.sync_frame()       # snapping to an edge can move a window without resizing it
+            # The glass shows what lies behind the sidebar, which a move changes.
+            # Only the sidebar is repainted, and repaints asked for faster than
+            # they can be drawn are merged into one.
+            if self._side():
+                self.update(self.side_rect())
 
     def changeEvent(self, ev) -> None:
         super().changeEvent(ev)

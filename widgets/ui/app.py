@@ -18,9 +18,10 @@ closing it hides it: the widgets stay on the desktop, and the tray icon or
 launching the app again brings the window straight back.
 
 It is built from the pieces in theme.py on the frame in chrome.py: a solid
-black or white window cut to the widgets' own shape, grey panels with the same
-corners, and controls that ease between states. Nothing here keeps its own copy
-of the board. Every page
+black or white window cut to the widgets' own shape, its sidebar frosted glass
+set off from the page by a hairline, grey panels with the widgets' corners, and
+controls that ease between states. Nothing here keeps its own copy of the
+board. Every page
 reads the cards and preferences when it draws, and redraws when the board says
 something changed - a change can as easily come from a card's right-click menu
 or the tray as from this window.
@@ -426,8 +427,8 @@ class NavButton(Cached, QAbstractButton):
         hints(p)
         r = QRectF(self.rect())
         if not self.isChecked() and self._hover.t > 0:
-            fill = QColor(ui.control)
-            fill.setAlphaF(fill.alphaF() * self._hover.t * 0.7)
+            fill = QColor(ui.side_hover)
+            fill.setAlphaF(fill.alphaF() * self._hover.t)
             p.fillPath(rounded(r, 11), fill)
         on = self.isChecked()
         glyph(p, self.glyph_kind, QRectF(16, (r.height() - 17) / 2.0, 17, 17),
@@ -470,7 +471,8 @@ class PeekButton(Cached, QAbstractButton):
         hints(p)
         r = QRectF(self.rect())
         t = self._hover.t if self.isEnabled() else 0.0
-        p.fillPath(rounded(r, r.height() / 2), theme.mix(ui.control, ui.control_hi, t))
+        p.fillPath(rounded(r, r.height() / 2),
+                   theme.mix(ui.side_control, ui.side_control_hi, t))
         p.setFont(theme.font(10, QFont.Medium))
         p.setPen(QColor(ui.text if self.isEnabled() else ui.text_faint))
         p.drawText(QRectF(18, 0, r.width() - 24, r.height()),
@@ -485,21 +487,22 @@ class PeekButton(Cached, QAbstractButton):
 
 
 class Sidebar(QWidget):
-    """Navigation, on its own panel: the window paints the panel (chrome.py),
-    inset from the window's edge with its corners following the window's."""
+    """Navigation, on frosted glass that runs to the window's edge, with a
+    hairline between it and the page. The window paints the glass and the line
+    (chrome.py); this paints what sits on them."""
 
     PAGES = (("gallery", "Gallery", "gallery"),
              ("desktop", "On your desktop", "desktop"),
              ("presets", "Presets", "presets"),
              ("settings", "Settings", "settings"))
+    PAD = 12            # from the window's edge, and from the hairline
 
     def __init__(self, win: "MainWindow") -> None:
         super().__init__()
         self.win = win
         self.setFixedWidth(win.SIDE_W)
-        g = int(theme.INSET)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(g + 10, 86, 10, g + 10)
+        lay.setContentsMargins(self.PAD, 86, self.PAD + 1, self.PAD)
         lay.setSpacing(2)
 
         self.nav: Dict[str, NavButton] = {}
@@ -566,8 +569,9 @@ class Sidebar(QWidget):
     def paintEvent(self, _ev) -> None:
         ui = theme.current()
         p = hints(QPainter(self))
-        x = theme.INSET + 16
-        # The mark is white, and takes the text colour on the light panel.
+        # Centred over the nav items' icons, which sit 16 px into each item.
+        x = self.PAD + 10
+        # The mark is white, and takes the text colour on the light glass.
         mark.paint(p, QRectF(x, 26, 30, 30), mark.WHITE if ui.dark else ui.text)
         p.setFont(theme.font(12.5, QFont.Bold))
         p.setPen(QColor(ui.text))
@@ -581,7 +585,7 @@ class Sidebar(QWidget):
             y = self._current_pill()
             b = next(iter(self.nav.values()))
             pill = QRectF(b.geometry().left(), y, b.width(), b.height())
-            p.fillPath(rounded(pill, 11), QColor(ui.control))
+            p.fillPath(rounded(pill, 11), QColor(ui.side_pill))
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(ui.accent))
             p.drawRoundedRect(QRectF(pill.left() + 1, pill.center().y() - 8, 3, 16), 1.5, 1.5)
@@ -2146,13 +2150,16 @@ class MainWindow(Chrome, QWidget):
         board.prefs_changed.connect(self._prefs_changed)
         board.presets_changed.connect(self._presets_changed)
         board.displays_changed.connect(self._displays_changed)
+        # The sidebar is frosted with the board's blurred wallpaper; a new
+        # wallpaper is a new picture behind it.
+        board.glass_changed.connect(lambda: self.update(self.side_rect()))
 
         # Thumbnails of live cards go stale - a clock moves on - so they are
         # redrawn now and then, but only while anyone can see them.
         self._live = QTimer(self)
         self._live.timeout.connect(self._tick)
         self._live.start(4000)
-        self.init_chrome(side=lambda: self.SIDE_W)
+        self.init_chrome(side=lambda: self.SIDE_W, glass=lambda: self.board.glass)
         self.show_page("gallery")
 
     def _fit_to_screen(self) -> None:

@@ -1107,10 +1107,51 @@ def _check_app_window() -> None:
                               chrome.HTBOTTOMRIGHT)):
                 got = win.edge_hit(pt)
                 assert got == want, f"edge at {pt.x(), pt.y()} answered {got}, not {want}"
+
+            # The sidebar is frosted glass right to the window's edge, with a
+            # hairline between it and the page - not a panel floating inside.
+            from PySide6.QtGui import QColor, QImage
+            from widgets.core import winapi
+            side = win.side_rect()
+            y = side.center().y()
+            edge = shot.pixelColor(side.left() + 3, y)
+            assert edge.alpha() == 255 and edge.rgb() != QColor(look.current().base).rgb(), (
+                f"the sidebar stops short of the window's edge ({edge.name()})")
+            line, page = shot.pixelColor(side.right(), y), shot.pixelColor(side.right() + 4, y)
+            assert line.rgb() != page.rgb(), "no hairline between the sidebar and the page"
+            # It is frosted with what lies behind it: put a red desktop there
+            # and the glass turns red.
+            glass = board.glass
+            real = (glass.image, glass.origin)
+            red = QImage(6000, 4000, QImage.Format_RGB32)
+            red.fill(QColor("#ff0000"))
+            glass.image, glass.origin = red, (-3000, -2000)
+            try:
+                win.update()
+                pump(0.2)
+                frosted = win.grab().toImage().pixelColor(side.center())
+            finally:
+                glass.image, glass.origin = real
+                win.update()
+            assert frosted.red() > frosted.green() + 20, (
+                f"the sidebar isn't frosted with the wallpaper behind it: {frosted.name()}")
+            # Hanging off the edge of the desktop, where there is no wallpaper,
+            # it stays solid: a see-through gap would be a hole in the window.
+            home = win.pos()
+            vl, vt, _vr, _vb = winapi.virtual_screen()
+            win.move(vl - side.right() - 40, home.y())
+            pump(0.2)
+            off = win.grab().toImage().pixelColor(side.left() + 3, y)
+            win.move(home)
+            pump(0.2)
+            assert off.alpha() == 255, "the sidebar went see-through off the desktop's edge"
+
             win.showMaximized()
             pump(0.2)
             assert win.frame_margin() == 0 and win.edge_hit(QPointF(2, 2)) is None, (
                 "a maximised window kept its margin")
+            assert win.grab().toImage().pixelColor(1, 1).alpha() == 255, (
+                "maximised, the sidebar's glass doesn't reach the screen's corner")
             win.showNormal()
             pump(0.2)
             assert win.frame_margin() == m, "the margin did not come back on restore"
@@ -1142,7 +1183,8 @@ def _check_app_window() -> None:
     print("  app window: a tile per widget, Add places clear of other cards on the "
           "display picked, Remove and Undo round-trip, presets save, rename, apply "
           "and undo, cut to the widgets' shape with a margin that resizes and goes "
-          "when maximised, wheel scrolling glides; pages in _selftest/_app_*.png")
+          "when maximised, sidebar frosted to the edge with its hairline, wheel "
+          "scrolling glides; pages in _selftest/_app_*.png")
 
 
 def _check_audio_gate(pal) -> None:

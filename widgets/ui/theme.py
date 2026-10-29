@@ -4,14 +4,18 @@ theme.py
 The look of the app window and its dialogs.
 
 Solid, and shaped like the widgets. The window is pure black in the dark theme
-and pure white in the light one; everything on it - the sidebar, the gallery's
-cards, the grouped settings lists - is a panel of flat grey, a few steps off
-the window's colour, with the widgets' own corner: the same continuous curve at
-the same radius (see ``smooth``). A panel inside another follows its curve
+and pure white in the light one; everything on it - the gallery's cards, the
+grouped settings lists - is a panel of flat grey, a few steps off the window's
+colour, with the widgets' own corner: the same continuous curve at the same
+radius (see ``smooth``). A panel inside another follows its curve
 concentrically, its radius shrunk by the gap between them, so nested corners
-run parallel instead of pinching. No translucency, no blur, no gradients: on a
-flat colour the only things left to read are the shapes and the type, so both
-have to be exact.
+run parallel instead of pinching. On a flat colour the only things left to read
+are the shapes and the type, so both have to be exact.
+
+The one exception is the sidebar, which is frosted glass: the blurred wallpaper
+behind the window under a grey tint - dark grey in the dark theme, light grey
+in the light - running to the window's edge, with a hairline between it and the
+page (see chrome.py).
 
 The greys are neutral rather than bluish, and the label colours are white or
 black at descending alpha (see typography.py) rather than separate greys, so
@@ -40,7 +44,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor, QConicalGradient, QFont, QFontMetricsF, QGuiApplication, QImage,
-    QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+    QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTransform,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QButtonGroup, QColorDialog, QHBoxLayout, QLineEdit,
@@ -51,11 +55,8 @@ from ..core import typography
 from ..core.card import RADIUS, squircle
 from ..core.palette import Palette, _mix
 
-# Panels share the widgets' corner exactly. INSET is the gap between the
-# window's edge and a panel inside it (the sidebar), whose own corner is the
-# window's less that gap, so the two curves stay parallel.
+# Panels share the widgets' corner exactly.
 CORNER = RADIUS
-INSET = 8.0
 
 
 def rgba(r: int, g: int, b: int, a: float = 1.0) -> str:
@@ -99,6 +100,16 @@ class Ui:
     good: str
     hud: str             # floating toolbars and toasts
     shadow: int          # the window's drop shadow, 0-255
+    # The sidebar's frosted glass, and what sits on it. Tones on the glass are
+    # see-through too - white or black at low alpha - so the frosting shows
+    # through a selected item rather than being covered by a grey slab.
+    side_glass: str      # tint over the blurred wallpaper
+    side_solid: str      # the sidebar when there is no wallpaper to blur
+    side_line: str       # the hairline between the sidebar and the page
+    side_hover: str      # a nav item under the pointer
+    side_pill: str       # the selected nav item
+    side_control: str    # a capsule button (Bring to front)
+    side_control_hi: str
 
     @property
     def accent_soft(self) -> str:
@@ -126,7 +137,13 @@ def build(palette: Palette) -> Ui:
                   text="#f5f5f7", text_dim=rgba(235, 235, 245, 0.60),
                   text_faint=rgba(235, 235, 245, 0.30),
                   danger="#ff453a", good="#30d158",
-                  hud="#1c1c1f", shadow=150)
+                  hud="#1c1c1f", shadow=150,
+                  side_glass=rgba(30, 30, 32, 0.76), side_solid="#1e1e20",
+                  side_line=rgba(255, 255, 255, 0.10),
+                  side_hover=rgba(255, 255, 255, 0.06),
+                  side_pill=rgba(255, 255, 255, 0.11),
+                  side_control=rgba(255, 255, 255, 0.07),
+                  side_control_hi=rgba(255, 255, 255, 0.12))
     return Ui(dark=False, accent=palette.accent,
               base="#ffffff", surface="#f4f4f6", surface_hi="#eeeef1",
               edge=rgba(0, 0, 0, 0.05), frame=rgba(0, 0, 0, 0.11),
@@ -136,7 +153,15 @@ def build(palette: Palette) -> Ui:
               text="#1d1d1f", text_dim=rgba(60, 60, 67, 0.64),
               text_faint=rgba(60, 60, 67, 0.34),
               danger="#ff3b30", good="#34c759",
-              hud="#1c1c1f", shadow=80)
+              hud="#1c1c1f", shadow=80,
+              # Heavier than the dark tint: a light grey has to stay light over
+              # a dark wallpaper, where the dark grey only has to stay dark.
+              side_glass=rgba(240, 240, 242, 0.86), side_solid="#ececee",
+              side_line=rgba(0, 0, 0, 0.10),
+              side_hover=rgba(0, 0, 0, 0.04),
+              side_pill=rgba(0, 0, 0, 0.075),
+              side_control=rgba(0, 0, 0, 0.05),
+              side_control_hi=rgba(0, 0, 0, 0.085))
 
 
 _current: Optional[Ui] = None
@@ -519,6 +544,34 @@ def smooth(rect: QRectF, radius: float = CORNER) -> QPainterPath:
     return squircle(rect, radius)
 
 
+_noise: Dict[bool, Optional[QPixmap]] = {}
+
+
+def noise(dark: bool) -> Optional[QPixmap]:
+    """A faint grain to lay over frosted glass.
+
+    Apple's materials carry a little noise; it is what stops a large soft
+    gradient from banding, and why one reads as frosted glass rather than as a
+    flat tint. Generated once - with numpy, or not at all.
+    """
+    if dark in _noise:
+        return _noise[dark]
+    try:
+        import numpy as np
+    except Exception:
+        _noise[dark] = None
+        return None
+    n = 160
+    v = np.random.default_rng(7).integers(0, 256, (n, n), dtype=np.uint16)
+    a = 10 if dark else 7
+    px = np.empty((n, n, 4), dtype=np.uint8)
+    px[..., 0] = px[..., 1] = px[..., 2] = (v * a // 255).astype(np.uint8)  # premultiplied grey
+    px[..., 3] = a
+    img = QImage(px.data, n, n, n * 4, QImage.Format_RGBA8888_Premultiplied).copy()
+    _noise[dark] = QPixmap.fromImage(img)
+    return _noise[dark]
+
+
 _shadows: Dict[tuple, Tuple[QImage, int]] = {}
 
 
@@ -713,6 +766,31 @@ def _pen(colour, width: float = 1.6) -> QPen:
     return QPen(QColor(colour), width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
 
+_gear_path: Optional[QPainterPath] = None
+
+
+def _gear() -> QPainterPath:
+    """The gear's outline in a unit box centred on the origin: a ring with
+    eight teeth merged into it. Made once - merging paths is the slow part."""
+    global _gear_path
+    if _gear_path is None:
+        root, tip, base = 0.34, 0.47, 0.28          # radii: ring, tooth tip, tooth base
+        half_base, half_tip, round_ = 0.10, 0.065, 0.035
+        path = QPainterPath()
+        path.addEllipse(QPointF(0, 0), root, root)
+        for i in range(8):
+            tooth = QPainterPath(QPointF(-half_base, -base))
+            tooth.lineTo(-half_tip, -tip + round_)
+            tooth.quadTo(-half_tip, -tip, -half_tip + round_, -tip)
+            tooth.lineTo(half_tip - round_, -tip)
+            tooth.quadTo(half_tip, -tip, half_tip, -tip + round_)
+            tooth.lineTo(half_base, -base)
+            tooth.closeSubpath()
+            path = path.united(QTransform().rotate(i * 45.0).map(tooth))
+        _gear_path = path.simplified()
+    return _gear_path
+
+
 def glyph(p: QPainter, kind: str, r: QRectF, colour, width: float = 1.6) -> None:
     """Small line icons, drawn rather than loaded - the app ships no UI images.
 
@@ -766,7 +844,13 @@ def glyph(p: QPainter, kind: str, r: QRectF, colour, width: float = 1.6) -> None
         p.setBrush(c)
         p.drawRoundedRect(QRectF(x + w * 0.22, y + h * 0.58, w * 0.22, h * 0.18), 1.2, 1.2)
         p.drawRoundedRect(QRectF(x + w * 0.52, y + h * 0.58, w * 0.26, h * 0.18), 1.2, 1.2)
-    elif kind in ("settings", "sliders"):
+    elif kind == "settings":
+        # Apple's gear (SF Symbols' gearshape): eight teeth, tapered and round
+        # tipped, round a ring with a round hole - drawn in outline, like the
+        # sidebar's other icons.
+        p.drawPath(QTransform().translate(cx, cy).scale(w, h).map(_gear()))
+        p.drawEllipse(QPointF(cx, cy), w * 0.14, h * 0.14)
+    elif kind == "sliders":
         for i, at in enumerate((0.70, 0.30, 0.58)):
             yy = y + h * (0.20 + 0.30 * i)
             p.setPen(_pen(c, width))

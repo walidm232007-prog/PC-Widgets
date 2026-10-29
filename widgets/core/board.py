@@ -91,6 +91,7 @@ class Board(QObject):
     prefs_changed = Signal()            # theme, accent, layer, glass, peek...
     presets_changed = Signal()          # a preset was saved, renamed, removed or applied
     displays_changed = Signal()         # a monitor came, went, moved or changed size
+    glass_changed = Signal()            # the blurred wallpaper was rebuilt
 
     def __init__(self, state: BoardState) -> None:
         super().__init__()
@@ -876,9 +877,13 @@ class Board(QObject):
             pass
 
     def _refresh_glass(self) -> None:
-        if self.state.glass and self.glass.refresh():
-            for c in self.cards:
-                c.update()
+        # Kept current with the widgets' glass switched off too: the app
+        # window's sidebar is frosted with the same picture.
+        if self.glass.refresh():
+            self.glass_changed.emit()
+            if self.state.glass:
+                for c in self.cards:
+                    c.update()
 
     def set_glass(self, on: bool) -> None:
         self.state.glass = on

@@ -72,17 +72,28 @@ can't drift from what a widget actually looks like. Nothing in the window keeps
 its own copy of the board: a change made from a card's right-click menu or the
 tray shows up in the window, and the other way round.
 
-**The look.** Solid, and shaped like the widgets. In the dark theme the window
-is pure black with dark-grey panels on it; in the light theme it is pure white
-with light-grey ones: the sidebar, the gallery's cards, the grouped settings
-lists. Every panel is cut with the widgets' own corner, the same continuous
-curve at the same 26 px radius, and so is the window itself. A panel inside
-another (the sidebar inside the window, a preview inside its card) has its
-radius cut by the gap between them, so the two curves run parallel instead of
-pinching. There is no blur or translucency: on flat colour only the shapes and
-the type are left to read, so both have to be exact. Buttons and the small
-controls are capsules, and every control eases between states instead of
-snapping (`widgets/ui/theme.py`).
+**The look.** Shaped like the widgets, and solid but for the sidebar. In the
+dark theme the window is pure black with dark-grey panels on it; in the light
+theme it is pure white with light-grey ones: the gallery's cards, the grouped
+settings lists. Every panel is cut with the widgets' own corner, the same
+continuous curve at the same 26 px radius, and so is the window itself. A panel
+inside another (a preview inside its card) has its radius cut by the gap between
+them, so the two curves run parallel instead of pinching. On flat colour only
+the shapes and the type are left to read, so both have to be exact. Buttons and
+the small controls are capsules, and every control eases between states instead
+of snapping (`widgets/ui/theme.py`).
+
+The sidebar is frosted glass - dark grey in the dark theme, light grey in the
+light one - running to the window's edge, with a hairline between it and
+whichever page is open. It is frosted the way Windows 11's Mica is. Mica isn't
+see-through either: it is the desktop wallpaper, blurred and tinted, as though
+the window were a pane laid over the desktop. So the sidebar shows the slice of
+the widgets' own blurred wallpaper (see [Frosted glass](#frosted-glass)) that
+lies behind it, from whichever monitor it is on, under a grey tint and a faint
+grain, and the slice follows as the window moves. The light tint is the heavier
+of the two, since a light grey has to stay light over a dark wallpaper. The
+glass is a picture of its own, a sidebar wide, rebuilt only when the window
+moves or the wallpaper changes, so scrolling a page costs what it always did.
 
 Windows can't draw that corner: the corners it rounds are a fixed 8 px, and
 circular. So the window is a layered one, transparent per pixel, that draws its
@@ -560,7 +571,10 @@ cropped photo always fills its card and lands on the part asked for, that the
 crop editor keeps on Done and restores on Cancel, that the gallery's Add,
 Remove and Undo really change the board, and that the app window is cut to the
 widgets' shape - solid inside, see-through past the corner's curve - with a
-shadow margin that resizes the window and goes when it is maximised.
+shadow margin that resizes the window and goes when it is maximised. Its
+sidebar has to reach the window's edge with a hairline beside it, turn red with
+a red desktop behind it, and stay solid hanging off the edge of the desktop,
+where a see-through gap would be a hole in the window.
 
 The display checks put a board on a made-up desk shaped like this machine's (a
 main landscape monitor, a portrait one on its left), then rearrange, unplug and
