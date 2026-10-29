@@ -27,10 +27,12 @@ path, so it would only ever be right on one machine. The command above builds
 them for yours.
 
 The typeface comes with it: **Inter** ships in `fonts/`, under the SIL Open Font
-License, and is loaded for this app only. One thing is deliberately left out and
-the app handles it: the **optional audio packages** in `requirements.txt`,
-without which the visualiser uses the Core Audio peak meter instead of a real
-spectrum.
+License, and is loaded for this app only. So does the audio capture the
+visualiser reads the speakers with (PyAudioWPatch, in `vendor/`): installed in
+the user's site-packages it was invisible to the board on the machine this was
+built for, and the visualiser silently fell back to a peak meter that moves all
+five bars together. numpy, which the spectrum also needs, is the one optional
+package in `requirements.txt`; without it the visualiser uses that peak meter.
 
 ## Everyday use
 
@@ -256,12 +258,20 @@ equities, indices (`^GSPC`) and crypto (`BTC-USD`), so one list can mix them.
 **Now Playing's bars** are the sound actually leaving the speakers, split from
 bass on the left to hi-hats on the right: kick and sub-bass, the bass line,
 snare body and vocals, the snare's crack and claps, then hi-hats and cymbals
-(`widgets/core/audio.py`). Each bar is measured against its own recent range,
-not one level shared by all five - a hi-hat carries a fraction of a kick's
-energy, and on a shared scale the right-hand bar barely moved while the bass
-pinned the left one near the top. A band that jumps is a hit and goes straight
-to full height, then the bar falls, quicker the higher the band, so the bass
-thumps and the hats tick. The bass bands are read over a longer window than the
+(`widgets/core/audio.py`). All five are read against one reference - the
+loudest band right now - with a fixed tilt per band, set from real music
+played through the analyser so a balanced track gives five comparable bars.
+Scaling each bar
+to its own range instead was tried and made things worse: a band with almost
+nothing in it was stretched to full height too, so a bass note's attack and
+harmonics lit every bar and the whole visualiser jumped on each note. The
+upper bars lose most of a held sound, so a pad or a cymbal wash doesn't keep
+them hovering; the two bass bars keep all of a held note, on a gentler curve,
+since taking it away drained an 808 to nothing a second into the note while it
+was still playing.
+A band that jumps is a hit and goes straight to full
+height - if it lands near the loudest band - then the bar falls, quicker the
+higher the band, so the bass thumps and the hats tick. The bass bands are read over a longer window than the
 rest: the kick needs the frequency resolution, and a hat needs its tick kept
 sharp. While a track plays, the bars redraw at the pace the audio is read,
 about 47 times a second, repainting only the strip they sit in.

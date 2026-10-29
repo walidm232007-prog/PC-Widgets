@@ -15,9 +15,11 @@ PySide6>=6.6
 #   winrt-Windows.Storage.Streams>=3.2.1
 #   typing_extensions>=4.12.2
 #
-# The audio visualiser needs real samples for a true spectrum. Without these it
-# falls back to the Core Audio peak meter (no dependency), and failing that to
-# an animation.
+# The audio visualiser needs real samples for a true spectrum: PyAudioWPatch to
+# capture them (a CPython 3.13 copy ships in vendor/, used ahead of anything
+# installed - install it yourself only for another Python version) and numpy to
+# analyse them. Without either it falls back to the Core Audio peak meter (no
+# dependency), and failing that to an animation.
 #
 #   numpy>=1.26
 #   PyAudioWPatch>=0.2.12

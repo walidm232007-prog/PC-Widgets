@@ -82,19 +82,25 @@ permit redistributing the files, so Inter replaced it. `.gitignore` still keeps
 any stray copy out of the repository, and `tools/prepublish.py` refuses to
 publish one.
 
-## Audio capture — PyAudioWPatch (optional)
+## Audio capture — PyAudioWPatch  *(redistributed, see `vendor/`)*
 
 The media widget's visualiser reads the sound leaving the machine so the bars
 show the real spectrum. That needs WASAPI loopback, which plain PortAudio (and
 therefore `sounddevice`) does not expose on Windows.
 
-`pip install PyAudioWPatch` — **MIT**, a fork of PyAudio (also MIT) bundling a
-PortAudio build with loopback support. Installed from PyPI, not redistributed
-here.
+PyAudioWPatch 0.2.12.8 <https://github.com/s0d3s/PyAudioWPatch> — Copyright ©
+2022 S0D3S, **Apache License 2.0**, a fork of PyAudio bundling a PortAudio build
+with loopback support. PortAudio — Copyright © 1999-2011 Ross Bencina and Phil
+Burk, **MIT**. The 64-bit CPython 3.13 build ships unmodified in `vendor/`, with
+both licence texts in `vendor/pyaudiowpatch-0.2.12.8.dist-info/licenses/`.
+Installed in the user's site-packages it was invisible to the board on the
+machine this was built for, so the visualiser silently ran on the fallback
+below; see `vendor/README.txt`.
 
-**Entirely optional.** Without it the widget falls back to Windows' Core Audio
+**Still optional.** Delete it and the widget falls back to Windows' Core Audio
 peak meter through `ctypes` — no dependency at all, real output level but no
-frequency information — and failing that, to an animation.
+frequency information, so the bars move together — and failing that, to an
+animation.
 
 Nothing is recorded. Blocks of samples are analysed and discarded about forty
 times a second; nothing is written to disk and nothing leaves the process. It

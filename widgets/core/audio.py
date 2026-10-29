@@ -65,24 +65,43 @@ DEVICE_CHECK = 2.0        # seconds between "is the default output still this?"
 RETRY_MIN = 0.5           # first pause after a source fails to open
 RETRY_MAX = 8.0           # and the ceiling it doubles up to
 
-# Turning band loudness into bar heights (Shaper). Each band is measured against
-# its own recent range, not one gain shared by all five: a hi-hat carries a
-# fraction of a kick's energy, so on a shared scale the treble bar barely moves
-# and the bass bar sits pinned. And it is the *change* that reads as music -
-# five bars that track loudness faithfully hover, because most music is about
-# equally loud from one moment to the next. So a band that jumps is shown as a
-# hit, at full height, whatever its level.
+# Turning band loudness into bar heights (Shaper). All five bars are measured
+# against one reference - the loudest band, tilted - not each against its own
+# range. Scaling each band to its own range was tried and is wrong: a band with
+# almost nothing in it gets stretched to full height too, so a bass note's
+# harmonics and the click of its attack lit every bar, and five bars that all
+# move alike look like one. The tilt evens out music's natural slope - a hi-hat
+# carries a fraction of a kick's energy - so the treble bar still reaches the
+# top on its own hits. And it is the *change* that reads as music: a band that
+# jumps is a hit and goes to full height, if it lands near the top.
 SILENT_DB = -78.0         # band power under this is silence, not quiet music
-FLOOR_FALL = 0.30         # a band's floor drops straight to a quiet moment...
-FLOOR_RISE = 0.015        # ...and climbs back in about a second, so a held note
-                          # sinks and leaves the bar to the beats
-PEAK_FALL = 0.012         # its peak jumps to a new high and sinks over ~2 s
-MIN_SPAN_DB = 10.0        # never stretch less than this over a bar's height
+# Set from real music played through this analyser, so a balanced track reads
+# as five comparable bars. Band power is summed over each band, and the wide
+# treble band collects nearly as much as the bass: a steep "music falls off
+# with frequency" tilt made the hi-hats the loudest band and flattened the
+# other four.
+TILT_DB = (0.0, 2.0, 6.0, 8.0, 2.0)     # added per band, bass to treble
+RANGE_DB = 26.0           # a bar's height spans this far below the reference
+REF_FALL = 0.02           # the reference jumps to a new high, sinks over ~1 s
+# Each band's held part is mostly taken away, so a bass line under the kick
+# doesn't keep the kick's bar hovering near the top and the kicks only adding
+# the last bit. A floor that drops straight to a band's quiet moments and
+# climbs back in about a third of a second; SUSTAIN of the way up to it is
+# subtracted. Still on the shared scale: nothing is stretched, so a quiet band
+# stays low.
+FLOOR_FALL = 0.30
+FLOOR_RISE = 0.06
+# Per band. The bass bars keep all of a held note: subtracting it the way the
+# upper bands do drained an 808 to nothing about a second into the note, while
+# it was still playing.
+SUSTAIN = (0.0, 0.0, 0.75, 0.75, 0.75)
 HIT_DB = 6.0              # a rise this much sharper than usual is a full hit...
-HIT_NEAR_DB = 24.0        # ...if it lands within this of the band's recent peak:
-                          # a click leaking into a quiet band is not a hit there
+HIT_NEAR_DB = 20.0        # ...if it lands within this of the reference: a click
+                          # in a band that is otherwise quiet is not a hit there
 FLUX_AVG = 0.06           # how fast "usual" adapts, so busy music isn't all hits
-CURVE = 1.6               # pushes middling levels down, so the hits stand out
+# Per band: pushes middling levels down, so the hits stand out. Gentler on the
+# bass bars, which should sit up with the low end rather than wait for a hit.
+CURVE = (1.2, 1.2, 1.8, 1.8, 1.8)
 # Hits go straight up; the fall is quicker the higher the band, so the bass
 # thumps and the hats tick - and every bar is down again before the next beat.
 FALL = (0.24, 0.28, 0.32, 0.40, 0.48)
@@ -109,6 +128,25 @@ GAIN_FALL = 0.012
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return lo if v < lo else hi if v > hi else v
+
+
+def _use_vendored() -> None:
+    """Put ``vendor/`` - where PyAudioWPatch ships - ahead of everything else.
+
+    Installed into the user's roaming site-packages, it was invisible to the
+    board on the machine this was built for, so the visualiser quietly ran on
+    the peak meter: one level shared by all five bars, every bar jumping on
+    every bass note, and nothing in the spectrum code making any difference.
+    See vendor/README.txt.
+    """
+    import importlib
+    import os
+    import sys
+    vendor = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "vendor")
+    if os.path.isdir(vendor) and vendor not in sys.path:
+        sys.path.insert(0, vendor)
+        importlib.invalidate_caches()
 
 
 class Analyser:
@@ -151,11 +189,13 @@ class Analyser:
 class Shaper:
     """Band loudness in, bar heights (0..1) out.
 
-    Each band against its own recent range: a floor that drops straight to the
-    quiet moments and creeps back, and a peak that jumps to the loud ones and
-    sinks. On top, a band that has just risen sharply - a kick, a snare, a
-    hi-hat - is a hit and goes to full height, however loud it is. Then the bar
-    falls, quicker the higher the band. See the constants above.
+    Every band is read against one shared reference: the loudest band, tilted
+    by TILT_DB, which jumps to a new high and sinks over about a second. A bar
+    spans RANGE_DB below it, so a band well under the loudest stays low however
+    busy it is on its own. On top, a band that has just risen sharply - a kick,
+    a snare, a hi-hat - is a hit and goes to full height, if it lands within
+    HIT_NEAR_DB of the reference. Then the bar falls, quicker the higher the
+    band. See the constants above.
     """
 
     def __init__(self, bands: int = BANDS) -> None:
@@ -164,32 +204,39 @@ class Shaper:
 
     def reset(self) -> None:
         n = self.bands
+        self.ref: Optional[float] = None
         self.floor: List[Optional[float]] = [None] * n
-        self.peak: List[Optional[float]] = [None] * n
         self.prev: List[Optional[float]] = [None] * n
         self.flux = [0.0] * n
         self.out = [0.0] * n
 
     def feed(self, db: List[float]) -> List[float]:
-        for i, d in enumerate(db[:self.bands]):
-            if d < SILENT_DB:
-                target = 0.0
-                self.prev[i] = None          # coming back from silence is a hit
+        tilted = [d + TILT_DB[i] for i, d in enumerate(db[:self.bands])]
+        heard = [t for d, t in zip(db, tilted) if d >= SILENT_DB]
+        if heard:
+            top = max(heard)
+            if self.ref is None or top > self.ref:
+                self.ref = top
             else:
-                if self.floor[i] is None:
-                    self.floor[i], self.peak[i] = d - MIN_SPAN_DB, d
-                f = self.floor[i]
-                f += (d - f) * (FLOOR_FALL if d < f else FLOOR_RISE)
-                pk = self.peak[i]
-                pk = d if d > pk else pk + (d - pk) * PEAK_FALL
-                self.floor[i], self.peak[i] = f, pk
-                level = _clamp((d - f) / max(MIN_SPAN_DB, pk - f)) ** CURVE
-
-                prev, self.prev[i] = self.prev[i], d
-                rise = max(0.0, d - prev) if prev is not None else MIN_SPAN_DB
+                self.ref += (top - self.ref) * REF_FALL
+        for i, (d, t) in enumerate(zip(db, tilted)):
+            if d < SILENT_DB or self.ref is None:
+                target = 0.0
+                self.prev[i] = None
+            else:
+                bottom = self.ref - RANGE_DB
+                f = self.floor[i] if self.floor[i] is not None else t
+                f += (t - f) * (FLOOR_FALL if t < f else FLOOR_RISE)
+                self.floor[i] = f
+                held = bottom + SUSTAIN[i] * max(0.0, f - bottom)
+                level = _clamp((t - held) / RANGE_DB) ** CURVE[i]
+                # A rise counts from the bottom of the bar at the lowest, so a
+                # band coming up out of nothing is measured by where it lands.
+                prev, self.prev[i] = self.prev[i], t
+                rise = max(0.0, t - max(prev if prev is not None else bottom, bottom))
                 self.flux[i] += (rise - self.flux[i]) * FLUX_AVG
                 hit = _clamp((rise - self.flux[i]) / HIT_DB)
-                hit *= _clamp((d - (pk - HIT_NEAR_DB)) / (HIT_NEAR_DB / 2.0))
+                hit *= _clamp((t - (self.ref - HIT_NEAR_DB)) / (HIT_NEAR_DB / 2.0))
                 target = max(level, hit)
             o = self.out[i]
             self.out[i] = target if target > o else o + (target - o) * FALL[i]
@@ -386,6 +433,7 @@ class AudioTap:
     # -- source 1: real samples ----------------------------------------- #
     def _spectrum_loop(self) -> bool:
         """WASAPI loopback + FFT. Returns True if it ran and wants re-opening."""
+        _use_vendored()
         try:
             import numpy as np
             import pyaudiowpatch as pa

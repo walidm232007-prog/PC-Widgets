@@ -291,7 +291,33 @@ def _check_vendored_closure() -> None:
         "with the user site-packages disabled the media backend fell back to "
         f"{backend or '<nothing>'} - the vendored copy is incomplete.\n"
         f"stderr: {res.stderr.strip()[:400]}")
-    print("  vendored closure: media API imports with user site-packages off")
+
+    # The visualiser's audio capture, the same way. Installed only in the user
+    # site it was invisible to the board, which then ran the visualiser on the
+    # peak meter - every bar moving together - and no tuning of the spectrum
+    # made any difference. Loaded through the tap's own path, and opened far
+    # enough to find the speakers' loopback endpoint; nothing is recorded.
+    code = (
+        "import sys; sys.path.insert(0, r'%s')\n"
+        "from widgets.core import audio\n"
+        "audio._use_vendored()\n"
+        "import pyaudiowpatch as pa\n"
+        "print(pa.__file__)\n"
+        "p = pa.PyAudio()\n"
+        "try:\n"
+        "    print(sum(1 for _ in p.get_loopback_device_info_generator()))\n"
+        "finally:\n"
+        "    p.terminate()\n" % root
+    )
+    res = subprocess.run([sys.executable, "-s", "-c", code],
+                         capture_output=True, text=True, timeout=90)
+    got = (res.stdout or "").strip().splitlines()
+    assert len(got) == 2 and os.path.join(root, "vendor") in got[0], (
+        "with the user site-packages disabled the audio capture did not load "
+        f"from vendor/ - the visualiser would fall back to the peak meter.\n"
+        f"stdout: {got} stderr: {res.stderr.strip()[:400]}")
+    print(f"  vendored closure: media API and audio capture import with user "
+          f"site-packages off ({got[1]} loopback endpoint(s))")
 
 
 def _check_tls() -> None:
@@ -1344,12 +1370,15 @@ def _check_visualiser() -> None:
         got = max(range(audio.BANDS), key=lambda i: db[i])
         assert got == want, f"{name} lit bar {got + 1}, not bar {want + 1}"
 
-    # A loop: kicks every half second, 16th-note hats, a bass line under both.
+    # A loop: kicks every half second, 16th-note hats, a bass line under both -
+    # balanced the way real music measures through the analyser, hats a few
+    # dB under the kick band rather than thirty. A synthetic loop with a
+    # thumping kick and faint hats would test a mix nobody listens to.
     secs, beat = 4.0, 0.5
     total = int(secs * rate)
     mix = np.zeros(total, np.float32)
     t = np.arange(total) / rate
-    mix += 0.25 * np.sin(2 * np.pi * np.where((t // 1.0) % 2, 73.4, 55.0) * t).astype(np.float32)
+    mix += 0.06 * np.sin(2 * np.pi * np.where((t // 1.0) % 2, 73.4, 55.0) * t).astype(np.float32)
     kick_len, hat_len = int(0.4 * rate), int(0.12 * rate)
     tk = np.arange(kick_len) / rate
     kick = (np.sin(2 * np.pi * np.cumsum(45 + 65 * np.exp(-tk / 0.03)) / rate)
@@ -1359,10 +1388,10 @@ def _check_visualiser() -> None:
     kicks = np.arange(0.0, secs, beat)
     for at in kicks:
         i = int(at * rate)
-        mix[i:i + kick_len] += 0.9 * kick[:total - i]
+        mix[i:i + kick_len] += 0.2 * kick[:total - i]
     for at in np.arange(0.0, secs, beat / 4):
         i = int(at * rate)
-        mix[i:i + hat_len] += 0.18 * hat[:total - i]
+        mix[i:i + hat_len] += 0.8 * hat[:total - i]
     mix /= np.abs(mix).max() / 0.9
 
     an, sh = audio.Analyser(rate), audio.Shaper()
@@ -1375,8 +1404,10 @@ def _check_visualiser() -> None:
                        for d in np.arange(start, end, dt)})
         return float(levels[[r for r in rows if r < len(levels)], band].mean())
 
+    # The bass bars keep a held note, so the bass line under the kicks holds
+    # the kick bar up between them; a kick still has to stand clear of that.
     hit, between = mean_after(0, 0.0, 0.06), mean_after(0, 0.30, 0.45)
-    assert hit > 0.6 and hit - between > 0.3, (
+    assert hit > 0.7 and hit - between > 0.15, (
         f"the kick bar doesn't hit the kicks: {hit:.2f} on them, {between:.2f} between")
     settled = levels[int(1.0 / dt):]
     travel = np.abs(np.diff(settled, axis=0)).sum(axis=0) / (len(settled) * dt)
@@ -1385,9 +1416,30 @@ def _check_visualiser() -> None:
     for _ in range(60):
         out = sh.feed(an.feed(np.zeros(block, np.float32)))
     assert max(out) < 0.02, f"bars do not settle in silence: {out}"
+
+    # A bass line alone must not move the right-hand bars. Scaling each band to
+    # its own range did exactly that: a bass note's attack and harmonics, tens
+    # of dB down in the upper bands, were stretched to full height, so the whole
+    # visualiser jumped on every note.
+    notes = np.zeros(total, np.float32)
+    note_len = int(0.45 * rate)
+    tn = np.arange(note_len) / rate
+    env = np.minimum(1, tn / 0.005) * np.exp(-tn / 0.35)
+    for k, f0 in enumerate((55.0, 41.2, 49.0, 61.7, 55.0, 73.4, 46.2, 55.0)):
+        i = int(k * 0.5 * rate)
+        tone = sum(np.sin(2 * np.pi * f0 * h * tn) / h for h in range(1, 6))
+        notes[i:i + note_len] += (env * tone)[:total - i].astype(np.float32)
+    notes /= np.abs(notes).max() / 0.9
+    an, sh = audio.Analyser(rate), audio.Shaper()
+    bass_bars = np.array([sh.feed(an.feed(notes[s:s + block]))
+                          for s in range(0, total - block, block)])[int(1.0 / dt):]
+    leak = float(bass_bars[:, 3:].max())
+    assert bass_bars[:, :2].max() > 0.9 and leak < 0.25, (
+        f"bass notes alone moved the treble bars to {leak:.2f}")
     print(f"  visualiser: bass to hats left to right; the kick bar hits {hit:.2f} on "
           f"the kick and {between:.2f} between, the hat bar moves "
-          f"{travel[4]:.1f} heights a second; silence settles")
+          f"{travel[4]:.1f} heights a second; bass alone keeps the treble bars "
+          f"under {leak:.2f}; silence settles")
 
 
 def _check_session_pick() -> None:
