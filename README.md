@@ -512,6 +512,18 @@ and nothing needs an account.
   back through a Qt signal, because a blocked network call must never freeze the
   board and a repaint must never be triggered off the GUI thread.
 
+**Every fetch trusts Windows' root certificates and nothing else**
+(`widgets/core/net.py`). Python on Windows also trusts the intermediate
+certificate store, which collects intermediates over the years and keeps the
+expired ones, and OpenSSL prefers a copy it trusts to the chain a server sends -
+so a stale one there makes a valid chain fail with "certificate has expired",
+while every browser on the machine is fine, because browsers use Windows' own
+verifier. That took the weather card down whenever DNS handed out the one
+Open-Meteo server on Let's Encrypt's newer chain, which runs through an ISRG
+Root X2 cross-certificate that expired in September 2025. Leaving the
+intermediate store out costs nothing: a server sends its own intermediates, and
+Python on Linux and macOS never had that store to lean on.
+
 ## Notes on the build
 
 **It borrows your palette.** `widgets/core/palette.py` loads `tokens.py` out of
@@ -583,7 +595,9 @@ card ends up and what the saved layout says each one belongs to. The preset
 checks save, change, apply and undo a layout across both, apply one with a
 display missing, and fill the tray's Presets menu without a tray icon appearing.
 The glass check composites two made-up monitors with a solid picture each and
-reads back which colour landed where.
+reads back which colour landed where. The TLS check reads what the board's
+HTTPS trusts - Windows' roots only, and never the expired certificate that broke
+the weather card - without going near the network.
 
 The checks that save a layout redirect *both* copies of it — `%APPDATA%` and the
 mirror in `.boardstate/` — to a scratch folder. They used to redirect only

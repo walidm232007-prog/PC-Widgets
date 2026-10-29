@@ -142,6 +142,7 @@ def selftest() -> int:
     _check_session_pick()
     _check_audio_gate(pal_mod.build("dark", "blue"))
     _check_backend_recovery()
+    _check_tls()
     _check_vendored_closure()
     _check_agent_bus()
     _check_appearance()
@@ -290,6 +291,40 @@ def _check_vendored_closure() -> None:
         f"{backend or '<nothing>'} - the vendored copy is incomplete.\n"
         f"stderr: {res.stderr.strip()[:400]}")
     print("  vendored closure: media API imports with user site-packages off")
+
+
+def _check_tls() -> None:
+    """The board's HTTPS must trust Windows' root certificates and nothing else.
+
+    Python's default context on Windows also trusts the intermediate store,
+    and this machine's still holds an ISRG Root X2 cross-certificate that
+    expired in September 2025. Trusted, it made one of Open-Meteo's two servers
+    fail with "certificate has expired" while every browser was fine, and the
+    weather card said "URLError". Checked without the network: what the
+    context trusts, not a handshake.
+    """
+    import hashlib
+    import ssl
+
+    from widgets.core import net
+
+    def prints(certs):
+        return {hashlib.sha1(c).hexdigest() for c in certs}
+
+    ctx = net.tls_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname, (
+        "the board's HTTPS stopped checking certificates")
+    ours = prints(ctx.get_ca_certs(binary_form=True))
+    roots = prints(c for c, enc, _trust in ssl.enum_certificates("ROOT")
+                   if enc == "x509_asn")
+    assert ours and ours <= roots, (
+        f"{len(ours - roots)} certificate(s) trusted from outside the root store")
+    stale = "151682f5218c0a511c28f4060a73b9ca78ce9a53"     # the one that broke weather
+    default = prints(ssl.create_default_context().get_ca_certs(binary_form=True))
+    assert stale not in ours, "the expired ISRG Root X2 cross-certificate is trusted"
+    note = ("the expired X2 cross-certificate Python's default trusts here is left out"
+            if stale in default else "nothing from the intermediate store")
+    print(f"  tls: {len(ours)} Windows root certificates trusted; {note}")
 
 
 def _check_backend_recovery() -> None:

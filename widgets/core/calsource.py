@@ -29,6 +29,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .net import tls_context
+
 MAX_HORIZON_DAYS = 21
 FETCH_TIMEOUT = 12
 
@@ -244,7 +246,8 @@ def parse_ics(text: str, horizon_days: int = MAX_HORIZON_DAYS) -> List[Event]:
 def from_ics(url: str) -> Agenda:
     import time
     req = urllib.request.Request(url, headers={"User-Agent": "pc-widgets/1.0"})
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
+    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT,
+                                context=tls_context()) as r:
         raw = r.read().decode("utf-8", "replace")
     if "BEGIN:VCALENDAR" not in raw:
         return Agenda(source="ics", error="that URL isn't an ICS calendar")

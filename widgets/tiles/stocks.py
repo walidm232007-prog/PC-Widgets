@@ -25,6 +25,7 @@ from PySide6.QtGui import QAction, QColor, QFont, QPainterPath, QPen
 from PySide6.QtWidgets import QInputDialog
 
 from ..core.card import WidgetCard
+from ..core.net import tls_context
 
 CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
 DEFAULT_SYMBOLS = ["AAPL", "MSFT", "^GSPC", "BTC-USD"]
@@ -64,7 +65,7 @@ def fetch_one(symbol: str) -> Quote:
     url = CHART.format(sym=urllib.parse.quote(symbol)) + "?range=1d&interval=5m"
     try:
         req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=tls_context()) as r:
             data = json.loads(r.read().decode("utf-8"))
         res = data["chart"]["result"][0]
         meta = res["meta"]

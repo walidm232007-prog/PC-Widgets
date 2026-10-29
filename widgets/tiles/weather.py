@@ -29,6 +29,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QInputDialog
 
 from ..core.card import RADIUS, WidgetCard, squircle
+from ..core.net import tls_context
 
 API = "https://api.open-meteo.com/v1/forecast"
 GEO = "https://geocoding-api.open-meteo.com/v1/search"
@@ -117,7 +118,7 @@ class Forecast:
 def _get(url: str, params: dict) -> dict:
     full = f"{url}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(full, headers={"User-Agent": "pc-widgets/1.0"})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=10, context=tls_context()) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
