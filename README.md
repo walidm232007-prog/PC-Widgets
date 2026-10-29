@@ -46,18 +46,23 @@ Right-click the tray icon for a quick menu with the common settings.
 
 ## The app window
 
-Three pages, down the side:
+Four pages, down the side:
 
 - **Gallery** — every widget, previewed live and at actual size. Pick a
-  size and press **Add**: the widget lands in the first clear spot on the main
-  screen and is lifted above your windows for a moment, ringed in the accent
-  colour, so you can see where it went. A badge shows which ones you already
-  have.
-- **On your desktop** — the widgets you have. Select one to change its size,
-  frosted or solid background, background and text colours, and background
-  photo. **Show on desktop** points it out; **More settings…** opens the same
-  menu as right-clicking it (location, watchlist, time style and so on);
-  **Remove widget** takes it off, with an Undo.
+  size and press **Add**: the widget lands in the first clear spot on your
+  display and is lifted above your windows for a moment, ringed in the accent
+  colour, so you can see where it went. With more than one display, **Add to**
+  picks which - it starts on the one the window is on. A badge shows which ones
+  you already have.
+- **On your desktop** — the widgets you have, under a heading per display.
+  Select one to change its size, the display it's on, frosted or solid
+  background, background and text colours, and background photo. **Show on
+  desktop** points it out; **More settings…** opens the same menu as
+  right-clicking it (location, watchlist, time style and so on); **Remove
+  widget** takes it off, with an Undo.
+- **Presets** — your displays as they're arranged, drawn to scale with every
+  widget where it sits, and your saved layouts: **Save this layout**, then
+  **Apply** one to switch to it (see [Presets](#presets)).
 - **Settings** — theme, accent, frosted glass and its strength, opacity, where
   widgets sit (on the desktop, floating, always on top), snap and lock, start
   with Windows, and Quit.
@@ -273,16 +278,93 @@ default — it fights you the moment you try to line something up against a
 wallpaper feature or a window edge. Turn it on with **Snap to grid** in the tray
 if you'd rather have it, and **Lock positions** to stop accidental drags.
 
-The only thing always enforced is that a card stays reachable on a monitor. That
-clamp also runs on load, because a saved position can stop being valid — a
-monitor gets unplugged, the resolution changes, or the card geometry changes
-between versions — and a widget that restores off-screen can't be dragged back.
+The only thing always enforced is that a card stays reachable on the monitor it
+was let go on. That clamp also runs on load, because a saved position can stop
+being valid — the card geometry changes between versions, say — and a widget
+that restores off-screen can't be dragged back. Monitors coming, going and
+changing are dealt with before it gets that far (see below).
 
 `WidgetCard.start()` also re-asserts the position immediately after `show()`.
 Windows can place a window itself the first time it appears, overriding the
 `move()` that ran before — and since the layout is persisted at startup, the OS's
 choice then gets saved and faithfully restored on every later launch. That is how
 a board once cascaded into the top-left corner and stayed there.
+
+## Multiple displays
+
+**A widget belongs to a monitor, not to a spot.** Windows measures every display
+in one shared space whose origin is the top-left of the *main* one, so plugging a
+monitor in on the left, making another one main, or dragging the arrangement
+about in Display settings changes the coordinates of everything on every screen
+without anything on them moving. A layout saved as positions comes apart the
+first time that happens.
+
+So each widget is anchored (`widgets/core/displays.py`): to its monitor, by the
+monitor's device path — which names the panel's model and the port it's on — and
+to a spot on that monitor's work area. Wherever the monitor sits in the
+arrangement today, the widget is on it.
+
+- **Rearranged**: the widgets on a moved monitor move with it, and nothing else
+  does.
+- **Unplugged** — or a DisplayPort monitor asleep long enough for Windows to drop
+  it: its widgets wait on the main display, clear of the ones already there, and
+  the saved layout still says where they belong. When the monitor comes back,
+  they go home. Windows moves windows off a vanished monitor itself, sometimes
+  before the board has heard about it, so every save first checks the monitors
+  are still the ones the cards were placed on; otherwise one autosave in that
+  gap would record the waiting widgets as belonging wherever Windows had put
+  them.
+- **On another port**, or under a new device path after a driver update: still
+  the same monitor, recognised by its model. Of two identical monitors, the one
+  still connected is never mistaken for the one that isn't, and a new monitor in
+  exactly the old one's place is taken as its replacement.
+- **At a new resolution**: each widget keeps its distance from the nearer edge,
+  on each axis. A column 24 px in from the right edge stays 24 px in, where
+  spreading positions out in proportion would nudge every card by a different
+  amount and the layout would come apart.
+- **Dropped on another monitor**, a widget belongs there — a waiting one
+  included. **Display** in the app's Layout section sends one across without a
+  drag, keeping as near its spot as the other screen's shape allows.
+
+Displays are named by where they sit — **Main**, **Left**, **Right**, **Above**,
+**Below** — rather than by number. Windows' numbers are per session and often
+differ from the ones Display settings shows, and nobody remembers which monitor
+is 2, but everyone knows which one is on their left. Beside that is the
+monitor's own name, from `QueryDisplayConfig`: the older APIs call nearly every
+monitor "Generic PnP Monitor".
+
+The frosted glass is per monitor too (see [Frosted glass](#frosted-glass)), and
+so is going quiet behind a game: a fullscreen game on one monitor stops the
+widgets under it repainting, while the ones on another screen — often the whole
+reason for putting them there — carry on.
+
+## Presets
+
+**A preset is the whole arrangement, saved by name**: every widget on every
+display, with its size, its look, its photo and crop, its settings, and the
+displays themselves. Save one with **Save this layout** on the Presets page —
+it arrives named "Preset 1", ready to type over — or from the tray's
+**Presets** menu, and **Apply** one to switch to it. Each is drawn as a small map
+of the desk it was saved on. The one your desktop matches exactly says
+**In use**, and the tray ticks it.
+
+Applying moves the widgets that are already there — the same widget, with the
+same look and settings — rather than rebuilding them, and only adds and removes
+the difference. A rebuilt card starts from nothing (weather and stocks fetch
+again, a photo is decoded again), and a preset that only rearranges things
+should look like things moving. **Undo** puts back what it replaced.
+
+A preset saved with a display that isn't connected now still applies: those
+widgets wait on the main display, belonging to theirs, exactly as if it had just
+been unplugged. The other way round works the same: a widget that is waiting
+when you save is saved as belonging to its own display, so a preset saved while
+a monitor sleeps still puts its widgets back on it. To keep one where it's
+waiting instead, drop it there or pick its display first. The `⋯` menu updates a preset to the current layout, renames it
+or deletes it, each with an Undo. Names are unique, ignoring case, so saving
+under a name that's taken replaces that preset.
+
+Presets are kept in `board.json` with the layout, so they get its mirror and its
+backup too.
 
 ## Typography
 
@@ -355,8 +437,18 @@ at its own ~8px radius, nowhere near the 26px the cards use.
 So `glass.py` does the blur instead, which is possible because of *where* these
 widgets live: parked on the desktop layer, the thing behind them is the
 wallpaper. It composites the wallpaper across the virtual screen exactly as the
-shell does (scale-to-fill per monitor), blurs it once, and each card paints the
-slice sitting behind it — at any radius, perfectly antialiased.
+shell does, blurs it once, and each card paints the slice sitting behind it — at
+any radius, perfectly antialiased.
+
+"Exactly as the shell does" means monitor by monitor: each one's own picture,
+fitted the way Personalisation says (fill, fit, stretch, centre, tile, or one
+picture spanned across them all). The wallpaper path Windows reports for the
+desktop, `SPI_GETDESKWALLPAPER`, is one path — with a different picture on each
+monitor it names only one of them, or the shell's transcoded copy, and that put
+one monitor's picture, blurred, behind every card on the others.
+`IDesktopWallpaper` answers per monitor. A picture that has since been moved or
+deleted (the shell keeps showing its own copy) falls back to the desktop-wide
+one.
 
 The blur is a heavy downscale, a few box passes at that small size, and a smooth
 upscale. At 1/14 scale a 3000×1920 desktop is a ~214×137 image, so it costs
@@ -433,8 +525,12 @@ upgrade for builds where it still works.
 
 ## The layout file
 
-`%APPDATA%\PCWidgetsoard.json` holds the board, with `board.json.bak` one step
-behind it.
+`%APPDATA%\PCWidgets\board.json` holds the board, with `board.json.bak` one step
+behind it: every widget with the display it belongs to and its spot there, the
+displays themselves (so one that's unplugged can still be named, and told from a
+new monitor), the preferences, and the presets. A layout saved before displays
+were tracked has positions only; each widget is given the display it's on the
+first time the board loads it.
 
 `save()` **refuses to write an empty layout over a real one**, because the board
 persists on startup: a single run that came up with no cards used to overwrite
@@ -456,7 +552,7 @@ Renders every widget at every size it supports, in both themes, to
 and iterated on without launching anything. The weather and stocks tiles are
 given fixed sample data (`widgets/core/samples.py`, which the gallery uses too)
 so a render never depends on the network or on the market being open. The app
-window's three pages are rendered as well, as `_selftest/_app_*.png`.
+window's four pages are rendered as well, as `_selftest/_app_*.png`.
 
 It also asserts that a free drop leaves a card exactly where it was released, and
 that snap mode still snaps — the regression that matters most here — plus that a
@@ -465,6 +561,15 @@ crop editor keeps on Done and restores on Cancel, that the gallery's Add,
 Remove and Undo really change the board, and that the app window is cut to the
 widgets' shape - solid inside, see-through past the corner's curve - with a
 shadow margin that resizes the window and goes when it is maximised.
+
+The display checks put a board on a made-up desk shaped like this machine's (a
+main landscape monitor, a portrait one on its left), then rearrange, unplug and
+replug it — on another port — and change its resolution, asserting where every
+card ends up and what the saved layout says each one belongs to. The preset
+checks save, change, apply and undo a layout across both, apply one with a
+display missing, and fill the tray's Presets menu without a tray icon appearing.
+The glass check composites two made-up monitors with a solid picture each and
+reads back which colour landed where.
 
 The checks that save a layout redirect *both* copies of it — `%APPDATA%` and the
 mirror in `.boardstate/` — to a scratch folder. They used to redirect only

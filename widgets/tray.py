@@ -2,19 +2,20 @@
 tray.py
 =======
 The tray icon: click it for the app window, right-click for the quick menu -
-add widgets, switch theme, change layer, quit. Also hosts the global hotkey,
-because ``RegisterHotKey`` needs a window handle to deliver ``WM_HOTKEY`` to and
-the tray owns a hidden one for exactly this purpose. The same hidden window is
+add widgets, switch presets, switch theme, change layer, quit. Also hosts the
+global hotkey, because ``RegisterHotKey`` needs a window handle to deliver
+``WM_HOTKEY`` to and the tray owns a hidden one for exactly this purpose. The
+same hidden window is
 how a second launch of the app reaches this one (see :mod:`main`).
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, Qt
-from PySide6.QtGui import QAction, QActionGroup, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
-from .core import mark, startup, winapi
+from .core import displays, mark, startup, winapi
 from .core.board import Board, available
 from .core.palette import ACCENTS
 
@@ -74,6 +75,7 @@ class WidgetTray(QSystemTrayIcon):
         self.activated.connect(self._activated)
         # Settings can change from the app window too; keep the ticks honest.
         board.prefs_changed.connect(self.rebuild_menu)
+        board.presets_changed.connect(self.rebuild_menu)
         self.rebuild_menu()
         self.show()
 
@@ -113,6 +115,12 @@ class WidgetTray(QSystemTrayIcon):
                 a.triggered.connect(
                     lambda _c, k=cls.kind, s=size: self._add(k, s))
                 sub.addAction(a)
+
+        # Filled as it opens: whether a preset is the one in use depends on
+        # where every card is, and that changes without the menu hearing of it.
+        presets = m.addMenu("Presets")
+        presets.aboutToShow.connect(lambda menu=presets: self._fill_presets(menu))
+        self._fill_presets(presets)
 
         m.addSeparator()
 
@@ -210,11 +218,53 @@ class WidgetTray(QSystemTrayIcon):
         if old is not None:
             old.deleteLater()
 
+    def _fill_presets(self, menu: QMenu) -> None:
+        menu.clear()
+        board = self.board
+        for preset in board.state.presets:
+            a = QAction(preset.name, menu, checkable=True)
+            a.setChecked(board.preset_in_use(preset))
+            a.triggered.connect(lambda _c, p=preset: self._apply_preset(p))
+            menu.addAction(a)
+        if not board.state.presets:
+            menu.addAction("No presets yet").setEnabled(False)
+        menu.addSeparator()
+        save = QAction("Save layout as a preset", menu)
+        save.setEnabled(bool(board.cards))
+        save.triggered.connect(self._save_preset)
+        menu.addAction(save)
+        manage = QAction("Manage presets…", menu)
+        manage.triggered.connect(lambda: self.show_window("presets"))
+        menu.addAction(manage)
+
     # ------------------------------------------------------------------ #
     def _add(self, kind: str, size: str) -> None:
-        card = self.board.add(kind, size)
+        # On the display the pointer is on: that is where the person picking
+        # from the menu is looking.
+        at = QCursor.pos()
+        here = displays.at(at.x(), at.y(), self.board.screens)
+        card = self.board.add(kind, size, display=here.key)
         if card is not None:
             self.board.spotlight(card)
+
+    def _apply_preset(self, preset) -> None:
+        if self.board.apply_preset(preset) is None:
+            return
+        n = len(self.board.cards)
+        self.showMessage("PC Widgets",
+                         f"“{preset.name}” is on your desktop — "
+                         f"{n} widget{'s' if n != 1 else ''}.", self.icon(), 3000)
+
+    def _save_preset(self) -> None:
+        from .ui.app import waiting_note
+        preset = self.board.save_preset()
+        if preset is None:
+            return
+        note = waiting_note(self.board)
+        self.showMessage("PC Widgets",
+                         f"Saved as “{preset.name}”. Rename it in the app, "
+                         "under Presets." + (f" {note}" if note else ""),
+                         self.icon(), 4000)
 
     def _set_startup(self, on: bool) -> None:
         ok = startup.set_enabled(on)

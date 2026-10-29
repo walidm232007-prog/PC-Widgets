@@ -17,6 +17,11 @@ wallpaper. We composite the wallpaper across the virtual screen exactly as the
 shell does, blur it once, and each card then paints the slice sitting behind it
 - clipped to its own squircle, with any radius, perfectly antialiased.
 
+"Exactly as the shell does" means monitor by monitor. Each one can show its own
+picture, fitted its own way, and the single wallpaper path Windows reports for
+the whole desktop names only one of them - which put one monitor's picture,
+blurred, behind every card on the others.
+
 The blur is a heavy downscale, a couple of box passes at that small size, and a
 smooth upscale. At 1/14 scale a 3840x2160 desktop is a ~275x155 image, so the
 whole thing costs a few milliseconds and is done once per wallpaper change.
@@ -25,12 +30,12 @@ whole thing costs a few milliseconds and is done once per wallpaper change.
 from __future__ import annotations
 
 import os
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 
-from . import winapi
+from . import displays, winapi
 
 DOWNSCALE = 14           # bigger = blurrier and cheaper
 BOX_PASSES = 3
@@ -71,6 +76,38 @@ def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
     return res
 
 
+def _fit(p: QPainter, img: QImage, dest: QRect, mode: int) -> None:
+    """Draw a wallpaper into one monitor's rect the way the shell would."""
+    w, h = dest.width(), dest.height()
+    if w <= 0 or h <= 0:
+        return
+    if mode == winapi.WALL_STRETCH:
+        p.drawImage(dest, img)
+    elif mode == winapi.WALL_FIT:
+        scaled = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p.drawImage(dest.left() + (w - scaled.width()) // 2,
+                    dest.top() + (h - scaled.height()) // 2, scaled)
+    elif mode == winapi.WALL_CENTER:
+        p.save()
+        p.setClipRect(dest)
+        p.drawImage(dest.left() + (w - img.width()) // 2,
+                    dest.top() + (h - img.height()) // 2, img)
+        p.restore()
+    elif mode == winapi.WALL_TILE:
+        p.save()
+        p.setClipRect(dest)
+        for y in range(dest.top(), dest.bottom() + 1, max(1, img.height())):
+            for x in range(dest.left(), dest.right() + 1, max(1, img.width())):
+                p.drawImage(x, y, img)
+        p.restore()
+    else:
+        # Fill: scaled to cover, the overflow cut off evenly on both sides.
+        scaled = img.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        sx = max(0, (scaled.width() - w) // 2)
+        sy = max(0, (scaled.height() - h) // 2)
+        p.drawImage(dest, scaled, QRect(sx, sy, w, h))
+
+
 class GlassBackdrop:
     """The blurred desktop, in virtual-screen coordinates."""
 
@@ -81,54 +118,96 @@ class GlassBackdrop:
         self._signature: Optional[Tuple] = None
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def pictures(screens: Sequence[displays.Display]
+                 ) -> Tuple[int, List[Tuple[displays.Display, Optional[str]]]]:
+        """How the shell fits wallpaper, and the picture on each display.
+
+        Matched by device path, then by bounds. A monitor's own picture can be a
+        file that has since been moved or deleted - the shell keeps showing its
+        transcoded copy - and then the desktop-wide path is the best there is.
+        """
+        fallback = winapi.wallpaper_path()
+        mode, walls = winapi.wallpapers()
+        by_key = {k.lower(): p for k, _r, p in walls}
+        by_rect = {r: p for _k, r, p in walls}
+        out = []
+        for d in screens:
+            path = by_key.get(d.key.lower()) or by_rect.get(d.rect)
+            out.append((d, path if path and os.path.isfile(path) else fallback))
+        return mode, out
+
+    def _read(self):
+        """(signature, mode, pictures) for the desktop as it is now."""
+        mode, pics = self.pictures(displays.current())
+        each = []
+        for d, path in pics:
+            try:
+                stamp = os.path.getmtime(path) if path else 0.0
+            except OSError:
+                stamp = 0.0
+            each.append((d.key, d.rect, path, stamp))
+        return (mode, tuple(each), winapi.virtual_screen()), mode, pics
+
     def _current_signature(self) -> Tuple:
-        path = winapi.wallpaper_path()
-        try:
-            stamp = os.path.getmtime(path) if path else 0.0
-        except OSError:
-            stamp = 0.0
-        return (path, stamp, winapi.virtual_screen(), tuple(winapi.monitors()))
+        return self._read()[0]
 
     def refresh(self, force: bool = False) -> bool:
-        """Rebuild if the wallpaper or the display layout changed."""
-        sig = self._current_signature()
+        """Rebuild if a wallpaper or the display layout changed."""
+        sig, mode, pics = self._read()
         if not force and sig == self._signature and self.image is not None:
             return False
         self._signature = sig
-
-        vl, vt, vr, vb = winapi.virtual_screen()
-        vw, vh = max(1, vr - vl), max(1, vb - vt)
-        self.origin = (vl, vt)
-
         r, g, b = winapi.desktop_colour()
         self.tint = QColor(r, g, b)
+        self.image, self.origin = self.compose(pics, mode, winapi.virtual_screen(),
+                                               QColor(r, g, b))
+        return True
 
+    @staticmethod
+    def compose(pictures: Sequence[Tuple[displays.Display, Optional[str]]], mode: int,
+                virtual: Tuple[int, int, int, int], colour: QColor
+                ) -> Tuple[QImage, Tuple[int, int]]:
+        """The blurred desktop: each display's picture fitted to it the way the
+        shell fits it, then blurred as one image. Returns (image, origin)."""
+        vl, vt, vr, vb = virtual
+        vw, vh = max(1, vr - vl), max(1, vb - vt)
         canvas = QImage(vw, vh, QImage.Format_RGBA8888)
-        canvas.fill(QColor(r, g, b))
+        canvas.fill(colour)
 
-        path = winapi.wallpaper_path()
-        source = QImage(path) if path else QImage()
-        if not source.isNull():
-            p = QPainter(canvas)
-            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            # Scale-to-fill per monitor, the way the shell's "Fill" mode does,
-            # so the blur lines up with what is actually on screen.
-            for ml, mt, mr, mb in winapi.monitors():
-                mw, mh = mr - ml, mb - mt
-                scaled = source.scaled(mw, mh, Qt.KeepAspectRatioByExpanding,
-                                       Qt.SmoothTransformation)
-                sx = max(0, (scaled.width() - mw) // 2)
-                sy = max(0, (scaled.height() - mh) // 2)
-                p.drawImage(QRect(ml - vl, mt - vt, mw, mh), scaled,
-                            QRect(sx, sy, mw, mh))
-            p.end()
+        loaded: Dict[str, QImage] = {}
+
+        def picture(path: Optional[str]) -> QImage:
+            if not path:
+                return QImage()
+            if path not in loaded:
+                loaded[path] = QImage(path)
+            return loaded[path]
+
+        p = QPainter(canvas)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        if mode == winapi.WALL_SPAN and pictures:
+            # One picture across every monitor, as if they were one screen.
+            img = picture(next((path for _d, path in pictures if path), None))
+            l = min(d.rect[0] for d, _ in pictures)
+            t = min(d.rect[1] for d, _ in pictures)
+            r = max(d.rect[2] for d, _ in pictures)
+            b = max(d.rect[3] for d, _ in pictures)
+            if not img.isNull():
+                _fit(p, img, QRect(l - vl, t - vt, r - l, b - t), winapi.WALL_FILL)
+        else:
+            for d, path in pictures:
+                img = picture(path)
+                if not img.isNull():
+                    ml, mt, mr, mb = d.rect
+                    _fit(p, img, QRect(ml - vl, mt - vt, mr - ml, mb - mt), mode)
+        p.end()
 
         small = canvas.scaled(max(1, vw // DOWNSCALE), max(1, vh // DOWNSCALE),
                               Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         small = _box_blur(small, BOX_RADIUS, BOX_PASSES)
-        self.image = small.scaled(vw, vh, Qt.IgnoreAspectRatio,
-                                  Qt.SmoothTransformation)
-        return True
+        return (small.scaled(vw, vh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation),
+                (vl, vt))
 
     # ------------------------------------------------------------------ #
     def paint_into(self, p: QPainter, dest, screen_x: int, screen_y: int) -> bool:

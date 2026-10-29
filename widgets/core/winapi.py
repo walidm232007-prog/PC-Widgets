@@ -152,6 +152,99 @@ def desktop_colour() -> Tuple[int, int, int]:
         return (32, 36, 44)
 
 
+# How the shell fits a picture to a monitor (DESKTOP_WALLPAPER_POSITION).
+WALL_CENTER, WALL_TILE, WALL_STRETCH, WALL_FIT, WALL_FILL, WALL_SPAN = range(6)
+
+_CLSID_DESKTOP_WALLPAPER = "{C2CF3110-460E-4FC1-B9D0-8A1C0C9CC4BD}"
+_IID_IDESKTOP_WALLPAPER = "{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}"
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("a", wt.DWORD), ("b", wt.WORD), ("c", wt.WORD),
+                ("d", ctypes.c_ubyte * 8)]
+
+    @classmethod
+    def of(cls, text: str) -> "_GUID":
+        import uuid
+        u = uuid.UUID(text)
+        return cls(u.time_low, u.time_mid, u.time_hi_version,
+                   (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+
+
+def wallpapers() -> Tuple[int, List[Tuple[str, Rect, str]]]:
+    """The picture on each monitor, and how the shell fits it.
+
+    ``SPI_GETDESKWALLPAPER`` is one path for the whole desktop. With a different
+    picture on each monitor it names one of them, or the shell's transcoded
+    copy, so the frosted glass on the other monitors would blur the wrong image.
+    ``IDesktopWallpaper`` answers per monitor.
+
+    Returns ``(position, [(monitor device path, bounds, picture path)])``, with
+    position one of the WALL_* values - the same for every monitor, as the
+    shell has it. ``(WALL_FILL, [])`` wherever the question can't be asked.
+    """
+    position, out = WALL_FILL, []
+    try:
+        ole32 = ctypes.WinDLL("ole32")
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        ole32.CoCreateInstance.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        # COINIT_APARTMENTTHREADED, which the GUI thread already is: this only
+        # adds a reference, and the matching CoUninitialize takes it away.
+        inited = ole32.CoInitializeEx(None, 0x2)
+        try:
+            obj = ctypes.c_void_p()
+            if ole32.CoCreateInstance(
+                    ctypes.byref(_GUID.of(_CLSID_DESKTOP_WALLPAPER)), None, 0x1 | 0x4,
+                    ctypes.byref(_GUID.of(_IID_IDESKTOP_WALLPAPER)),
+                    ctypes.byref(obj)) < 0 or not obj.value:
+                return position, out
+            table = ctypes.cast(ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0],
+                                ctypes.POINTER(ctypes.c_void_p))
+
+            def method(index, *args):
+                return ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *args)(
+                    table[index])
+
+            def text(ptr) -> str:
+                try:
+                    return ctypes.wstring_at(ptr.value) if ptr.value else ""
+                finally:
+                    if ptr.value:
+                        ole32.CoTaskMemFree(ptr)
+
+            try:
+                pos = ctypes.c_int()
+                if method(11, ctypes.POINTER(ctypes.c_int))(obj, ctypes.byref(pos)) >= 0:
+                    position = pos.value
+                count = wt.UINT()
+                method(6, ctypes.POINTER(wt.UINT))(obj, ctypes.byref(count))
+                path_at = method(5, wt.UINT, ctypes.POINTER(ctypes.c_void_p))
+                rect_of = method(7, wt.LPCWSTR, ctypes.POINTER(wt.RECT))
+                picture = method(4, wt.LPCWSTR, ctypes.POINTER(ctypes.c_void_p))
+                for i in range(count.value):
+                    ptr = ctypes.c_void_p()
+                    if path_at(obj, i, ctypes.byref(ptr)) < 0:
+                        continue
+                    monitor = text(ptr)
+                    r = wt.RECT()
+                    # The list includes monitors that aren't attached; they
+                    # have no bounds.
+                    if not monitor or rect_of(obj, monitor, ctypes.byref(r)) != 0:
+                        continue
+                    ptr = ctypes.c_void_p()
+                    path = text(ptr) if picture(obj, monitor, ctypes.byref(ptr)) >= 0 else ""
+                    out.append((monitor, (r.left, r.top, r.right, r.bottom), path))
+            finally:
+                method(2)(obj)                          # Release
+        finally:
+            if inited in (0, 1):
+                ole32.CoUninitialize()
+    except Exception:
+        pass
+    return position, out
+
+
 def monitors() -> List[Rect]:
     """Every monitor's full bounds, for compositing the wallpaper."""
     out: List[Rect] = []
@@ -176,12 +269,18 @@ class MONITORINFO(ctypes.Structure):
 
 
 def foreground_is_fullscreen() -> bool:
-    """Is the focused window covering a whole monitor?
+    """Is the focused window covering a whole monitor? See fullscreen_monitor."""
+    return fullscreen_monitor() is not None
+
+
+def fullscreen_monitor() -> Optional[Rect]:
+    """The bounds of the monitor the focused window covers entirely, or None.
 
     Used to stop the board painting behind a game. These cards are layered
     translucent windows, so every repaint makes DWM composite them again even
     when they are completely hidden - the cost does not go away just because
-    nobody can see them.
+    nobody can see them. Which monitor matters as much as whether: a game on
+    one screen hides nothing on another, so only the cards under it go quiet.
 
     The shell's own windows cover the screen by definition and must not count,
     or the board would fall silent whenever the desktop had focus.
@@ -201,35 +300,37 @@ def foreground_is_fullscreen() -> bool:
     try:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
-            return False
+            return None
 
         name = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, name, 64)
         if name.value in ("Progman", "WorkerW", "Shell_TrayWnd",
                           "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow"):
-            return False
+            return None
 
         if user32.IsZoomed(hwnd):
-            return False                    # maximised, not fullscreen
+            return None                     # maximised, not fullscreen
 
         if _get_style(wt.HWND(hwnd), GWL_STYLE) & WS_CAPTION == WS_CAPTION:
-            return False                    # it still has a title bar
+            return None                     # it still has a title bar
 
         r = wt.RECT()
         if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
-            return False
+            return None
 
         info = MONITORINFO()
         info.cbSize = ctypes.sizeof(MONITORINFO)
         hmon = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
         if not hmon or not user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
-            return False
+            return None
 
         m = info.rcMonitor
-        return (r.left <= m.left and r.top <= m.top
-                and r.right >= m.right and r.bottom >= m.bottom)
+        if (r.left <= m.left and r.top <= m.top
+                and r.right >= m.right and r.bottom >= m.bottom):
+            return (m.left, m.top, m.right, m.bottom)
+        return None
     except Exception:
-        return False
+        return None
 
 
 def virtual_screen() -> Rect:

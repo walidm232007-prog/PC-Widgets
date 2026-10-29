@@ -28,7 +28,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QMenu, QWidget
 
-from . import imagefit, typography, winapi
+from . import displays, imagefit, typography, winapi
 from .palette import Palette
 
 # --------------------------------------------------------------------------- #
@@ -63,13 +63,14 @@ SHADOW_ALPHA = 34
 # --------------------------------------------------------------------------- #
 #  Quiet mode
 # --------------------------------------------------------------------------- #
-# Set by the board when a fullscreen app takes the foreground. Painting stops;
-# ticking does not, so data stays current and the board is up to date the moment
-# the game is minimised.
+# Set when a fullscreen app takes the foreground. Painting stops; ticking does
+# not, so data stays current and the board is up to date the moment the game is
+# minimised.
 #
-# It lives here, as one flag on the module, because the check is about the
-# machine rather than about any one card - polling the foreground window once per
-# widget would be nine times the work for one answer.
+# The board asks about the foreground window once for every card - polling it
+# once per widget would be nine times the work for one answer - and then quiets
+# the cards on the game's own display (WidgetCard.quiet): a game on one monitor
+# hides nothing on another. This flag on the module quiets every card at once.
 _quiet = False
 
 
@@ -210,6 +211,13 @@ class WidgetCard(QWidget):
     customizable = False        # opt-in to per-card colour customization
     allow_image = False         # opt-in to a picture background
 
+    # Set by the board. Where the card belongs (a displays.Anchor), whether its
+    # own display is missing so it is waiting on another, and whether a game
+    # covers the display it is on.
+    anchor = None
+    displaced = False
+    quiet = False
+
     moved = Signal()
     changed = Signal()          # size or config changed; board should persist
     removed = Signal(object)
@@ -284,7 +292,7 @@ class WidgetCard(QWidget):
         a fade stepping. One of those getting missed is how a "pauses while
         gaming" feature quietly does nothing.
         """
-        if _quiet:
+        if _quiet or self.quiet:
             return
         super().update(*args)
 
@@ -699,14 +707,15 @@ class WidgetCard(QWidget):
         window. Snapping is available, but opt-in via the tray menu.
 
         The only thing always enforced is that the card stays reachable on a
-        monitor. Bounds are the *card*, not the window, so its shadow gutter is
-        allowed to hang off the screen edge and the card can sit flush.
+        monitor - the one it was let go on. Bounds are the *card*, not the
+        window, so its shadow gutter is allowed to hang off the screen edge and
+        the card can sit flush.
         """
         m = int(MARGIN)
         cw = self.width() - m * 2
         ch = self.height() - m * 2 - int(self.extra_bottom)
         cx, cy = self.x() + m, self.y() + m
-        wl, wt, wr, wb = winapi.work_area_at(cx + cw // 2, cy + ch // 2)
+        wl, wt, wr, wb = displays.work_area_at(cx + cw // 2, cy + ch // 2)
 
         if self.snap_to_grid:
             cx = wl + round((cx - wl) / STEP) * STEP

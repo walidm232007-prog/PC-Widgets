@@ -1,8 +1,8 @@
 """
 store.py
 ========
-Board layout and preferences on disk. Forgiving by design: a corrupt or missing
-file means a default board, never a crash on startup.
+Board layout, presets and preferences on disk. Forgiving by design: a corrupt or
+missing file means a default board, never a crash on startup.
 """
 
 from __future__ import annotations
@@ -56,6 +56,25 @@ class Placement:
     x: int = 0
     y: int = 0
     config: Dict[str, Any] = field(default_factory=dict)
+    # The display the widget belongs to, and that display's work area when x, y
+    # were taken (see displays.py). For a widget waiting on another display
+    # because its own isn't connected, x and y are still where it belongs.
+    # Empty in a layout saved before displays were tracked, which places by
+    # x and y alone.
+    display: str = ""
+    area: List[int] = field(default_factory=list)
+
+
+@dataclass
+class Preset:
+    """A whole arrangement, saved by name: every widget on every display, with
+    its size, look and settings - and the displays as they were, so a preset
+    can be drawn as it was saved, and matched to a monitor on a new port."""
+
+    name: str
+    placements: List[Placement] = field(default_factory=list)
+    displays: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    saved: float = 0.0              # time.time() when it was saved
 
 
 @dataclass
@@ -75,6 +94,11 @@ class BoardState:
     glass_tint: int = 112           # alpha of the tint over the blur
     close_hint_shown: bool = False  # "closing the window keeps the widgets", said once
     placements: List[Placement] = field(default_factory=list)
+    # Every display a widget belongs to, connected or not: its name, bounds and
+    # work area, by device path - how one that is unplugged is still named, and
+    # told apart from a new monitor.
+    displays: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    presets: List[Preset] = field(default_factory=list)
 
 
 def default_board(work_area) -> BoardState:
@@ -116,16 +140,15 @@ def load(work_area=None) -> BoardState:
             with open(src, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
             # Filter to known fields so an older or newer file never blows up.
-            p_keys = {f.name for f in fields(Placement)}
-            b_keys = {f.name for f in fields(BoardState)} - {"placements"}
-            placements = [
-                Placement(**{k: v for k, v in p.items() if k in p_keys})
-                for p in raw.get("placements", [])
-            ]
+            b_keys = ({f.name for f in fields(BoardState)}
+                      - {"placements", "presets", "displays"})
+            placements = [_placement(p) for p in raw.get("placements", [])]
             known = {k: v for k, v in raw.items() if k in b_keys}
             if tried:
                 report(f"layout read from {src} after {tried[0]} failed")
-            return BoardState(placements=placements, **known)
+            return BoardState(placements=placements,
+                              displays=_table(raw.get("displays")),
+                              presets=_presets(raw.get("presets")), **known)
         except FileNotFoundError:
             tried.append(src)
         except Exception as exc:
@@ -134,6 +157,32 @@ def load(work_area=None) -> BoardState:
 
     report("no readable layout; starting from a default board")
     return default_board(work_area or (0, 0, 1920, 1080))
+
+
+def _placement(raw: Dict[str, Any]) -> Placement:
+    keys = {f.name for f in fields(Placement)}
+    return Placement(**{k: v for k, v in raw.items() if k in keys})
+
+
+def _table(raw) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _presets(raw) -> List[Preset]:
+    """The saved presets, skipping any that can't be read rather than losing
+    the layout over one of them."""
+    out: List[Preset] = []
+    for q in raw if isinstance(raw, list) else []:
+        try:
+            out.append(Preset(name=str(q.get("name") or "Preset"),
+                              placements=[_placement(p) for p in q.get("placements", [])],
+                              displays=_table(q.get("displays")),
+                              saved=float(q.get("saved") or 0.0)))
+        except Exception as exc:
+            report(f"skipped an unreadable preset: {exc!r}")
+    return out
 
 
 def _saved_placement_count() -> int:

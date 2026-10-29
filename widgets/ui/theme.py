@@ -757,6 +757,15 @@ def glyph(p: QPainter, kind: str, r: QRectF, colour, width: float = 1.6) -> None
         p.setBrush(c)
         p.drawRoundedRect(QRectF(screen.right() - w * 0.36, screen.top() + h * 0.12,
                                  w * 0.24, h * 0.22), 1.4, 1.4)
+    elif kind == "presets":
+        # A stack of boards: the front one whole, the edges of two behind it.
+        p.drawLine(P(0.30, 0.12), P(0.70, 0.12))
+        p.drawLine(P(0.18, 0.28), P(0.82, 0.28))
+        p.drawRoundedRect(QRectF(x + w * 0.06, y + h * 0.44, w * 0.88, h * 0.46), 2.6, 2.6)
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(x + w * 0.22, y + h * 0.58, w * 0.22, h * 0.18), 1.2, 1.2)
+        p.drawRoundedRect(QRectF(x + w * 0.52, y + h * 0.58, w * 0.26, h * 0.18), 1.2, 1.2)
     elif kind in ("settings", "sliders"):
         for i, at in enumerate((0.70, 0.30, 0.58)):
             yy = y + h * (0.20 + 0.30 * i)
@@ -1499,6 +1508,37 @@ class SearchField(QLineEdit):
         glyph(p, "search", QRectF(13, (self.height() - 14) / 2.0, 14, 14),
               current().text_dim, 1.6)
         p.end()
+
+
+class TextField(QLineEdit):
+    """A plain text box in the search field's style - for naming things."""
+
+    cancelled = Signal()
+
+    def __init__(self, placeholder: str = "", parent=None, height: int = 32) -> None:
+        super().__init__(parent)
+        self.setPlaceholderText(placeholder)
+        self.setFont(font(10.5, QFont.Medium))
+        self.setFixedHeight(height)
+        self.restyle()
+
+    def restyle(self) -> None:
+        ui = current()
+        r = self.height() // 2
+        self.setStyleSheet(
+            f"QLineEdit {{ background: {css(ui.control)}; color: {ui.text};"
+            f" border: 1px solid {ui.accent}; border-radius: {r}px;"
+            f" padding: 4px 12px; selection-background-color: {ui.accent};"
+            f" selection-color: #ffffff; }}")
+        pal = self.palette()
+        pal.setColor(QPalette.PlaceholderText, QColor(ui.text_faint))
+        self.setPalette(pal)
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() == Qt.Key_Escape:
+            self.cancelled.emit()
+            return
+        super().keyPressEvent(ev)
 
 
 class Group(Cached, QWidget):

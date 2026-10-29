@@ -3,12 +3,14 @@ app.py
 ======
 The PC Widgets window - everything the tray menu does, somewhere you can see it.
 
-Three pages:
+Four pages:
 
 - **Gallery**: every widget, previewed live and at actual size, one click to
-  put it on the desktop.
-- **On your desktop**: the widgets you have, each with its size, colours and
-  background photo, and a way to find or remove one.
+  put it on the desktop - on whichever display you pick.
+- **On your desktop**: the widgets you have, each with its size, colours,
+  background photo and display, and a way to find or remove one.
+- **Presets**: your displays as they are arranged, and whole layouts - every
+  widget on every display - saved by name, to switch between in a click.
 - **Settings**: theme, accent, glass, where widgets sit, start with Windows.
 
 The widgets are the point and this window is only how you arrange them, so
@@ -28,25 +30,27 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections import Counter
 from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetricsF, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QButtonGroup, QHBoxLayout, QLayout,
+    QAbstractButton, QApplication, QButtonGroup, QHBoxLayout, QLayout, QMenu,
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from ..core import appearance, mark, startup, winapi
-from ..core.board import REGISTRY, Board
+from ..core import appearance, displays, mark, startup, winapi
+from ..core.board import REGISTRY, Board, placement_size
+from ..core.card import MARGIN, RADIUS
 from ..core.palette import ACCENTS
 from . import cropper, previews, theme
 from .chrome import Chrome
 from .theme import (
     Button, Cached, Group, IconTile, SearchField, Segmented, Swatch, SwatchRow,
-    Switch, Text, ease_to, eased, glyph, hints, keycap_width, paint_keycap,
-    paint_shadow, paint_surface, rounded, running, smooth,
+    Switch, Text, TextField, ease_to, eased, glyph, hints, keycap_width,
+    paint_keycap, paint_shadow, paint_surface, rounded, running, smooth,
 )
 
 # Gallery names and one-liners. Two tiles are both titled "Calendar" on the
@@ -106,8 +110,15 @@ def sections():
     return out
 
 
-def describe(card) -> str:
-    """One line about a placed card: its size, background and anything telling."""
+def spatial(screens) -> list:
+    """Displays left to right, top to bottom - the order to offer them in, so a
+    choice between "Left" and "Main" reads the way the desk does."""
+    return sorted(screens, key=lambda d: (d.rect[0], d.rect[1]))
+
+
+def describe(card, board: Optional[Board] = None) -> str:
+    """One line about a placed card: its size, background, anything telling,
+    and - with more than one display - which one it is on."""
     bits = [card.size_class.capitalize()]
     c = card.config
     if c.get("image"):
@@ -124,6 +135,13 @@ def describe(card) -> str:
         bits.append("Outlook" if c.get("ics") else "Windows calendar")
     elif card.kind == "files" and c.get("w"):
         bits.append("custom size")
+    if board is not None:
+        if card.displaced and card.anchor is not None:
+            bits.append(f"waiting for {board.display_name(card.anchor.display)}")
+        elif len(board.screens) > 1:
+            d = board.display_of(card)
+            if d is not None:
+                bits.append(f"{displays.labels(board.screens).get(d.key, 'Main')} display")
     return " · ".join(bits)
 
 
@@ -472,6 +490,7 @@ class Sidebar(QWidget):
 
     PAGES = (("gallery", "Gallery", "gallery"),
              ("desktop", "On your desktop", "desktop"),
+             ("presets", "Presets", "presets"),
              ("settings", "Settings", "settings"))
 
     def __init__(self, win: "MainWindow") -> None:
@@ -534,6 +553,8 @@ class Sidebar(QWidget):
         board = self.win.board
         n = len(board.cards)
         self.nav["desktop"].set_badge(str(n) if n else "")
+        k = len(board.state.presets)
+        self.nav["presets"].set_badge(str(k) if k else "")
         if board.state.layer == "top":
             self.peek.setText("Always on top")
             self.peek.setEnabled(False)
@@ -725,14 +746,18 @@ class GalleryTile(Cached, QWidget):
 
     def _add(self) -> None:
         board = self.win.board
-        card = board.add(self.kind, self.size_key)
+        where = self.win.gallery.target()
+        card = board.add(self.kind, self.size_key, display=where)
         name = name_of(self.kind)
         if card is None:
             self.win.toast(f"Couldn't add {name}.")
             return
         board.spotlight(card)
         self.add.flash("Added")
-        self.win.toast(f"{name} is on your desktop.", "Show",
+        on = "your desktop"
+        if where is not None:
+            on = f"your {displays.labels(board.screens).get(where, 'Main')} display"
+        self.win.toast(f"{name} is on {on}.", "Show",
                        lambda c=card: board.spotlight(c))
 
     def paint(self, p: QPainter) -> None:
@@ -786,8 +811,20 @@ class GalleryPage(QWidget):
         self.search = SearchField("Search widgets")
         self.search.setFixedWidth(250)
         self.search.textChanged.connect(self._filter)
+        # With more than one display, which one Add puts a widget on. It starts
+        # on the display this window is on - where the person adding is looking.
+        self.where = Segmented([("", "Main")], height=30)
+        self.where_label = label("Add to", 10, QFont.Medium, tone="dim")
+        tools = QWidget()
+        tl = QHBoxLayout(tools)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(10)
+        tl.addWidget(self.where_label, 0, Qt.AlignVCenter)
+        tl.addWidget(self.where, 0, Qt.AlignVCenter)
+        tl.addSpacing(10)
+        tl.addWidget(self.search, 0, Qt.AlignVCenter)
         header = PageHeader("Gallery", "Pick a widget and a size, and it goes "
-                                       "straight onto your desktop.", self.search)
+                                       "straight onto your desktop.", tools)
 
         body = QWidget()
         col = QVBoxLayout(body)
@@ -836,6 +873,23 @@ class GalleryPage(QWidget):
         self._resized.setSingleShot(True)
         self._resized.timeout.connect(self.refresh_previews)
         self._painted = False
+        self.sync_displays()
+
+    def sync_displays(self, here: Optional[str] = None) -> None:
+        """Offer the displays there are, in the order they sit on the desk."""
+        screens = self.win.board.screens
+        names = displays.labels(screens)
+        keys = [d.key for d in screens]
+        pick = here if here in keys else (self.where.current if self.where.current in keys
+                                          else self.win.display_here().key)
+        self.where.set_options([(d.key, names[d.key]) for d in spatial(screens)], pick)
+        many = len(screens) > 1
+        self.where.setVisible(many)
+        self.where_label.setVisible(many)
+
+    def target(self) -> Optional[str]:
+        """The display Add puts a widget on; None when there is only one."""
+        return self.where.current if len(self.win.board.screens) > 1 else None
 
     def _filter(self, text: str) -> None:
         any_shown = False
@@ -856,6 +910,7 @@ class GalleryPage(QWidget):
 
     def on_show(self) -> None:
         self.refresh_counts()
+        self.sync_displays(here=self.win.display_here().key)
         if not self._painted:
             self._painted = True
             QTimer.singleShot(0, self.refresh_previews)
@@ -890,6 +945,7 @@ class DeskRow(Cached, QAbstractButton):
     def __init__(self, card, parent=None) -> None:
         super().__init__(parent)
         self.card = card
+        self.where = None               # the display heading it is listed under
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(84)
@@ -1049,7 +1105,16 @@ class Inspector(QWidget):
         self.size_group = Group()
         self.sizes = Segmented([("small", "Small")], "small")
         self.sizes.changed.connect(self._size)
-        self.size_group.add(form_row("Size", self.sizes))
+        self.size_row = self.size_group.add(form_row("Size", self.sizes))
+        self.where = Segmented([("", "Main")])
+        self.where.changed.connect(self._move_to)
+        self.where_row = self.size_group.add(form_row("Display", self.where))
+        note = QWidget()
+        nl = QVBoxLayout(note)
+        nl.setContentsMargins(16, 10, 16, 12)
+        self.where_note = label("", 9.25, tone="dim", wrap=True)
+        nl.addWidget(self.where_note)
+        self.where_note_row = self.size_group.add(note)
         lay.addWidget(self.size_group)
 
         self.bg_title = section_title("Background")
@@ -1120,9 +1185,8 @@ class Inspector(QWidget):
         self.name.setText(name_of(card.kind))
         self.sizes.set_options([(s, s.capitalize()) for s in card.supported_sizes],
                                card.size_class)
-        many = len(card.supported_sizes) > 1
-        self.size_title.setVisible(many)
-        self.size_group.setVisible(many)
+        self.size_row.setVisible(len(card.supported_sizes) > 1)
+        self.sync_where()
         custom = card.customizable
         for w in (self.bg_title, self.bg_group, self.fg_title, self.fg_group, self.reset):
             w.setVisible(custom)
@@ -1138,10 +1202,11 @@ class Inspector(QWidget):
         if c is None:
             return
         try:
-            self.detail.setText(describe(c))
+            self.detail.setText(describe(c, self.win.board))
         except RuntimeError:
             return
         self.sizes.set_current(c.size_class)
+        self.sync_where()
         if c.customizable:
             self.fill.set_current("solid" if appearance.is_solid(c.config) else "glass")
             self.bg.set_current(c.config.get("bg"))
@@ -1154,6 +1219,37 @@ class Inspector(QWidget):
         self.adjust.setVisible(bool(img))
         self.clear.setVisible(bool(img))
         self.render_preview()
+
+    def sync_where(self) -> None:
+        """The display the card is on, out of the ones there are - offered only
+        when there is a choice, or when the card is waiting for its own."""
+        c = self.card
+        if c is None:
+            return
+        board = self.win.board
+        names = displays.labels(board.screens)
+        try:
+            r = c.card_rect()
+            here = displays.at(c.x() + r.center().x(), c.y() + r.center().y(),
+                               board.screens)
+        except RuntimeError:
+            return
+        options = [(d.key, names[d.key]) for d in spatial(board.screens)]
+        if options != self.where.options:
+            self.where.set_options(options, here.key)
+        else:
+            self.where.set_current(here.key)
+        self.where_row.setVisible(len(board.screens) > 1 or c.displaced)
+        self.where_note_row.setVisible(bool(c.displaced))
+        if c.displaced and c.anchor is not None:
+            self.where_note.setText(
+                f"{board.display_name(c.anchor.display)} isn't connected, so this "
+                f"widget is waiting on your {names.get(here.key, 'Main')} display. "
+                "It goes back when that monitor does - or choose a display to "
+                "keep it on.")
+        shown = not (self.size_row.isHidden() and self.where_row.isHidden())
+        self.size_title.setVisible(shown)
+        self.size_group.setVisible(shown)
 
     def render_preview(self) -> None:
         if self.card is None:
@@ -1177,6 +1273,10 @@ class Inspector(QWidget):
             self.card.set_size_class(key)
             self.card.settle()          # a bigger card must stay on the screen
             self.win.board.persist()
+
+    def _move_to(self, key: str) -> None:
+        if self.card is not None and self.win.board.move_to_display(self.card, key):
+            self.win.board.spotlight(self.card)
 
     def _set(self, key: str, value) -> None:
         if self.card is not None:
@@ -1217,6 +1317,7 @@ class DesktopPage(QWidget):
         super().__init__()
         self.win = win
         self.rows: List[DeskRow] = []
+        self.heads: List[QWidget] = []
         self.selected = None
         self.header = PageHeader("On your desktop", "")
 
@@ -1270,22 +1371,62 @@ class DesktopPage(QWidget):
         self._seen = False
         self.rebuild()
 
+    def _where(self, card):
+        """The heading a card belongs under: its display, or the one it waits for."""
+        if card.displaced and card.anchor is not None:
+            return ("waiting", card.anchor.display)
+        d = self.win.board.display_of(card)
+        return ("on", d.key if d is not None else "")
+
+    def _groups(self, cards) -> list:
+        """The cards under a heading per display, in the order the displays
+        sit on the desk - or no headings at all, with only one display."""
+        board = self.win.board
+        if len(board.screens) < 2 and not any(c.displaced for c in cards):
+            return [("", cards)]
+        names = displays.labels(board.screens)
+        out = []
+        for d in spatial(board.screens):
+            members = [c for c in cards if self._where(c) == ("on", d.key)]
+            if members:
+                out.append((f"{names[d.key]} display", members))
+        waiting: Dict[str, list] = {}
+        for c in cards:
+            kind, key = self._where(c)
+            if kind == "waiting":
+                waiting.setdefault(key, []).append(c)
+        for key, members in waiting.items():
+            out.append((f"Waiting for {board.display_name(key)}", members))
+        listed = {c for _t, members in out for c in members}
+        rest = [c for c in cards if c not in listed]
+        if rest:
+            out.append(("", rest))
+        return out
+
     def rebuild(self) -> None:
         cards = list(self.win.board.cards)
-        for row in self.rows:
+        for w in self.rows + self.heads:
             # Out of the layout now, not whenever the deferred delete runs - a
             # rebuild must never show rows for cards that have gone.
-            self.group.removeButton(row)
-            self.list_lay.removeWidget(row)
-            row.hide()
-            row.deleteLater()
-        self.rows = []
-        for card in cards:
-            row = DeskRow(card)
-            row.clicked.connect(lambda _c=False, c=card: self.select(c))
-            self.group.addButton(row)
-            self.list_lay.insertWidget(self.list_lay.count() - 1, row)
-            self.rows.append(row)
+            if isinstance(w, DeskRow):
+                self.group.removeButton(w)
+            self.list_lay.removeWidget(w)
+            w.hide()
+            w.deleteLater()
+        self.rows, self.heads = [], []
+        for i, (title, members) in enumerate(self._groups(cards)):
+            if title:
+                head = label(title, 9.75, QFont.DemiBold, tone="dim")
+                head.setContentsMargins(12, 4 if i == 0 else 16, 0, 6)
+                self.list_lay.insertWidget(self.list_lay.count() - 1, head)
+                self.heads.append(head)
+            for card in members:
+                row = DeskRow(card)
+                row.where = self._where(card)
+                row.clicked.connect(lambda _c=False, c=card: self.select(c))
+                self.group.addButton(row)
+                self.list_lay.insertWidget(self.list_lay.count() - 1, row)
+                self.rows.append(row)
         n = len(cards)
         self.header.subtitle.setText(
             f"{n} widget{'s' if n != 1 else ''}. Pick one to change its size, colours "
@@ -1307,9 +1448,18 @@ class DesktopPage(QWidget):
     def card_changed(self, card) -> None:
         for row in self.rows:
             if row.card is card:
+                if row.where != self._where(card):
+                    self.rebuild()          # it moved to another display's heading
+                    return
                 row.refresh()
         if card is self.selected:
             self.inspector.refresh()
+
+    def displays_changed(self) -> None:
+        """A monitor came or went: cards may belong under other headings now,
+        and one that moved shows a different slice of the glass - which the
+        rebuilt rows draw afresh."""
+        self.rebuild()
 
     def refresh_thumbs(self, now: bool = False) -> None:
         if now:
@@ -1524,6 +1674,437 @@ class SettingsPage(QWidget):
 
 
 # --------------------------------------------------------------------------- #
+#  Presets
+# --------------------------------------------------------------------------- #
+def when(ts: float) -> str:
+    """When something was saved, the way you'd say it."""
+    if not ts:
+        return ""
+    t, now = time.localtime(ts), time.localtime()
+    clock = time.strftime("%H:%M", t)
+    if t[:3] == now[:3]:
+        return f"today at {clock}"
+    if t[:3] == time.localtime(time.time() - 86400)[:3]:
+        return f"yesterday at {clock}"
+    if t.tm_year == now.tm_year:
+        return f"{t.tm_mday} {time.strftime('%b', t)}"
+    return f"{t.tm_mday} {time.strftime('%b %Y', t)}"
+
+
+def paint_map(p: QPainter, box: QRectF, screens, cards, names=None,
+              small: bool = False) -> None:
+    """The desk from above: every display in its place and to scale, and a
+    block for each widget where it sits on it.
+
+    ``screens`` is ``[(key, rect, connected)]`` and ``cards`` ``[(rect, away)]``,
+    both in virtual-screen pixels; ``away`` marks a widget waiting for a display
+    that isn't connected. ``names`` puts a label under each display.
+    """
+    ui = theme.current()
+    if not screens:
+        return
+    l = min(s[1][0] for s in screens)
+    t = min(s[1][1] for s in screens)
+    r = max(s[1][2] for s in screens)
+    b = max(s[1][3] for s in screens)
+    w, h = max(1, r - l), max(1, b - t)
+    below = 0.0 if (small or not names) else 24.0
+    pad = 2.0 if small else 8.0
+    scale = min((box.width() - 2 * pad) / w, (box.height() - 2 * pad - below) / h)
+    ox = box.left() + (box.width() - w * scale) / 2.0
+    oy = box.top() + pad + (box.height() - 2 * pad - below - h * scale) / 2.0
+
+    def to(rc) -> QRectF:
+        return QRectF(ox + (rc[0] - l) * scale, oy + (rc[1] - t) * scale,
+                      (rc[2] - rc[0]) * scale, (rc[3] - rc[1]) * scale)
+
+    # A gap between neighbours, so two monitors side by side read as two.
+    gap, rad = (1.5, 3.5) if small else (3.0, 9.0)
+    for key, rc, connected in screens:
+        sr = to(rc).adjusted(gap, gap, -gap, -gap)
+        if connected:
+            p.fillPath(smooth(sr, rad), QColor(ui.control_hi))
+        else:
+            p.save()
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(ui.text_faint), 1.0, Qt.DashLine))
+            p.drawPath(smooth(sr.adjusted(0.5, 0.5, -0.5, -0.5), rad))
+            p.restore()
+        if names and key in names and not small:
+            p.setFont(theme.font(9.25, QFont.DemiBold))
+            p.setPen(QColor(ui.text if connected else ui.text_dim))
+            p.drawText(QRectF(sr.left() - 30, sr.bottom() + 6, sr.width() + 60, 16),
+                       Qt.AlignHCenter | Qt.AlignTop, names[key])
+    ink = QColor(ui.text)
+    ink.setAlphaF(0.80)
+    for rc, away in cards:
+        cr = to(rc)
+        cr.setWidth(max(cr.width(), 2.0))
+        cr.setHeight(max(cr.height(), 2.0))
+        p.fillPath(smooth(cr, max(1.0, RADIUS * scale)),
+                   QColor(ui.accent) if away else ink)
+
+
+def waiting_note(board: Board) -> str:
+    """What saving does with widgets that are waiting for their display - kept
+    on it, so a preset saved while a monitor sleeps still puts them back."""
+    keys = {c.anchor.display for c in board.cards
+            if c.displaced and c.anchor is not None}
+    if not keys:
+        return ""
+    name = board.display_name(next(iter(keys))) if len(keys) == 1 else "a display"
+    return f"Widgets waiting for {name} are kept on it."
+
+
+def preset_model(preset, board: Board):
+    """A preset's displays and widgets for paint_map: drawn as it was saved,
+    with each display marked by whether it is connected now."""
+    found = displays.resolve(preset.displays, board.screens)
+    screens = []
+    for key, info in preset.displays.items():
+        d = displays.from_info(key, info)
+        if d is not None:
+            screens.append((key, d.rect, key in found))
+    m = int(MARGIN)
+    cards = []
+    for pl in preset.placements:
+        w, h = placement_size(pl)
+        cards.append(((pl.x + m, pl.y + m, pl.x + m + w, pl.y + m + h), False))
+    return screens, cards
+
+
+class DesktopMap(Cached, QWidget):
+    """Your displays as they are arranged, with the widgets on each where they
+    are right now, and a line about each display beside the picture."""
+
+    H = 250
+
+    def __init__(self, win: "MainWindow") -> None:
+        super().__init__()
+        self.win = win
+        self.setFixedHeight(self.H)
+
+    def _model(self):
+        board = self.win.board
+        names = displays.labels(board.screens)
+        screens = [(d.key, d.rect, True) for d in board.screens]
+        cards, counts, waiting = [], Counter(), Counter()
+        for c in board.cards:
+            try:
+                r = c.card_rect()
+                x, y = c.x() + r.left(), c.y() + r.top()
+            except RuntimeError:
+                continue                    # went away mid-paint
+            cards.append(((int(x), int(y), int(x + r.width()), int(y + r.height())),
+                          bool(c.displaced)))
+            d = board.display_of(c)
+            if c.displaced and c.anchor is not None:
+                waiting[c.anchor.display] += 1
+            elif d is not None:
+                counts[d.key] += 1
+        return names, screens, cards, counts, waiting
+
+    def paint_key(self):
+        names, screens, cards, counts, waiting = self._model()
+        return (tuple(sorted(names.items())), tuple(screens), tuple(cards),
+                tuple(sorted(counts.items())), tuple(sorted(waiting.items())))
+
+    def paint(self, p: QPainter) -> None:
+        ui = theme.current()
+        hints(p)
+        board = self.win.board
+        names, screens, cards, counts, waiting = self._model()
+        r = QRectF(self.rect())
+        paint_surface(p, r)
+        split = r.width() * 0.56
+        paint_map(p, QRectF(r.left() + 18, r.top() + 16, split - 30, r.height() - 32),
+                  screens, cards, names)
+
+        x = r.left() + split + 4
+        width = max(40.0, r.right() - x - 22)
+        y = r.top() + 30
+        for d in spatial(board.screens):
+            n = counts.get(d.key, 0)
+            p.setFont(theme.font(11, QFont.DemiBold))
+            p.setPen(QColor(ui.text))
+            p.drawText(QRectF(x, y, width, 20), Qt.AlignLeft | Qt.AlignVCenter,
+                       names.get(d.key, d.name))
+            line = (f"{d.name} · {d.size[0]} × {d.size[1]} · "
+                    + (f"{n} widget{'s' if n != 1 else ''}" if n else "no widgets"))
+            p.setFont(theme.font(9.25))
+            p.setPen(QColor(ui.text_dim))
+            p.drawText(QRectF(x, y + 20, width, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(line, Qt.ElideRight, int(width)))
+            y += 52
+        for key, n in sorted(waiting.items()):
+            p.setFont(theme.font(9.25, QFont.Medium))
+            p.setPen(QColor(ui.accent_text))
+            p.drawText(QRectF(x, y, width, 40), Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+                       f"{n} widget{'s' if n != 1 else ''} waiting for "
+                       f"{board.display_name(key)} - on your Main display until "
+                       "it's back.")
+            y += 44
+
+
+class PresetRow(Cached, QWidget):
+    """One saved preset: the desk as it has it, its name and what is in it, and
+    Apply - or, when the desktop is laid out exactly like it, "In use"."""
+
+    H = 96
+    THUMB = (136, 76)
+
+    def __init__(self, page: "PresetsPage", preset) -> None:
+        super().__init__()
+        self.page = page
+        self.win = page.win
+        self.preset = preset
+        self.in_use = False
+        self._editing = False
+        self.setFixedHeight(self.H)
+        self.apply = Button("Apply", "secondary", parent=self, height=30,
+                            slot=lambda: self.page.apply(self.preset),
+                            tip="Lay your desktop out like this")
+        self.more = Button("", "plain", "more", self, height=30, slot=self._menu,
+                           tip="Update, rename or delete")
+        # Outside a layout a widget keeps Qt's default size, not its own.
+        for b in (self.apply, self.more):
+            b.resize(b.sizeHint())
+        self.field = TextField("Name this preset", self, height=30)
+        self.field.hide()
+        self.field.returnPressed.connect(self._commit)
+        self.field.editingFinished.connect(self._commit)
+        self.field.cancelled.connect(self._cancel)
+
+    def text_left(self) -> float:
+        return 16 + self.THUMB[0] + 16
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        y = (self.height() - 30) // 2
+        self.more.move(self.width() - 14 - self.more.width(), y)
+        self.apply.move(self.more.x() - 8 - self.apply.width(), y)
+        x = int(self.text_left()) - 13
+        self.field.setGeometry(x, self.height() // 2 - 28,
+                               max(140, min(380, self.apply.x() - 16 - x)), 30)
+
+    def set_in_use(self, on: bool) -> None:
+        if on != self.in_use:
+            self.in_use = on
+            self.apply.setVisible(not on)
+            self.update()
+
+    def detail(self) -> str:
+        pre, board = self.preset, self.win.board
+        n = len(pre.placements)
+        keys = {pl.display for pl in pre.placements}
+        bits = [f"{n} widget{'s' if n != 1 else ''}"]
+        if len(keys) > 1:
+            bits.append(f"{len(keys)} displays")
+        found = displays.resolve(pre.displays, board.screens)
+        gone = sorted(k for k in keys if k not in found)
+        if gone:
+            name = pre.displays.get(gone[0], {}).get("name") or board.display_name(gone[0])
+            bits.append(f"{name} not connected")
+        if pre.saved:
+            bits.append(f"saved {when(pre.saved)}")
+        return " · ".join(bits)
+
+    def paint_key(self):
+        pre = self.preset
+        screens, cards = preset_model(pre, self.win.board)
+        return (pre.name, self.in_use, self._editing, self.detail(), tuple(screens),
+                tuple(cards), self.apply.x())
+
+    def paint(self, p: QPainter) -> None:
+        ui = theme.current()
+        hints(p)
+        tw, th = self.THUMB
+        box = QRectF(16, (self.height() - th) / 2.0, tw, th)
+        p.save()
+        p.setClipPath(smooth(box, 12.0))
+        p.fillRect(box, QColor(ui.well))
+        p.restore()
+        screens, cards = preset_model(self.preset, self.win.board)
+        paint_map(p, box.adjusted(7, 7, -7, -7), screens, cards, small=True)
+
+        chip = None
+        if self.in_use:
+            f = theme.font(9.25, QFont.DemiBold)
+            cw = QFontMetricsF(f).horizontalAdvance("In use") + 36
+            chip = QRectF(self.more.x() - 8 - cw, self.height() / 2.0 - 13, cw, 26)
+        x = self.text_left()
+        w = (chip.left() if chip is not None else self.apply.x()) - 14 - x
+        mid = self.height() / 2.0
+        if not self._editing:
+            p.setFont(theme.font(11.5, QFont.DemiBold))
+            p.setPen(QColor(ui.text))
+            p.drawText(QRectF(x, mid - 24, w, 22), Qt.AlignLeft | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(self.preset.name, Qt.ElideRight, int(w)))
+        p.setFont(theme.font(9.25))
+        p.setPen(QColor(ui.text_dim))
+        p.drawText(QRectF(x, mid + 3, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                   p.fontMetrics().elidedText(self.detail(), Qt.ElideRight, int(w)))
+        if chip is not None:
+            p.fillPath(rounded(chip, 13), QColor(ui.accent_soft))
+            glyph(p, "check", QRectF(chip.left() + 11, chip.top() + 7, 12, 12),
+                  ui.accent_text, 1.8)
+            p.setFont(theme.font(9.25, QFont.DemiBold))
+            p.setPen(QColor(ui.accent_text))
+            p.drawText(QRectF(chip.left() + 27, chip.top(), chip.width() - 30, chip.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, "In use")
+
+    # -- naming ---------------------------------------------------------- #
+    def rename(self) -> None:
+        self._editing = True
+        self.field.restyle()
+        self.field.setText(self.preset.name)
+        self.field.show()
+        self.field.setFocus(Qt.OtherFocusReason)
+        self.field.selectAll()
+        self.update()
+
+    def _commit(self) -> None:
+        if not self._editing:
+            return
+        self._editing = False
+        name = self.field.text().strip()
+        self.field.hide()
+        self.update()
+        if name and name != self.preset.name \
+                and not self.win.board.rename_preset(self.preset, name):
+            self.win.toast(f"There's already a preset called “{name}”.")
+
+    def _cancel(self) -> None:
+        self._editing = False
+        self.field.hide()
+        self.update()
+
+    def _menu(self) -> None:
+        m = QMenu(self)
+        update = QAction("Update with this layout", m)
+        update.setEnabled(bool(self.win.board.cards))
+        update.triggered.connect(lambda: self.page.update_preset(self.preset))
+        rename = QAction("Rename", m)
+        rename.triggered.connect(self.rename)
+        delete = QAction("Delete", m)
+        delete.triggered.connect(lambda: self.page.delete(self.preset))
+        m.addAction(update)
+        m.addAction(rename)
+        m.addSeparator()
+        m.addAction(delete)
+        m.exec(self.more.mapToGlobal(QPoint(0, self.more.height() + 4)))
+
+
+class PresetsPage(QWidget):
+    def __init__(self, win: "MainWindow") -> None:
+        super().__init__()
+        self.win = win
+        self.rows: List[PresetRow] = []
+        self.save = Button("Save this layout", "primary", "plus", height=34,
+                           slot=self._save_new,
+                           tip="Every widget on every display, as a new preset")
+        header = PageHeader("Presets", "Save every widget on every display as a "
+                                       "preset, and switch between them in a click.",
+                            self.save)
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(PAGE_MARGIN, 0, PAGE_MARGIN, 32)
+        col.setSpacing(0)
+        self.map_title = section_title("Your displays")
+        col.addWidget(self.map_title)
+        self.map = DesktopMap(win)
+        col.addWidget(self.map)
+        col.addWidget(section_title("Saved presets"))
+        # Separators start under the text, past the picture of the desk.
+        self.group = Group(inset=int(16 + PresetRow.THUMB[0] + 16))
+        self.empty = QWidget()
+        el = QVBoxLayout(self.empty)
+        el.setContentsMargins(18, 16, 18, 18)
+        el.setSpacing(3)
+        el.addWidget(label("No presets yet", 11, QFont.DemiBold))
+        el.addWidget(label("Save the layout you have now - every widget, on every "
+                           "display - and switch back to it whenever you like. "
+                           "Presets are in the tray menu too.", 9.75, tone="dim",
+                           wrap=True))
+        self.group.add(self.empty)
+        col.addWidget(self.group)
+        col.addStretch(1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        pg = page(header, body)
+        self.area = pg.area
+        outer.addWidget(pg)
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        for row in self.rows:
+            self.group.lay.removeWidget(row)
+            self.group.rows.remove(row)
+            row.hide()
+            row.deleteLater()
+        self.rows = []
+        for preset in self.win.board.state.presets:
+            row = PresetRow(self, preset)
+            self.group.add(row)
+            self.rows.append(row)
+        self.empty.setVisible(not self.rows)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Follow the board: which preset is in use, the map, the Save button."""
+        board = self.win.board
+        for row in self.rows:
+            row.set_in_use(board.preset_in_use(row.preset))
+            row.update()
+        self.save.setEnabled(bool(board.cards))
+        self.map_title.setText("Your displays" if len(board.screens) > 1
+                               else "Your display")
+        self.map.update()
+        self.group.update()
+
+    def on_show(self) -> None:
+        self.refresh()
+
+    # -- actions --------------------------------------------------------- #
+    def _save_new(self) -> None:
+        board = self.win.board
+        preset = board.save_preset()
+        if preset is None:
+            self.win.toast("Add some widgets first - a preset is a layout of them.")
+            return
+        waiting = waiting_note(board)
+        self.win.toast(f"Saved “{preset.name}”. "
+                       + (waiting or "Type a name for it, or keep this one."))
+        row = next((r for r in self.rows if r.preset is preset), None)
+        if row is not None:
+            row.rename()
+            QTimer.singleShot(0, lambda r=row: self.area.ensureWidgetVisible(r))
+
+    def apply(self, preset) -> None:
+        board = self.win.board
+        before = board.apply_preset(preset)
+        if before is None:
+            self.win.toast(f"“{preset.name}” has no widgets in it.")
+            return
+        self.win.toast(f"“{preset.name}” is on your desktop.", "Undo",
+                       lambda: board.apply_layout(before.placements, before.displays))
+
+    def update_preset(self, preset) -> None:
+        board = self.win.board
+        if board.update_preset(preset) is not None:
+            self.win.toast(f"Updated “{preset.name}” to this layout.", "Undo",
+                           lambda: board.put_preset(preset))
+
+    def delete(self, preset) -> None:
+        board = self.win.board
+        i = board.remove_preset(preset)
+        if i >= 0:
+            self.win.toast(f"Deleted “{preset.name}”.", "Undo",
+                           lambda: board.put_preset(preset, i))
+
+
+# --------------------------------------------------------------------------- #
 #  The window
 # --------------------------------------------------------------------------- #
 class MainWindow(Chrome, QWidget):
@@ -1552,9 +2133,10 @@ class MainWindow(Chrome, QWidget):
         root.addWidget(self.stack, 1)
         self.gallery = GalleryPage(self)
         self.desktop = DesktopPage(self)
+        self.presets = PresetsPage(self)
         self.settings = SettingsPage(self)
         self.pages = {"gallery": self.gallery, "desktop": self.desktop,
-                      "settings": self.settings}
+                      "presets": self.presets, "settings": self.settings}
         for pg in self.pages.values():
             self.stack.addWidget(pg)
         self.toast_box = Toast(self)
@@ -1562,6 +2144,8 @@ class MainWindow(Chrome, QWidget):
         board.cards_changed.connect(self._cards_changed)
         board.card_changed.connect(self._card_changed)
         board.prefs_changed.connect(self._prefs_changed)
+        board.presets_changed.connect(self._presets_changed)
+        board.displays_changed.connect(self._displays_changed)
 
         # Thumbnails of live cards go stale - a clock moves on - so they are
         # redrawn now and then, but only while anyone can see them.
@@ -1589,7 +2173,7 @@ class MainWindow(Chrome, QWidget):
         theme.set_current(ui)
         self.setPalette(theme.qpalette(ui))
         self.setFont(theme.font(10))
-        for field in self.findChildren(SearchField):
+        for field in self.findChildren(SearchField) + self.findChildren(TextField):
             field.restyle()
         if self.testAttribute(Qt.WA_WState_Created):
             winapi.set_dark_frame(int(self.winId()), ui.dark)
@@ -1632,6 +2216,11 @@ class MainWindow(Chrome, QWidget):
     def toast(self, text: str, action: str = "", fn: Optional[Callable] = None) -> None:
         self.toast_box.show_message(text, action, fn)
 
+    def display_here(self) -> displays.Display:
+        """The display this window is on: where someone using it is looking."""
+        g = self.frameGeometry()
+        return displays.at(g.center().x(), g.center().y(), self.board.screens)
+
     def remove_card(self, card) -> None:
         pl = self.board.remove(card)
         if pl is not None:
@@ -1642,10 +2231,21 @@ class MainWindow(Chrome, QWidget):
     def _cards_changed(self) -> None:
         self.desktop.rebuild()
         self.gallery.refresh_counts()
+        self.presets.refresh()
         self.sidebar.sync()
 
     def _card_changed(self, card) -> None:
         self.desktop.card_changed(card)
+        self.presets.refresh()
+
+    def _presets_changed(self) -> None:
+        self.presets.rebuild()
+        self.sidebar.sync()
+
+    def _displays_changed(self) -> None:
+        self.gallery.sync_displays()
+        self.desktop.displays_changed()
+        self.presets.refresh()
 
     def _prefs_changed(self) -> None:
         s = self.board.state

@@ -146,6 +146,9 @@ def selftest() -> int:
     _check_agent_bus()
     _check_appearance()
     _check_layout_mirror()
+    _check_displays()
+    _check_presets()
+    _check_glass_displays()
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -502,6 +505,347 @@ def _sandboxed_layout():
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
+@contextlib.contextmanager
+def _fake_displays(screens):
+    """Stand a set of made-up monitors in for the real ones, and let a check
+    plug, unplug and rearrange them by changing ``box["screens"]``.
+
+    Everything that asks about monitors - the board, the card's drop clamp, the
+    glass - goes through ``displays.current`` and ``displays.signature``, so
+    replacing those two is enough to put a whole board on a desk that isn't
+    this one.
+    """
+    from widgets.core import displays as dm
+
+    real = (dm.current, dm.signature)
+    box = {"screens": list(screens)}
+    dm.current = lambda force=False: list(box["screens"])
+    dm.signature = lambda: tuple((d.key, d.rect, d.work, d.primary)
+                                 for d in box["screens"])
+    try:
+        yield box
+    finally:
+        dm.current, dm.signature = real
+
+
+def _desk():
+    """Two made-up monitors shaped like this machine's: a main landscape one and
+    a portrait one on its left, set lower."""
+    from widgets.core.displays import Display
+
+    main = Display(r"\\?\DISPLAY#AAA0001#1&1&UID1#{g}", "Alpha",
+                   (0, 0, 1920, 1080), (0, 0, 1920, 1040), True)
+    left = Display(r"\\?\DISPLAY#BBB0002#1&1&UID2#{g}", "Beta",
+                   (-1080, -413, 0, 1507), (-1080, -413, 0, 1507))
+    return main, left
+
+
+def _quiet_board(placements):
+    """A board on a made-up desk whose cards never reach the screen and whose
+    timers never fire - for checks that drive it by hand."""
+    from widgets.core import store
+    from widgets.core.board import Board
+
+    board = Board(store.BoardState(placements=list(placements)))
+    for timer in (board._autosave, board._watch, board._glass_timer, board._park):
+        timer.stop()
+    board.build()
+    return board
+
+
+def _check_displays() -> None:
+    """Widgets belong to a monitor, not to a spot in Windows' shared space.
+
+    Plugging a monitor in on the left, choosing another one as main, or dragging
+    the arrangement about in Display settings changes the coordinates of every
+    card without anything on screen moving - so a layout of positions alone
+    comes apart. And a monitor that is unplugged must not take its widgets'
+    places with it: they wait on the main display, still belonging to it, and go
+    back when it does - including on another port.
+    """
+    from PySide6.QtCore import QRectF
+
+    from widgets.core import displays as dm
+    from widgets.core import store
+    from widgets.core.card import MARGIN, WidgetCard
+    from widgets.core.displays import Display
+
+    main, left = _desk()
+    m = int(MARGIN)
+
+    # -- the parts that are only arithmetic ------------------------------ #
+    assert dm.model_of(main.key) == "AAA0001" and dm.model_of("primary") == ""
+    assert dm.labels([main, left]) == {main.key: "Main", left.key: "Left"}
+    r1 = Display("r1", "", (1920, 0, 3840, 1080), (1920, 0, 3840, 1080))
+    r2 = Display("r2", "", (3840, 0, 5760, 1080), (3840, 0, 5760, 1080))
+    up = Display("up", "", (0, -1080, 1920, 0), (0, -1080, 1920, 0))
+    assert dm.labels([r2, main, r1, up]) == {
+        main.key: "Main", r1.key: "Right", r2.key: "Right 2", up.key: "Above"}
+    # The same size carries a card over unchanged; a new size keeps it the same
+    # distance from the nearer edge - 24 px in from the right stays 24 px in.
+    assert dm.carry(100, 50, 348, 168, main.work, r1.work) == (2020, 50)
+    assert dm.carry(1548, 848, 348, 168, (0, 0, 1920, 1040),
+                    (0, 0, 2560, 1400)) == (2188, 1208)
+    assert dm.carry(24, 24, 348, 168, (0, 0, 1920, 1040), (0, 0, 1280, 720)) == (24, 24)
+    assert dm.carry(1700, 900, 348, 168, (0, 0, 1920, 1040), (0, 0, 800, 600)) == (452, 432)
+
+    saved = {main.key: main.info(), left.key: left.info()}
+    assert dm.resolve(saved, [main, left]) == {main.key: main, left.key: left}
+    # Another port is still the same monitor ...
+    ported = Display(left.key.replace("UID2", "UID7"), "Beta", left.rect, left.work)
+    assert dm.resolve(saved, [main, ported])[left.key] is ported
+    # ... a new monitor exactly where the old one sat is its replacement ...
+    other = Display(r"\\?\DISPLAY#ZZZ9999#1&1&UID5#{g}", "Zed", left.rect, left.work)
+    assert dm.resolve(saved, [main, other])[left.key] is other
+    # ... but of two identical monitors, the one still here is only itself.
+    twin = Display(left.key.replace("UID2", "UID3"), "Beta", (1920, 0, 3000, 1920),
+                   (1920, 0, 3000, 1920))
+    assert left.key not in dm.resolve(saved, [main, twin], known=[twin.key]), (
+        "the remaining one of two identical monitors was taken for the other")
+
+    # -- the board ------------------------------------------------------- #
+    def area(c):
+        r = c.card_rect()
+        return QRectF(c.x() + r.left(), c.y() + r.top(), r.width(), r.height())
+
+    real_start = WidgetCard.start
+    WidgetCard.start = lambda self: None        # never put a card on screen
+    try:
+        with _sandboxed_layout(), _fake_displays([main, left]) as desk:
+            board = _quiet_board([
+                store.Placement("clock", "small", 100, 100),     # saved before displays
+                store.Placement("system", "medium", -1000, 200,
+                                display=left.key, area=list(left.work)),
+            ])
+            on_main, on_left = board.cards
+            assert on_main.anchor.display == main.key, (
+                "a layout from before displays were tracked lost its cards' screen")
+            assert (on_left.x(), on_left.y()) == (-1000, 200)
+
+            def settle_desk(screens):
+                desk["screens"] = screens
+                board._displays_moved()
+                board.persist()
+
+            # Left is dragged round to the other side of Main in Display
+            # settings: its card goes with it, the one on Main doesn't move.
+            moved = Display(left.key, "Beta", (1920, 0, 3000, 1920), (1920, 0, 3000, 1920))
+            settle_desk([main, moved])
+            assert (on_left.x(), on_left.y()) == (3000 - 1000, 200 + 413), (
+                f"a rearranged monitor left its card at {on_left.x(), on_left.y()}")
+            assert (on_main.x(), on_main.y()) == (100, 100)
+
+            # Unplugged: the card waits on Main, clear of what is there, and the
+            # saved layout still says it belongs to Left.
+            settle_desk([main])
+            assert on_left.displaced and main.work[0] <= area(on_left).left()
+            assert QRectF(*main.work[:2], main.work[2] - main.work[0],
+                          main.work[3] - main.work[1]).contains(area(on_left))
+            assert not area(on_left).intersects(area(on_main)), (
+                "a waiting card landed on top of one already there")
+            board.persist(force=True)
+            kept = {p.kind: p for p in store.load().placements}["system"]
+            assert kept.display == left.key and (kept.x, kept.y) == (2000, 613), (
+                f"the layout forgot where a waiting card belongs: {kept}")
+            assert store.load().displays[left.key]["name"] == "Beta"
+
+            # Back - on another port, so under another device path - and the
+            # card goes home.
+            back = Display(left.key.replace("UID2", "UID7"), "Beta", moved.rect, moved.work)
+            settle_desk([main, back])
+            assert not on_left.displaced and (on_left.x(), on_left.y()) == (2000, 613), (
+                "a monitor on a new port did not get its widgets back")
+            assert on_left.anchor.display == back.key
+
+            # A waiting card dropped somewhere belongs there from then on.
+            settle_desk([main])
+            on_left.move(700, 500)
+            board._card_moved(on_left)
+            settle_desk([main, back])
+            assert (on_left.x(), on_left.y()) == (700, 500), (
+                "a card dropped on Main went back to the monitor it had left")
+
+            # Sent to another display, a card keeps as near its spot as fits.
+            assert board.move_to_display(on_main, back.key)
+            assert board.display_of(on_main) == back and not on_main.displaced
+            assert QRectF(*back.work[:2], back.work[2] - back.work[0],
+                          back.work[3] - back.work[1]).contains(area(on_main))
+
+            # A resolution change keeps a card flush against its edge - and the
+            # monitor beside it, pushed along, takes its own cards with it.
+            flush = board.cards[1]                    # system, on Main
+            flush.move(main.work[2] - 24 - m - int(area(flush).width()), 300)
+            board._card_moved(flush)
+            clock_at = (on_main.x(), on_main.y())
+            settle_desk([Display(main.key, "Alpha", (0, 0, 2560, 1440),
+                                 (0, 0, 2560, 1400), True),
+                         Display(back.key, "Beta", (2560, 0, 3640, 1920),
+                                 (2560, 0, 3640, 1920))])
+            assert int(area(flush).right()) == 2560 - 24, (
+                f"a card 24 px from the right edge ended up at {area(flush).right()}")
+            assert (on_main.x(), on_main.y()) == (clock_at[0] + 640, clock_at[1])
+            board.close_all()
+    finally:
+        WidgetCard.start = real_start
+    print("  displays: cards follow their monitor when rearranged, wait on Main "
+          "when it's unplugged (saved as still belonging to it), go home on a new "
+          "port; resolution changes keep edges; identical monitors stay apart")
+
+
+def _check_presets() -> None:
+    """A preset must put back every widget on every display, exactly as saved,
+    and moving rather than rebuilding the ones already there."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtWidgets import QMenu
+
+    from widgets.core import store
+    from widgets.core.card import WidgetCard
+    from widgets.tray import WidgetTray
+
+    def area(c):
+        r = c.card_rect()
+        return QRectF(c.x() + r.left(), c.y() + r.top(), r.width(), r.height())
+
+    main, left = _desk()
+    real_start = WidgetCard.start
+    WidgetCard.start = lambda self: None
+    try:
+        with _sandboxed_layout(), _fake_displays([main, left]) as desk:
+            place = {"lat": 51.5072, "lon": -0.1276, "place": "London, GB"}
+            board = _quiet_board([
+                store.Placement("clock", "small", 100, 100, display=main.key,
+                                area=list(main.work)),
+                store.Placement("weather", "medium", 500, 100, dict(place),
+                                display=main.key, area=list(main.work)),
+                store.Placement("notes", "small", -1000, 300, display=left.key,
+                                area=list(left.work)),
+            ])
+            clock, weather, notes = board.cards
+            work = board.save_preset("Work")
+            assert work and len(work.placements) == 3
+            assert set(work.displays) == {main.key, left.key}, work.displays
+            assert board.preset_in_use(work), "a preset just saved isn't in use"
+
+            clock.move(300, 400)
+            board._card_moved(clock)
+            board.remove(notes)
+            board.add("disk", "small", display=main.key)
+            assert not board.preset_in_use(work)
+
+            before = board.apply_preset(work)
+            assert sorted(c.kind for c in board.cards) == ["clock", "notes", "weather"]
+            assert clock in board.cards and weather in board.cards, (
+                "a card that had only moved was rebuilt")
+            assert (clock.x(), clock.y()) == (100, 100)
+            notes2 = next(c for c in board.cards if c.kind == "notes")
+            assert (notes2.x(), notes2.y()) == (-1000, 300) and not notes2.displaced
+            assert board.preset_in_use(work)
+
+            board.apply_layout(before.placements, before.displays)       # undo
+            assert sorted(c.kind for c in board.cards) == ["clock", "disk", "weather"]
+            assert (clock.x(), clock.y()) == (300, 400), "undo did not put it back"
+
+            back = store.load()
+            assert [p.name for p in back.presets] == ["Work"], back.presets
+            assert isinstance(back.presets[0].placements[0], store.Placement)
+            assert back.presets[0].placements[2].display == left.key
+
+            # One name, one preset - ignoring case; renaming keeps them unique.
+            assert board.save_preset("work") and len(board.state.presets) == 1
+            evenings = board.save_preset("Gaming")
+            assert not board.rename_preset(evenings, "WORK")
+            assert board.rename_preset(evenings, "Evenings")
+            i = board.remove_preset(evenings)
+            assert [p.name for p in board.state.presets] == ["work"]
+            board.put_preset(evenings, i)
+            assert [p.name for p in board.state.presets] == ["work", "Evenings"]
+            assert board.next_preset_name() == "Preset 1"
+
+            # Applied with one of its displays unplugged: those widgets wait on
+            # Main, clear of the others, and go to their own when it is back.
+            desk["screens"] = [main]
+            board._displays_moved()
+            board.apply_preset(work)
+            notes3 = next(c for c in board.cards if c.kind == "notes")
+            assert notes3.displaced and notes3.anchor.display == left.key
+            assert not any(area(notes3).intersects(area(c))
+                           for c in board.cards if c is not notes3)
+            assert board.preset_in_use(work), "a waiting card made its preset look unused"
+            desk["screens"] = [main, left]
+            board._displays_moved()
+            assert not notes3.displaced and (notes3.x(), notes3.y()) == (-1000, 300)
+
+            # The tray's submenu, filled without a tray icon ever appearing: a
+            # preset per line, the one in use ticked.
+            board.apply_preset(board.find_preset("Evenings"))
+
+            class Stub:
+                pass
+            stub = Stub()
+            stub.board = board
+            stub._apply_preset = stub._save_preset = lambda *a: None
+            stub.show_window = lambda *a: None
+            menu = QMenu()
+            WidgetTray._fill_presets(stub, menu)
+            names = [a.text() for a in menu.actions() if a.isCheckable()]
+            ticked = [a.text() for a in menu.actions() if a.isCheckable() and a.isChecked()]
+            assert names == ["work", "Evenings"] and "Evenings" in ticked, (names, ticked)
+            menu.deleteLater()
+            board.close_all()
+    finally:
+        WidgetCard.start = real_start
+    print("  presets: save every display, apply moving the cards already there, "
+          "undo, unique names, a missing display's widgets wait and go home")
+
+
+def _check_glass_displays() -> None:
+    """Each monitor's frosted glass blurs that monitor's own wallpaper.
+
+    Windows reports one wallpaper for the whole desktop, and with a different
+    picture on each monitor that put one monitor's picture behind every card on
+    the others. Checked against two made-up monitors with a solid picture each,
+    so the colours say which picture landed where.
+    """
+    import tempfile
+
+    from PySide6.QtGui import QColor, QImage
+
+    from widgets.core import displays as dm
+    from widgets.core import winapi
+    from widgets.core.displays import Display
+    from widgets.core.glass import GlassBackdrop
+
+    tmp = tempfile.mkdtemp(prefix="pcwidgets-glass-")
+    try:
+        paths = {}
+        for name, colour in (("red", "#ff0000"), ("blue", "#0000ff")):
+            img = QImage(400, 300, QImage.Format_RGB32)
+            img.fill(QColor(colour))
+            paths[name] = os.path.join(tmp, f"{name}.png")
+            img.save(paths[name])
+        a = Display("A", "A", (0, 0, 800, 600), (0, 0, 800, 600), True)
+        b = Display("B", "B", (800, -200, 1400, 600), (800, -200, 1400, 600))
+        virtual = (0, -200, 1400, 600)
+        img, origin = GlassBackdrop.compose([(a, paths["red"]), (b, paths["blue"])],
+                                            winapi.WALL_FILL, virtual, QColor("#000000"))
+        assert origin == (0, -200)
+        on_a, on_b = img.pixelColor(300, 500), img.pixelColor(1100, 300)
+        assert on_a.red() > 200 and on_a.blue() < 60, f"monitor A blurred {on_a.name()}"
+        assert on_b.blue() > 200 and on_b.red() < 60, f"monitor B blurred {on_b.name()}"
+
+        img, _ = GlassBackdrop.compose([(a, paths["red"]), (b, paths["blue"])],
+                                       winapi.WALL_SPAN, virtual, QColor("#000000"))
+        far = img.pixelColor(1300, 400)
+        assert far.red() > 200, "a spanned wallpaper did not cross to the second monitor"
+
+        mode, pics = GlassBackdrop.pictures(dm.current())
+        own = sum(1 for _d, p in pics if p)
+        print(f"  glass: each monitor blurs its own wallpaper; this desk has "
+              f"{len(pics)} display(s), {own} with a picture (fit mode {mode})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _check_layout_mirror() -> None:
     """The saved layout must survive one of its two locations being unreadable.
 
@@ -695,9 +1039,47 @@ def _check_app_window() -> None:
             win.toast_box._act()                 # the toast's Undo
             assert len(board.cards) == 2, "Undo did not bring the card back"
 
+            # Add goes to the display picked in the gallery, when there is a
+            # choice; with one display there is nothing to pick.
+            many = len(board.screens) > 1
+            assert (win.gallery.target() is None) == (not many)
+            assert win.gallery.where.isHidden() == (not many)
+            if many:
+                other = next(d for d in board.screens if not d.primary)
+                win.gallery.where.set_current(other.key)
+                tile = next(t for t in win.gallery.tiles if t.kind == "weather")
+                tile._add()
+                assert board.display_of(board.cards[-1]) == other, (
+                    "Add ignored the display picked for it")
+                win.desktop.select(board.cards[-1])
+                assert not win.desktop.inspector.where_row.isHidden()
+
+            # Presets: saving one starts naming it, Apply puts it back, Undo
+            # puts back what it replaced.
+            pp = win.presets
+            win.show_page("presets")
+            pp._save_new()
+            assert len(board.state.presets) == 1 and pp.rows[0]._editing, (
+                "saving a preset did not start naming it")
+            pp.rows[0].field.setText("Desk")
+            pp.rows[0]._commit()
+            assert board.state.presets[0].name == "Desk", board.state.presets[0].name
+            assert pp.rows[0].in_use, "a preset just saved isn't marked in use"
+            moved = board.cards[0]
+            home = (moved.x(), moved.y())
+            moved.move(home[0] + 60, home[1] + 40)
+            board._card_moved(moved)
+            assert not pp.rows[0].in_use, "a moved card left its preset marked in use"
+            pp.apply(board.state.presets[0])
+            assert (moved.x(), moved.y()) == home and pp.rows[0].in_use
+            win.toast_box._act()                 # Undo
+            assert (moved.x(), moved.y()) == (home[0] + 60, home[1] + 40)
+            board.save_preset("Evenings")
+            assert [r.preset.name for r in pp.rows] == ["Desk", "Evenings"]
+
             for theme in ("dark", "light"):
                 board.set_theme(theme)
-                for page in ("gallery", "desktop", "settings"):
+                for page in ("gallery", "desktop", "presets", "settings"):
                     win.show_page(page)
                     pump(0.6)
                     win.grab().save(os.path.join(out, f"_app_{theme}_{page}.png"))
@@ -757,10 +1139,10 @@ def _check_app_window() -> None:
             board.close_all()
     finally:
         WidgetCard.start = real_start
-    print("  app window: a tile per widget, Add places clear of other cards, "
-          "Remove and Undo round-trip, cut to the widgets' shape with a margin "
-          "that resizes and goes when maximised, wheel scrolling glides; pages in "
-          "_selftest/_app_*.png")
+    print("  app window: a tile per widget, Add places clear of other cards on the "
+          "display picked, Remove and Undo round-trip, presets save, rename, apply "
+          "and undo, cut to the widgets' shape with a margin that resizes and goes "
+          "when maximised, wheel scrolling glides; pages in _selftest/_app_*.png")
 
 
 def _check_audio_gate(pal) -> None:
@@ -958,8 +1340,36 @@ def _check_quiet(pal) -> None:
         assert painted.call_count == 2, "painting did not resume"
     card_mod.set_quiet(False)
     card.deleteLater()
-    print("  quiet mode: suppresses repaints, resumes cleanly, "
-          "no false positive on this desktop")
+
+    # A game covers one monitor: the cards on it go quiet, the ones beside it
+    # keep going - a board on the second screen is often the reason it's there.
+    from widgets.core import store
+    from widgets.core.card import WidgetCard
+
+    main, left = _desk()
+    real_start, real_full = WidgetCard.start, winapi.fullscreen_monitor
+    WidgetCard.start = lambda self: None
+    try:
+        with _sandboxed_layout(), _fake_displays([main, left]):
+            board = _quiet_board([
+                store.Placement("clock", "small", 100, 100, display=main.key,
+                                area=list(main.work)),
+                store.Placement("clock", "small", -1000, 100, display=left.key,
+                                area=list(left.work)),
+            ])
+            under, beside = board.cards
+            winapi.fullscreen_monitor = lambda: main.rect
+            board._check_fullscreen()
+            assert under.quiet and not beside.quiet, (
+                "a game on one monitor silenced the widgets on another")
+            winapi.fullscreen_monitor = lambda: None
+            board._check_fullscreen()
+            assert not under.quiet and not beside.quiet, "quiet did not lift"
+            board.close_all()
+    finally:
+        WidgetCard.start, winapi.fullscreen_monitor = real_start, real_full
+    print("  quiet mode: suppresses repaints, resumes cleanly, only under the "
+          "game's own monitor, no false positive on this desktop")
 
 
 def _check_ticks(pal) -> None:
@@ -1217,8 +1627,11 @@ def main() -> int:
         return 0 if ok else 1
     if "--reset" in args:
         from widgets.core import store, winapi
-        store.save(store.default_board(winapi.work_area()))
-        print("layout reset.")
+        # A reset forgets the layout, not the presets saved from it.
+        fresh = store.default_board(winapi.work_area())
+        fresh.presets = store.load().presets
+        store.save(fresh)
+        print("layout reset; presets kept." if fresh.presets else "layout reset.")
         return 0
     background = bool(args & BACKGROUND_FLAGS)
     if _already_running():
