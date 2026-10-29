@@ -18,8 +18,9 @@ Two ways in, tried in order, because neither is available everywhere:
 **WASAPI loopback** (needs ``PyAudioWPatch``) opens the output endpoint as if it
 were a microphone, which is the only way to get at the actual samples on Windows
 - the audio path runs player → mixer → device and never passes through us. With
-those samples an FFT gives a genuine spectrum, so the bars mean bass, mid and
-treble rather than just "loud".
+those samples an FFT gives a genuine spectrum, so the bars mean something
+rather than just "loud": the kick and bass on the left, the hi-hats on the
+right, and each bar jumping on the hits in its own part of the range.
 
 **The Core Audio peak meter** needs nothing installed at all - it is a COM
 interface every Windows machine has - but it reports one number, the current
@@ -48,27 +49,49 @@ from typing import List, Optional, Tuple
 
 BANDS = 5
 
-# Log-spaced and chosen by ear rather than by arithmetic: the first covers kick
-# and bass, the last covers cymbals and air. Even spacing puts four of five bars
-# in the mud, because energy in music is not spread evenly across the range.
-BAND_EDGES = (20.0, 130.0, 500.0, 2000.0, 6000.0, 16000.0)
+# Bass on the left to hi-hats on the right, log-spaced and set where a drum kit
+# and a bass line actually sit rather than by arithmetic: kick and sub-bass;
+# the bass line and the body of the kick; snare body, vocals and guitars; the
+# snare's crack and claps; hi-hats, cymbals and shakers. Even spacing puts four
+# of five bars in the mud, because energy in music is not spread evenly.
+BAND_EDGES = (30.0, 100.0, 300.0, 1500.0, 5000.0, 16000.0)
 
-# High frequencies carry far less energy than low ones, so an honest spectrum
-# looks like a slide. A tilt in dB per band evens the bars out, which is what
-# every music visualiser does.
-BAND_TILT_DB = (0.0, 2.5, 5.5, 8.5, 11.0)
-
-BLOCK = 1024              # ~21 ms at 48 kHz: fast enough to feel live
+BLOCK = 1024              # read size: ~21 ms at 48 kHz, ~47 readings a second
+WINDOW = 2048             # the bass bands are read over the last two blocks: one
+                          # block is 47 Hz a bin, which leaves the kick one bin
+LONG_BELOW = 300.0        # bands under this use the long window; the rest use one
+                          # block, which keeps a hi-hat's tick sharp
 DEVICE_CHECK = 2.0        # seconds between "is the default output still this?"
 RETRY_MIN = 0.5           # first pause after a source fails to open
 RETRY_MAX = 8.0           # and the ceiling it doubles up to
-FLOOR_DB = -68.0
-CEIL_DB = -12.0
 
-# Meter ballistics. Quick to rise, slower to fall - a bar that decays as fast as
-# it climbs reads as noise rather than as sound. Both are faster than a real VU
-# meter would use: this is five bars a centimetre tall, and honest ballistics at
-# that size just look like they are barely moving.
+# Turning band loudness into bar heights (Shaper). Each band is measured against
+# its own recent range, not one gain shared by all five: a hi-hat carries a
+# fraction of a kick's energy, so on a shared scale the treble bar barely moves
+# and the bass bar sits pinned. And it is the *change* that reads as music -
+# five bars that track loudness faithfully hover, because most music is about
+# equally loud from one moment to the next. So a band that jumps is shown as a
+# hit, at full height, whatever its level.
+SILENT_DB = -78.0         # band power under this is silence, not quiet music
+FLOOR_FALL = 0.30         # a band's floor drops straight to a quiet moment...
+FLOOR_RISE = 0.015        # ...and climbs back in about a second, so a held note
+                          # sinks and leaves the bar to the beats
+PEAK_FALL = 0.012         # its peak jumps to a new high and sinks over ~2 s
+MIN_SPAN_DB = 10.0        # never stretch less than this over a bar's height
+HIT_DB = 6.0              # a rise this much sharper than usual is a full hit...
+HIT_NEAR_DB = 24.0        # ...if it lands within this of the band's recent peak:
+                          # a click leaking into a quiet band is not a hit there
+FLUX_AVG = 0.06           # how fast "usual" adapts, so busy music isn't all hits
+CURVE = 1.6               # pushes middling levels down, so the hits stand out
+# Hits go straight up; the fall is quicker the higher the band, so the bass
+# thumps and the hats tick - and every bar is down again before the next beat.
+FALL = (0.24, 0.28, 0.32, 0.40, 0.48)
+
+# Ballistics for the peak meter, which has one level to share between the bars
+# rather than a spectrum. Quick to rise, slower to fall - a bar that decays as
+# fast as it climbs reads as noise rather than as sound. Both are faster than a
+# real VU meter would use: this is five bars a centimetre tall, and honest
+# ballistics at that size just look like they are barely moving.
 ATTACK = 0.80             # snap up onto a transient
 RELEASE = 0.22            # and come down in time for the next one
 
@@ -86,6 +109,91 @@ GAIN_FALL = 0.012
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return lo if v < lo else hi if v > hi else v
+
+
+class Analyser:
+    """Blocks of samples in, the loudness of each band out, in dB.
+
+    Two windows, because bass and treble want opposite things. The bass bands
+    are read over the last ``WINDOW`` samples - one block leaves the kick's
+    30-100 Hz a single FFT bin wide - and the rest over the newest block alone,
+    since a long window smears a hi-hat's tick into the gap before the next one.
+    A new reading arrives every block either way.
+    """
+
+    def __init__(self, rate: int) -> None:
+        import numpy as np
+        self.np = np
+        self.parts = []                 # (samples, window, scale, slice per band)
+        for size in (WINDOW, BLOCK):
+            window = np.hanning(size).astype(np.float32)
+            freqs = np.fft.rfftfreq(size, 1.0 / rate)
+            mine = [(i, np.where((freqs >= lo) & (freqs < hi))[0])
+                    for i, (lo, hi) in enumerate(zip(BAND_EDGES, BAND_EDGES[1:]))
+                    if (hi <= LONG_BELOW) == (size == WINDOW)]
+            # Scaled so a full-scale sine reads about 0 dB in either window.
+            self.parts.append((size, window, float(window.sum()) ** 2 / 2.0, mine))
+        self.buf = np.zeros(WINDOW, dtype=np.float32)
+
+    def feed(self, block) -> List[float]:
+        np = self.np
+        n = min(len(block), WINDOW)
+        self.buf = np.concatenate((self.buf[n:], np.asarray(block[-n:], np.float32)))
+        out = [-120.0] * BANDS
+        for size, window, scale, mine in self.parts:
+            power = np.abs(np.fft.rfft(self.buf[-size:] * window)) ** 2 / scale
+            for i, idx in mine:
+                if idx.size:
+                    out[i] = 10.0 * math.log10(float(power[idx].sum()) + 1e-12)
+        return out
+
+
+class Shaper:
+    """Band loudness in, bar heights (0..1) out.
+
+    Each band against its own recent range: a floor that drops straight to the
+    quiet moments and creeps back, and a peak that jumps to the loud ones and
+    sinks. On top, a band that has just risen sharply - a kick, a snare, a
+    hi-hat - is a hit and goes to full height, however loud it is. Then the bar
+    falls, quicker the higher the band. See the constants above.
+    """
+
+    def __init__(self, bands: int = BANDS) -> None:
+        self.bands = bands
+        self.reset()
+
+    def reset(self) -> None:
+        n = self.bands
+        self.floor: List[Optional[float]] = [None] * n
+        self.peak: List[Optional[float]] = [None] * n
+        self.prev: List[Optional[float]] = [None] * n
+        self.flux = [0.0] * n
+        self.out = [0.0] * n
+
+    def feed(self, db: List[float]) -> List[float]:
+        for i, d in enumerate(db[:self.bands]):
+            if d < SILENT_DB:
+                target = 0.0
+                self.prev[i] = None          # coming back from silence is a hit
+            else:
+                if self.floor[i] is None:
+                    self.floor[i], self.peak[i] = d - MIN_SPAN_DB, d
+                f = self.floor[i]
+                f += (d - f) * (FLOOR_FALL if d < f else FLOOR_RISE)
+                pk = self.peak[i]
+                pk = d if d > pk else pk + (d - pk) * PEAK_FALL
+                self.floor[i], self.peak[i] = f, pk
+                level = _clamp((d - f) / max(MIN_SPAN_DB, pk - f)) ** CURVE
+
+                prev, self.prev[i] = self.prev[i], d
+                rise = max(0.0, d - prev) if prev is not None else MIN_SPAN_DB
+                self.flux[i] += (rise - self.flux[i]) * FLUX_AVG
+                hit = _clamp((rise - self.flux[i]) / HIT_DB)
+                hit *= _clamp((d - (pk - HIT_NEAR_DB)) / (HIT_NEAR_DB / 2.0))
+                target = max(level, hit)
+            o = self.out[i]
+            self.out[i] = target if target > o else o + (target - o) * FALL[i]
+        return list(self.out)
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +315,7 @@ class AudioTap:
         self._levels: Tuple[float, ...] = tuple(0.0 for _ in range(bands))
         self._smooth: List[float] = [0.0] * bands
         self._gain = 1.0
+        self._shaper = Shaper(bands)        # the spectrum's; the meter uses _publish
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
@@ -271,6 +380,7 @@ class AudioTap:
 
     def _decay_to_silence(self) -> None:
         self._smooth = [0.0] * self.bands
+        self._shaper.reset()
         self._levels = tuple(0.0 for _ in range(self.bands))
 
     # -- source 1: real samples ----------------------------------------- #
@@ -305,13 +415,8 @@ class AudioTap:
                                 input_device_index=speakers["index"])
             self.kind = "spectrum"
             self.detail = speakers["name"]
-
-            window = np.hanning(BLOCK).astype(np.float32)
-            freqs = np.fft.rfftfreq(BLOCK, 1.0 / rate)
-            slices = [
-                np.where((freqs >= BAND_EDGES[i]) & (freqs < BAND_EDGES[i + 1]))[0]
-                for i in range(self.bands)
-            ]
+            analyser = Analyser(rate)
+            self._shaper.reset()
 
             next_check = time.monotonic() + DEVICE_CHECK
             heard = 0.0                  # loudest sample since the last check
@@ -353,13 +458,7 @@ class AudioTap:
                 peak = float(np.abs(block).max())
                 if peak > heard:
                     heard = peak
-                spec = np.abs(np.fft.rfft(block[:BLOCK] * window)) / BLOCK
-                raw_bands = []
-                for i, idx in enumerate(slices):
-                    mag = float(spec[idx].mean()) if idx.size else 0.0
-                    db = 20.0 * math.log10(mag + 1e-9) + BAND_TILT_DB[i]
-                    raw_bands.append(_clamp((db - FLOOR_DB) / (CEIL_DB - FLOOR_DB)))
-                self._publish(raw_bands)
+                self._levels = tuple(self._shaper.feed(analyser.feed(block[:BLOCK])))
             return False
         except Exception:
             # A device change or an exclusive-mode grab lands here. Reporting the

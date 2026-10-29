@@ -141,6 +141,7 @@ def selftest() -> int:
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
     _check_audio_gate(pal_mod.build("dark", "blue"))
+    _check_visualiser()
     _check_backend_recovery()
     _check_tls()
     _check_vendored_closure()
@@ -1301,6 +1302,92 @@ def _check_audio_gate(pal) -> None:
         f"bars do not settle in silence: {tap.levels()}")
     print(f"  audio gate: backs off ({len(calls)} opens in 4s, not a spin), "
           "and listens only while a track plays")
+
+
+def _check_visualiser() -> None:
+    """Now Playing's bars: bass on the left to hi-hats on the right, each one
+    hitting the beat in its own part of the range instead of hovering.
+
+    They used to sit on a 56 dB scale under one gain shared by all five, so the
+    bass pinned the first bar near the top and a hi-hat moved the last one about
+    a tenth of its height. Played a synthetic 120 BPM loop - kick, snare,
+    16th-note hats over a bass line - offline; no audio device is opened.
+    """
+    try:
+        import numpy as np
+    except Exception:
+        print("  visualiser: skipped, no numpy")
+        return
+    from widgets.core import audio
+
+    rate, block = 48000, audio.BLOCK
+    rng = np.random.default_rng(5)
+
+    def noise(n, lo, hi):
+        spec = np.fft.rfft(rng.standard_normal(n))
+        f = np.fft.rfftfreq(n, 1.0 / rate)
+        spec[(f < lo) | (f > hi)] = 0
+        x = np.fft.irfft(spec, n)
+        return (x / np.abs(x).max()).astype(np.float32)
+
+    def tone(hz, n):
+        return np.sin(2 * np.pi * hz * np.arange(n) / rate).astype(np.float32)
+
+    # Each part of the range lands in its own bar, left to right.
+    n = block * 4
+    parts = (("55 Hz", tone(55, n)), ("180 Hz", tone(180, n)), ("800 Hz", tone(800, n)),
+             ("2-4 kHz", noise(n, 2000, 4000)), ("7-14 kHz", noise(n, 7000, 14000)))
+    for want, (name, sig) in enumerate(parts):
+        an = audio.Analyser(rate)
+        for k in range(4):
+            db = an.feed(sig[k * block:(k + 1) * block])
+        got = max(range(audio.BANDS), key=lambda i: db[i])
+        assert got == want, f"{name} lit bar {got + 1}, not bar {want + 1}"
+
+    # A loop: kicks every half second, 16th-note hats, a bass line under both.
+    secs, beat = 4.0, 0.5
+    total = int(secs * rate)
+    mix = np.zeros(total, np.float32)
+    t = np.arange(total) / rate
+    mix += 0.25 * np.sin(2 * np.pi * np.where((t // 1.0) % 2, 73.4, 55.0) * t).astype(np.float32)
+    kick_len, hat_len = int(0.4 * rate), int(0.12 * rate)
+    tk = np.arange(kick_len) / rate
+    kick = (np.sin(2 * np.pi * np.cumsum(45 + 65 * np.exp(-tk / 0.03)) / rate)
+            * np.exp(-tk / 0.15)).astype(np.float32)
+    th = np.arange(hat_len) / rate
+    hat = noise(hat_len, 6500, 15000) * np.exp(-th / 0.025).astype(np.float32)
+    kicks = np.arange(0.0, secs, beat)
+    for at in kicks:
+        i = int(at * rate)
+        mix[i:i + kick_len] += 0.9 * kick[:total - i]
+    for at in np.arange(0.0, secs, beat / 4):
+        i = int(at * rate)
+        mix[i:i + hat_len] += 0.18 * hat[:total - i]
+    mix /= np.abs(mix).max() / 0.9
+
+    an, sh = audio.Analyser(rate), audio.Shaper()
+    levels = np.array([sh.feed(an.feed(mix[s:s + block]))
+                       for s in range(0, total - block, block)])
+    dt = block / rate
+
+    def mean_after(band, start, end):
+        rows = sorted({int((at + d) / dt) for at in kicks if at >= 1.0
+                       for d in np.arange(start, end, dt)})
+        return float(levels[[r for r in rows if r < len(levels)], band].mean())
+
+    hit, between = mean_after(0, 0.0, 0.06), mean_after(0, 0.30, 0.45)
+    assert hit > 0.6 and hit - between > 0.3, (
+        f"the kick bar doesn't hit the kicks: {hit:.2f} on them, {between:.2f} between")
+    settled = levels[int(1.0 / dt):]
+    travel = np.abs(np.diff(settled, axis=0)).sum(axis=0) / (len(settled) * dt)
+    assert travel[4] > 4.0, f"the hi-hat bar moves {travel[4]:.1f} heights a second"
+
+    for _ in range(60):
+        out = sh.feed(an.feed(np.zeros(block, np.float32)))
+    assert max(out) < 0.02, f"bars do not settle in silence: {out}"
+    print(f"  visualiser: bass to hats left to right; the kick bar hits {hit:.2f} on "
+          f"the kick and {between:.2f} between, the hat bar moves "
+          f"{travel[4]:.1f} heights a second; silence settles")
 
 
 def _check_session_pick() -> None:

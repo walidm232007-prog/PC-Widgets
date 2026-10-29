@@ -22,7 +22,7 @@ import math
 import threading
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
 )
@@ -47,6 +47,11 @@ VIZ_BARS = 5
 VIZ_SPEED = (5.1, 6.7, 4.3, 7.3, 5.9)      # deliberately not multiples
 VIZ_PHASE = (0.0, 1.7, 3.1, 4.6, 2.2)
 VIZ_RESTING = (0.30, 0.46, 0.62, 0.40, 0.26)   # where they sit when paused
+# The live bars redraw at the pace the tap reads the audio (~47 times a second)
+# on a timer of their own. The card's 25 fps tick is for its hover animation;
+# at that rate every other reading was never drawn, and a hi-hat lasts about
+# two of them.
+VIZ_FRAME_MS = 20
 
 # Polling. The session is read on its own thread, on its own clock - the tick
 # rate is for animation and is far too fast to ask the media API anything.
@@ -108,6 +113,10 @@ class MediaWidget(WidgetCard):
         self._viz_rect: Optional[QRectF] = None
         self._viz_backing: Optional[QImage] = None
         self._dirty = True
+        self._viz_timer = QTimer(self)
+        self._viz_timer.setTimerType(Qt.PreciseTimer)
+        self._viz_timer.setInterval(VIZ_FRAME_MS)
+        self._viz_timer.timeout.connect(self._viz_frame)
         # The tap reads what the speakers are playing. Opt-out lives in the
         # right-click menu and persists, because listening to the output - even
         # only to measure it - should be something you can switch off.
@@ -206,6 +215,16 @@ class MediaWidget(WidgetCard):
             return
         self._tap_on = want
         audio.listen(want)
+        if want:
+            self._viz_timer.start()
+        else:
+            self._viz_timer.stop()
+
+    def _viz_frame(self) -> None:
+        """Redraw the bars, and only the strip they sit in - a repaint of the
+        whole card would hand Windows the whole window again for five bars."""
+        if self._viz_rect is not None and not self._dirty:
+            self.update(self._viz_rect.toAlignedRect().adjusted(-1, -1, 1, 1))
 
     def on_start(self) -> None:
         if self._tap_wanted:
@@ -214,6 +233,7 @@ class MediaWidget(WidgetCard):
 
     def closeEvent(self, ev) -> None:
         self._stop_poll.set()
+        self._viz_timer.stop()
         if self._tap is not None:
             self._tap = None
             if self._tap_on:
@@ -312,11 +332,14 @@ class MediaWidget(WidgetCard):
         # Ask for the cheap repaint path whenever the bars have something to
         # show - which is exactly when a track is playing, and never otherwise.
         # It used to also animate on any sound the tap could hear, session or
-        # no session; that is what let a voice call drive them.
+        # no session; that is what let a voice call drive them. While the tap
+        # is open its own timer draws them, faster; this keeps the stand-in
+        # animation going when it isn't.
         if self._viz_rect is not None:
             self._viz_phase += self.refresh_ms / 1000.0
-            if self.np.playing and self.np.available and not self._dirty:
-                self.update()
+            if (self.np.playing and self.np.available
+                    and not self._viz_timer.isActive()):
+                self._viz_frame()
 
         # Watch the poller rather than trust it. If it dies or wedges, this is
         # the only thing that will notice - and last time nothing did, which is
@@ -452,6 +475,7 @@ class MediaWidget(WidgetCard):
             if self._tap_on:
                 self._tap_on = False
                 audio.listen(False)
+                self._viz_timer.stop()
             audio.release()
         self._sync_tap()             # switching it on mid-track starts it now
         self.changed.emit()          # persist the choice

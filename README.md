@@ -250,6 +250,19 @@ known shapes rather than an infinite number.
 Right-click **Stocks → Edit symbols** for the watchlist. The same endpoint serves
 equities, indices (`^GSPC`) and crypto (`BTC-USD`), so one list can mix them.
 
+**Now Playing's bars** are the sound actually leaving the speakers, split from
+bass on the left to hi-hats on the right: kick and sub-bass, the bass line,
+snare body and vocals, the snare's crack and claps, then hi-hats and cymbals
+(`widgets/core/audio.py`). Each bar is measured against its own recent range,
+not one level shared by all five - a hi-hat carries a fraction of a kick's
+energy, and on a shared scale the right-hand bar barely moved while the bass
+pinned the left one near the top. A band that jumps is a hit and goes straight
+to full height, then the bar falls, quicker the higher the band, so the bass
+thumps and the hats tick. The bass bands are read over a longer window than the
+rest: the kick needs the frequency resolution, and a hat needs its tick kept
+sharp. While a track plays, the bars redraw at the pace the audio is read,
+about 47 times a second, repainting only the strip they sit in.
+
 ## Workspace
 
 A building site with one bay per coding agent. A bay is warm, lit and busy while
