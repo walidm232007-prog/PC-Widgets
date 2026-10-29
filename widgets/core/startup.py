@@ -2,7 +2,8 @@
 startup.py
 ==========
 Shortcuts: one in the Startup folder so the board comes back when the PC does,
-and one on the Desktop so it can be launched or pinned like any other app.
+one on the Desktop and one in the Start menu so it can be launched, searched
+for or pinned like any other app.
 
 The Startup *folder* is used rather than a registry Run key or a scheduled
 task. All three work without admin, but only this one is somewhere the user can
@@ -39,9 +40,15 @@ def pythonw() -> str:
     return cand if os.path.exists(cand) else exe
 
 
-def startup_dir() -> str:
+def start_menu_dir() -> str:
+    """The user's own Start menu Programs folder - no admin needed, and what
+    the Start menu searches when you type the app's name."""
     return os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows",
-                        "Start Menu", "Programs", "Startup")
+                        "Start Menu", "Programs")
+
+
+def startup_dir() -> str:
+    return os.path.join(start_menu_dir(), "Startup")
 
 
 def desktop_dir() -> str:
@@ -54,6 +61,10 @@ def startup_link() -> str:
 
 def desktop_link() -> str:
     return os.path.join(desktop_dir(), LNK)
+
+
+def start_menu_link() -> str:
+    return os.path.join(start_menu_dir(), LNK)
 
 
 def app_link() -> str:
@@ -157,6 +168,17 @@ def create_desktop_shortcut() -> Optional[str]:
     if not os.path.isdir(desktop_dir()):
         return None
     return desktop_link() if _make_shortcut(desktop_link()) else None
+
+
+def has_start_menu_shortcut() -> bool:
+    return os.path.exists(start_menu_link())
+
+
+def create_start_menu_shortcut() -> Optional[str]:
+    """PC Widgets in the Start menu: found by typing its name, and pinnable to
+    Start or the taskbar. Opens the app window, like the desktop shortcut."""
+    os.makedirs(start_menu_dir(), exist_ok=True)
+    return start_menu_link() if _make_shortcut(start_menu_link()) else None
 
 
 def create_app_shortcut() -> Optional[str]:

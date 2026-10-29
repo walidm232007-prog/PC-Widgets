@@ -1768,7 +1768,7 @@ def main() -> int:
     # The shortcut flags combine - the README's "fix all three in one go" is
     # `--app --shortcut --install-startup` - so each one runs, then it exits.
     shortcut_flags = {"--install-startup", "--startup", "--autostart",
-                      "--remove-startup", "--shortcut", "--app"}
+                      "--remove-startup", "--shortcut", "--app", "--start-menu"}
     if args & shortcut_flags:
         from widgets.core import startup
         ok = True
@@ -1788,6 +1788,10 @@ def main() -> int:
             path = startup.create_app_shortcut()
             ok &= bool(path)
             print(f"launcher in folder: {path or 'FAILED'}")
+        if "--start-menu" in args:
+            path = startup.create_start_menu_shortcut()
+            ok &= bool(path)
+            print(f"start menu: {path or 'FAILED'}")
         return 0 if ok else 1
     if "--reset" in args:
         from widgets.core import store, winapi

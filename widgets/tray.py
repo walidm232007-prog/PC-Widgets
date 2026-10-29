@@ -202,6 +202,10 @@ class WidgetTray(QSystemTrayIcon):
         shortcut.triggered.connect(self._desktop_shortcut)
         m.addAction(shortcut)
 
+        start_menu = QAction("Add to Start menu", m)
+        start_menu.triggered.connect(self._start_menu)
+        m.addAction(start_menu)
+
         folder = QAction("Open widgets folder", m)
         folder.triggered.connect(self._open_folder)
         m.addAction(folder)
@@ -296,6 +300,14 @@ class WidgetTray(QSystemTrayIcon):
             "PC Widgets",
             f"Shortcut created: {path}" if path
             else "Couldn't create the desktop shortcut.",
+            self.icon(), 4000)
+
+    def _start_menu(self) -> None:
+        path = startup.create_start_menu_shortcut()
+        self.showMessage(
+            "PC Widgets",
+            "PC Widgets is in your Start menu." if path
+            else "Couldn't add it to the Start menu.",
             self.icon(), 4000)
 
     def _open_folder(self) -> None:

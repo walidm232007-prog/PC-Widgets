@@ -1592,6 +1592,10 @@ class SettingsPage(QWidget):
         app.add(setting_row("link", "#0a84ff", "Desktop shortcut",
                             "A PC Widgets icon on your desktop.",
                             Button("Create", "secondary", slot=self._shortcut)), self.INSET)
+        self.start_menu = Button("Add", "secondary", slot=self._start_menu)
+        app.add(setting_row("gallery", "#5e5ce6", "Start menu",
+                            "Find PC Widgets by typing its name, or pin it to Start.",
+                            self.start_menu), self.INSET)
         app.add(setting_row("save", "#34c759", "Save layout now",
                             "It saves as you go - this is for peace of mind.",
                             Button("Save", "secondary", slot=self._save)), self.INSET)
@@ -1632,6 +1636,7 @@ class SettingsPage(QWidget):
         self.snap.set_quietly(s.snap)
         self.lock.set_quietly(s.locked)
         self.boot.set_quietly(startup.is_enabled())
+        self.start_menu.setText("Update" if startup.has_start_menu_shortcut() else "Add")
         if s.layer == "top":
             self.peek.setText("Always on top")
             self.peek.setEnabled(False)
@@ -1661,6 +1666,13 @@ class SettingsPage(QWidget):
                       lambda path: self.win.toast("Shortcut added to your desktop."
                                                   if path else
                                                   "Couldn't create the shortcut."))
+
+    def _start_menu(self) -> None:
+        def done(path) -> None:
+            self.sync()
+            self.win.toast("PC Widgets is in your Start menu." if path
+                           else "Couldn't add it to the Start menu.")
+        in_background(startup.create_start_menu_shortcut, done)
 
     def _save(self) -> None:
         from ..core import store

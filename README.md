@@ -15,11 +15,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
-That is the whole install. Then, optionally, make yourself launchers and have it
-start with Windows:
+That is the whole install. Then, optionally, make yourself launchers - in this
+folder, on the Desktop and in the Start menu - and have it start with Windows:
 
 ```bash
-python main.py --app --shortcut --install-startup
+python main.py --app --shortcut --start-menu --install-startup
 ```
 
 The shortcuts are not in the repository — a Windows `.lnk` stores an absolute
@@ -162,20 +162,23 @@ wide.
 ## Starting with Windows
 
 **Start with Windows** in the tray menu toggles it, and **Add desktop shortcut**
-makes another launcher. Or from a terminal:
+and **Add to Start menu** make more launchers - the Start menu one is also under
+Settings, and is how PC Widgets turns up when you type its name into Start, or
+gets pinned there. Or from a terminal:
 
 ```bash
 python main.py --install-startup
 ```
 
-`--remove-startup` undoes it, `--shortcut` makes the desktop one, and `--app`
-recreates the launcher in this folder.
+`--remove-startup` undoes it, `--shortcut` makes the desktop one, `--start-menu`
+the Start menu one (in your own Start menu folder, so no admin is needed), and
+`--app` recreates the launcher in this folder.
 
 The launchers are Windows shortcuts, so they store an **absolute** path. If you
-move or rename the project folder, fix all three in one go:
+move or rename the project folder, fix them all in one go:
 
 ```bash
-python main.py --app --shortcut --install-startup
+python main.py --app --shortcut --start-menu --install-startup
 ```
 
 `run.bat` is relative and survives a move, so it always works as a fallback.
