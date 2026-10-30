@@ -132,6 +132,29 @@ License (PSF-2.0)**, licence text kept in its `dist-info/licenses/`. Required by
 
 Everything else that talks to Windows goes through `ctypes` against the OS itself.
 
+## AirDrop core — `zeroconf` and `cryptography`  *(not distributed here)*
+
+`airdrop/` runs where Apple Wireless Direct Link exists - a Mac, or Linux under
+OWL (inside WSL2 on Windows) - and needs two packages there, installed with
+`pip install -r airdrop/requirements.txt`. The board itself imports neither.
+
+- **python-zeroconf** <https://github.com/python-zeroconf/python-zeroconf> —
+  **LGPL-2.1**. Bonjour on the AWDL link. Used as a library, unmodified, and not
+  shipped in this repository, so as with Qt no LGPL obligation is triggered. Its
+  dependency `ifaddr` is MIT.
+- **cryptography** <https://github.com/pyca/cryptography> — **Apache-2.0 or
+  BSD-3-Clause**, at the user's choice. Makes this machine's self-signed TLS
+  certificate.
+
+**OpenDrop and OWL** (<https://github.com/seemoo-lab>, TU Darmstadt) are
+**GPL-3.0**, and none of their code is here. OpenDrop was run, separately and
+outside this repository, to learn how AirDrop behaves on current iOS; the core
+was written from recordings of a real iPhone. OWL is the intended AWDL link on
+Linux and runs as its own program, not part of this one.
+
+**AirDrop** is a trademark of Apple Inc., used only to say what this
+interoperates with. The widget will not be called AirDrop.
+
 ## Visual design
 
 The look is modelled on Apple's iOS and macOS widgets. Copying a visual idiom is

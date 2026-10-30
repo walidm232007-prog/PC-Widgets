@@ -668,6 +668,57 @@ draw. `label`, `text`, `bar` and the palette are provided; add it to
 anything, give it sample data in `widgets/core/samples.py` so its gallery
 preview isn't an empty card.
 
+## AirDrop (in progress)
+
+**Real AirDrop, not a lookalike:** the Drop widget will send files to an
+iPhone, iPad or Mac and take files from one, through AirDrop itself, with
+nothing to install on the Apple side. `airdrop/` is its protocol core, and it
+works: on a Mac it has sent photos to an iPhone on iOS 27 and received one back.
+The widget, and the Windows side of the radio, are still to come.
+
+AirDrop isn't a network protocol your router carries. It runs over Apple
+Wireless Direct Link (AWDL), a Wi-Fi link straight between the two devices, so
+the core runs wherever AWDL exists: built into every Mac, and on Linux under
+[OWL](https://github.com/seemoo-lab/owl), an open reimplementation. On Windows
+that means inside WSL2, with a USB Wi-Fi adapter handed to it, while the board
+talks to it from the Windows side - the next milestone. That is also why it is
+plain Python with no Qt, beside `agents/` rather than inside `widgets/`.
+
+```bash
+pip install -r airdrop/requirements.txt
+python -m airdrop.selftest
+python -m airdrop find
+python -m airdrop send "Sam’s iPhone" photo.jpg
+python -m airdrop receive --inbox ~/Downloads
+```
+
+**What it takes on the other side.** The iPhone has to be in **Everyone for 10
+Minutes** (Contacts Only needs Apple-signed records nothing else can have),
+with its screen on, and woken: an idle iPhone keeps its AirDrop receiver off
+until a nearby sender's Bluetooth LE advertisement says someone wants to share.
+On a Mac, `send` opens Finder's AirDrop window, which sends it; a PC will have
+to send it itself.
+
+**Written from a real iPhone, not from OpenDrop.** OpenDrop, the research
+implementation everyone points at, stopped being able to send around iOS 16 -
+an iPhone on iOS 27 reads its upload to the end and hangs up - and it is GPL,
+which this app isn't. So an iPhone was recorded sending to a receiver that kept
+everything it was given, and this does what it does: an Ask with a
+`TransferID` and each file's size, and an upload in `application/x-dvzip`, the
+same cpio archive cut into 128 KiB blocks that are each zlib'd or stored as
+they are. The module docstrings carry the details.
+
+**Receiving takes nothing on trust,** because in Everyone mode anybody nearby
+can send. The server answers only connections that come in over the AWDL link,
+asks before accepting every time, and takes an upload only if it follows an
+accepted Ask with that Ask's `TransferID`. Unpacking refuses absolute paths,
+`..`, links and devices, any name that wasn't accepted, and more data than was
+offered; it writes into a staging folder and moves into the inbox only once the
+archive is whole, never over anything already there. The Apple metadata files
+(`._name`) an iPhone sends beside some photos are checked and dropped. The
+selftest tries ten kinds of hostile archive and asserts each leaves nothing
+behind.
+
 ## Licence and credits
 
 MIT — see [LICENSE](LICENSE). Third-party terms are set out in
@@ -685,8 +736,12 @@ MIT — see [LICENSE](LICENSE). Third-party terms are set out in
 - **The stocks widget reads an undocumented Yahoo Finance endpoint**, which is
   against their terms of service and can break without warning. Swap it if that
   matters to you — THIRD-PARTY.md lists alternatives.
+- **The AirDrop core** needs `zeroconf` (LGPL-2.1) and `cryptography`
+  (Apache-2.0 / BSD), installed from PyPI where it runs, not redistributed here.
+  None of OpenDrop's GPL code is used.
 
-Not affiliated with, authorised by, or endorsed by Apple.
+Not affiliated with, authorised by, or endorsed by Apple. AirDrop is Apple's
+trademark, named here only to say what this works with.
 
 ## Before publishing
 

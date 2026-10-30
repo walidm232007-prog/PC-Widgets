@@ -1,0 +1,14 @@
+# The AirDrop core - airdrop/ - runs where Apple Wireless Direct Link exists:
+# on a Mac, or on Linux under OWL (inside WSL2 on Windows). The board itself
+# doesn't import it and still needs nothing but PySide6.
+#
+#   pip install -r airdrop/requirements.txt
+
+zeroconf>=0.132      # Bonjour on the AWDL link. LGPL-2.1, used unmodified.
+cryptography>=42     # makes this machine's self-signed TLS certificate. Apache-2.0 / BSD.
+
+# --- optional -------------------------------------------------------------- #
+# A thumbnail in the receiver's prompt when sending a photo. Without it the
+# prompt shows a generic file icon.
+#
+#   Pillow>=10
