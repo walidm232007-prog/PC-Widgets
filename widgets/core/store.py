@@ -99,6 +99,7 @@ class BoardState:
     dock_music_side: str = "left"
     dock_replace_taskbar: bool = True
     dock_pins: List[str] = field(default_factory=list)
+    dock_hidden: List[str] = field(default_factory=list)   # taskbar pins removed from the dock
     placements: List[Placement] = field(default_factory=list)
     # Every display a widget belongs to, connected or not: its name, bounds and
     # work area, by device path - how one that is unplugged is still named, and
