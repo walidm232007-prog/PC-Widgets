@@ -1583,6 +1583,33 @@ class SettingsPage(QWidget):
                              "Show every widget over your windows - or press Ctrl+Alt+W.",
                              self.peek), self.INSET)
 
+        dock = self._group(col, "Glass Dock")
+        self.dock_enabled = Switch()
+        self.dock_enabled.toggled.connect(lambda on: board.set_dock("enabled", on))
+        dock.add(setting_row("desktop", "#5e5ce6", "Floating dock",
+                             "Apps, music and Windows controls on your main display.",
+                             self.dock_enabled), self.INSET)
+        self.dock_style = Segmented((("glass", "Frosted glass"), ("solid", "Solid colour")))
+        self.dock_style.changed.connect(lambda v: board.set_dock("style", v))
+        dock.add(setting_row("drop", "#0a84ff", "Dock material",
+                             "Glass uses the wallpaper and glass strength above.",
+                             self.dock_style), self.INSET)
+        dock.add(setting_row("halfcircle", "#bf5af2", "Dock colour",
+                             "Choose a tint or solid fill. Right-click the dock to reset.",
+                             Button("Choose…", "secondary", slot=self._dock_colour)), self.INSET)
+        self.dock_music = Segmented((("left", "Left"), ("right", "Right")))
+        self.dock_music.changed.connect(lambda v: board.set_dock("music_side", v))
+        dock.add(setting_row("sliders", "#30b0c7", "Music position",
+                             "Now Playing and live audio waves.", self.dock_music), self.INSET)
+        self.dock_replace = Switch()
+        self.dock_replace.toggled.connect(lambda on: board.set_dock("replace_taskbar", on))
+        dock.add(setting_row("layers", "#ff9f0a", "Replace Windows taskbar",
+                             "Restored when the dock is off. The arrow reveals all tray icons.",
+                             self.dock_replace), self.INSET)
+        dock.add(setting_row("plus", "#30d158", "Pinned apps",
+                             "Right-click a dock app to pin or unpin it.",
+                             Button("Add…", "secondary", slot=self._dock_pin)), self.INSET)
+
         app = self._group(col, "App")
         self.boot = Switch()
         self.boot.toggled.connect(self._set_startup)
@@ -1635,6 +1662,10 @@ class SettingsPage(QWidget):
         self.layer_row.desc.setText(LAYER_TEXT.get(s.layer, ""))
         self.snap.set_quietly(s.snap)
         self.lock.set_quietly(s.locked)
+        self.dock_enabled.set_quietly(s.dock_enabled)
+        self.dock_style.set_current(s.dock_style)
+        self.dock_music.set_current(s.dock_music_side)
+        self.dock_replace.set_quietly(s.dock_replace_taskbar)
         self.boot.set_quietly(startup.is_enabled())
         self.start_menu.setText("Update" if startup.has_start_menu_shortcut() else "Add")
         if s.layer == "top":
@@ -1645,6 +1676,14 @@ class SettingsPage(QWidget):
             self.peek.setText("Send back" if self.win.board.peeked else "Bring to front")
 
     # -- actions --------------------------------------------------------- #
+    def _dock_colour(self) -> None:
+        if self.win.board.dock is not None:
+            self.win.board.dock.choose_color()
+
+    def _dock_pin(self) -> None:
+        if self.win.board.dock is not None:
+            self.win.board.dock.add_pin()
+
     def _set_startup(self, on: bool) -> None:
         self.boot.setEnabled(False)
 

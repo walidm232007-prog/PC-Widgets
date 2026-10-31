@@ -103,6 +103,7 @@ class Board(QObject):
         self._spotlit: Set[WidgetCard] = set()
         self._holding = 0               # mid-way through a change of many cards
         self._closed = False
+        self.dock = None
 
         # The monitors, as of the last look; every card is placed against
         # these. Plugging one in or out arrives as a burst of changes - a screen
@@ -178,6 +179,10 @@ class Board(QObject):
         if wanted and not self.cards:
             print(f"warning: {wanted} saved widget(s) could not be created; "
                   f"layout left untouched")
+
+        from ..ui.dock import GlassDock
+        if self.dock is None:
+            self.dock = GlassDock(self)
 
     def _make(self, pl: Placement) -> Optional[WidgetCard]:
         """A card for a placement, set up but not yet placed or shown."""
@@ -817,6 +822,30 @@ class Board(QObject):
     # ------------------------------------------------------------------ #
     #  Appearance and layering
     # ------------------------------------------------------------------ #
+    def set_dock(self, key: str, value) -> None:
+        """Dock preferences use the same save and notification path as cards."""
+        if key in ("enabled", "replace_taskbar"):
+            value = bool(value)
+        elif key == "style":
+            if value not in ("glass", "solid"):
+                return
+        elif key == "music_side":
+            if value not in ("left", "right"):
+                return
+        elif key == "color":
+            from PySide6.QtGui import QColor
+            if value and not QColor(value).isValid():
+                return
+        elif key == "pins":
+            if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+                return
+            value = list(dict.fromkeys(value))
+        else:
+            return
+        setattr(self.state, "dock_" + key, value)
+        self.persist()
+        self.prefs_changed.emit()
+
     def set_theme(self, theme: str) -> None:
         self.state.theme = theme
         self.palette = build_palette(theme, self.state.accent)
@@ -957,6 +986,8 @@ class Board(QObject):
 
     # ------------------------------------------------------------------ #
     def close_all(self) -> None:
+        if self.dock is not None:
+            self.dock.shutdown()
         self._park.stop()
         self._glass_timer.stop()
         self._autosave.stop()

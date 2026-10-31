@@ -93,6 +93,12 @@ class BoardState:
     glass: bool = True              # frosted wallpaper behind each card
     glass_tint: int = 112           # alpha of the tint over the blur
     close_hint_shown: bool = False  # "closing the window keeps the widgets", said once
+    dock_enabled: bool = False      # opt in; ordinary desktop layout stays intact
+    dock_style: str = "glass"       # glass | solid, independent of the cards
+    dock_color: str = ""            # empty follows the board's light/dark theme
+    dock_music_side: str = "left"
+    dock_replace_taskbar: bool = True
+    dock_pins: List[str] = field(default_factory=list)
     placements: List[Placement] = field(default_factory=list)
     # Every display a widget belongs to, connected or not: its name, bounds and
     # work area, by device path - how one that is unplugged is still named, and
