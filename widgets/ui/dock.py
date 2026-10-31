@@ -11,6 +11,7 @@ re-entered paint.
 from __future__ import annotations
 
 import itertools
+import math
 import os
 import threading
 import time
@@ -31,6 +32,7 @@ from .theme import paint_shadow
 # Sizes at 100% scaling; all of them are multiplied by the display's scale.
 WINDOW_H = 64       # the window: the capsule, the gap under it and room for its shadow
 TOP, BAR_H = 4, 52  # the capsule inside it, floating 8 px above the screen's edge
+NEON_TOP = 14       # more room above it while a neon glow has to fit
 SIDE = 16           # transparent room left and right, for the shadow
 RADIUS = 12
 PAD = 4             # inside the capsule, before the first plate
@@ -109,6 +111,177 @@ def _tile(x: float, y: float, s: float, r: float, col: int, row: int) -> QPainte
         path.lineTo(x, y + s)
     path.closeSubpath()
     return path
+
+
+# --------------------------------------------------------------------------- #
+#  Neon outline
+# --------------------------------------------------------------------------- #
+NEON_PRESETS = (("Cyber", ["#00e5ff", "#ff2bd6"]), ("Cyan", ["#00e5ff"]),
+                ("Magenta", ["#ff2bd6"]), ("Aurora", ["#21ffb2", "#00c3ff", "#9d4bff"]),
+                ("Sunset", ["#ffb000", "#ff2e63"]), ("Fire", ["#ffd000", "#ff3c00"]),
+                ("Toxic", ["#b6ff00"]), ("Ice", ["#e6f9ff", "#38bdf8"]))
+NEON_MOTIONS = (("static", "Static"), ("fade", "Fade"), ("circulate", "Circulate"))
+NEON_STRENGTHS = (("25", "Subtle"), ("50", "Medium"), ("75", "Bright"), ("100", "Intense"))
+FADE_S, LAP_S = 3.0, 6.0        # a breath in and out; one lap of the dock
+
+
+class NeonRing:
+    """A neon tube round the dock: a hot, near-white core on the outline and a
+    bloom of its colour, still, fading in and out, or running round.
+
+    The colour is laid along the outline itself, by distance travelled round
+    it, not by angle from the centre. On a bar fifteen times wider than tall,
+    angle crawls along the long edges and races round the ends.
+
+    The glow is a real blur, built once per size and strength. A frame then
+    only re-colours the pixels the glow covers - a lookup and a multiply - so
+    Circulate costs about a millisecond a frame, and Static and Fade nothing
+    beyond the first.
+    """
+    LUT = 720
+
+    def __init__(self):
+        self._geo_key = self._geo = None
+        self._lut_key = self._lut = None
+        self._still = (None, None)
+
+    def frame(self, size, capsule, radius, s, colours, motion, strength, t):
+        try:
+            import numpy as np
+        except ImportError:
+            return self._plain(size, capsule, radius, s, colours, motion, t)
+        geo = self._geometry(np, size, capsule, radius, s, strength)
+        lut = self._colours(np, colours, motion)
+        if motion == "fade":
+            level = 0.3 + 0.7 * (0.5 - 0.5 * np.cos(2 * np.pi * t / FADE_S))
+        else:
+            level = 1.0
+        shift = int((t / LAP_S % 1.0) * self.LUT) if motion == "circulate" else 0
+        key = (geo["key"], self._lut_key, round(level, 3), shift)
+        if self._still[0] == key:
+            return self._still[1]
+        idx = (geo["u"] - shift) % self.LUT
+        rgba = lut[idx]
+        a = geo["alpha"] * rgba[:, 3] * level
+        core = geo["core"][:, None]
+        rgb = rgba[:, :3] * (1.0 - core) + 255.0 * core     # the tube's hot centre
+        out = np.zeros((geo["h"] * geo["w"], 4), np.uint8)
+        act = geo["act"]
+        out[act, 0] = (rgb[:, 2] * a).astype(np.uint8)          # premultiplied BGRA
+        out[act, 1] = (rgb[:, 1] * a).astype(np.uint8)
+        out[act, 2] = (rgb[:, 0] * a).astype(np.uint8)
+        out[act, 3] = (a * 255.0).astype(np.uint8)
+        img = QImage(out.tobytes(), geo["w"], geo["h"], geo["w"] * 4,
+                     QImage.Format_ARGB32_Premultiplied).copy()
+        self._still = (key, img)
+        return img
+
+    def _geometry(self, np, size, capsule, radius, s, strength):
+        w, h = size.width(), size.height()
+        key = (w, h, capsule.x(), capsule.y(), capsule.width(), capsule.height(),
+               round(radius, 2), round(s, 3), strength)
+        if key == self._geo_key:
+            return self._geo
+        from .theme import _blur_alpha
+        k = max(0.1, min(1.0, strength / 100.0))
+
+        def alpha_of(paint):
+            img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing)
+            paint(p)
+            p.end()
+            raw = np.frombuffer(img.constBits(), np.uint8, count=img.bytesPerLine() * h)
+            return raw.reshape(h, img.bytesPerLine())[:, 3:w * 4:4].astype(np.float32) / 255.0
+
+        def tube(p):
+            p.setPen(QPen(QColor(255, 255, 255), (1.3 + 0.9 * k) * s))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(squircle(capsule, radius))
+
+        def inside(p):
+            p.fillPath(squircle(capsule, radius), QColor(255, 255, 255))
+
+        core = alpha_of(tube)
+        glow = _blur_alpha(core * 255.0, max(1, round((1.5 + 2.5 * k) * s))) / 255.0
+        glow *= 1.0 - 0.8 * alpha_of(inside)       # it shines out; inside, the glass hides it
+        alpha = np.clip(glow * (1.2 + 2.6 * k) + core, 0.0, 1.0)
+        act = np.flatnonzero(alpha.ravel() > 0.004)
+        ys, xs = np.divmod(act, w)
+        u = _perimeter(np, xs + 0.5, ys + 0.5, capsule, min(radius * 1.5286, capsule.height() / 2))
+        self._geo = {"key": key, "w": w, "h": h, "act": act,
+                     "u": (u * self.LUT).astype(np.int32) % self.LUT,
+                     "alpha": alpha.ravel()[act], "core": core.ravel()[act] * 0.55}
+        self._geo_key = key
+        return self._geo
+
+    def _colours(self, np, colours, motion):
+        key = (tuple(colours), motion)
+        if key == self._lut_key:
+            return self._lut
+        n = self.LUT
+        cols = [QColor(c) for c in colours] or [QColor("#00e5ff")]
+        rgb = np.array([[c.red(), c.green(), c.blue()] for c in cols], np.float32)
+        pos = np.arange(n, dtype=np.float32) / n
+        lut = np.ones((n, 4), np.float32)
+        if len(cols) == 1:
+            lut[:, :3] = rgb[0]
+            if motion == "circulate":
+                # One colour circulating is a comet: a bright head, a tail
+                # fading behind it, and the rest of the ring left dim.
+                # The head brightens over a short run instead of starting
+                # at full strength, or it showed as a hard edge.
+                behind = (1.0 - pos) % 1.0
+                lut[:, 3] = 0.12 + 0.88 * np.exp(-behind * 2.6) * (1.0 - np.exp(-behind / 0.02))
+        else:
+            stops = np.linspace(0.0, 1.0, len(cols) + 1)    # back round to the first
+            ring = np.vstack([rgb, rgb[:1]])
+            for ch in range(3):
+                lut[:, ch] = np.interp(pos, stops, ring[:, ch])
+        self._lut, self._lut_key = lut, key
+        self._still = (None, None)
+        return lut
+
+    def _plain(self, size, capsule, radius, s, colours, motion, t):
+        """Without numpy: the tube and a stepped glow in the first colour."""
+        img = QImage(size, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QColor(colours[0] if colours else "#00e5ff")
+        if motion == "fade":
+            p.setOpacity(0.3 + 0.7 * (0.5 - 0.5 * math.cos(2 * math.pi * t / FADE_S)))
+        for width, alpha in ((9, 30), (5, 70), (2, 255)):
+            c.setAlpha(alpha)
+            p.setPen(QPen(c, width * s))
+            p.drawPath(squircle(capsule, radius))
+        p.end()
+        return img
+
+
+def _perimeter(np, x, y, rect, r):
+    """How far round a rounded rectangle's outline each point sits, 0..1,
+    clockwise from the top edge's left end - measured to its nearest point."""
+    x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
+    top, side = max(0.0, (x1 - x0) - 2 * r), max(0.0, (y1 - y0) - 2 * r)
+    arc = np.pi * r / 2
+    cx, cy = np.clip(x, x0 + r, x1 - r), np.clip(y, y0 + r, y1 - r)
+    dx, dy = x - cx, y - cy
+    flat = (dx == 0) & (dy == 0)            # inside the straight part: the nearer long edge
+    dy = np.where(flat, np.where(y < (y0 + y1) / 2, -1.0, 1.0), dy)
+    pos = np.zeros_like(x, dtype=np.float64)
+    right, left, up, down = dx > 0, dx < 0, dy < 0, dy > 0
+    straight_x, straight_y = dx == 0, dy == 0
+    pos = np.where(straight_x & up, x - (x0 + r), pos)
+    pos = np.where(right & up, top + r * np.arctan2(dx, -dy), pos)
+    pos = np.where(right & straight_y, top + arc + (y - (y0 + r)), pos)
+    pos = np.where(right & down, top + arc + side + r * np.arctan2(dy, dx), pos)
+    pos = np.where(straight_x & down, top + 2 * arc + side + ((x1 - r) - x), pos)
+    pos = np.where(left & down, 2 * top + 2 * arc + side + r * np.arctan2(-dx, dy), pos)
+    pos = np.where(left & straight_y, 2 * top + 3 * arc + side + ((y1 - r) - y), pos)
+    pos = np.where(left & up, 2 * top + 3 * arc + 2 * side + r * np.arctan2(-dy, -dx), pos)
+    return (pos / (2 * top + 2 * side + 4 * arc)) % 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -352,6 +525,12 @@ class GlassDock(QWidget):
         self._tray_timer = QTimer(self)
         self._tray_timer.setInterval(250)
         self._tray_timer.timeout.connect(self._refresh)
+        self._neon = NeonRing()
+        self._neon_img = None
+        self._neon_timer = QTimer(self)
+        self._neon_timer.setInterval(33)
+        self._neon_timer.setTimerType(Qt.PreciseTimer)
+        self._neon_timer.timeout.connect(self._neon_tick)
         self._running = False
         self._listening = False
         self._stop = None
@@ -381,6 +560,7 @@ class GlassDock(QWidget):
     # -- lifecycle -------------------------------------------------------- #
     def invalidate(self):
         self._static = None
+        self._neon_img = None
         self.update()
 
     def sync(self):
@@ -400,6 +580,7 @@ class GlassDock(QWidget):
         self._fonts = None
         self.invalidate()
         self._refresh()
+        self._sync_neon()
 
     def _start(self):
         self._running = True
@@ -433,6 +614,7 @@ class GlassDock(QWidget):
         self._soon.stop()
         self._tray_timer.stop()
         self._tray_since = 0.0
+        self._neon_timer.stop()
         self.hide()
         if self._workarea is not None:
             self._workarea.release()
@@ -558,10 +740,41 @@ class GlassDock(QWidget):
             self.show()
             if self._listening:
                 self._frame.start()
+        self._sync_neon()
 
     def _conceal(self):
         self.hide()
         self._frame.stop()
+        self._neon_timer.stop()
+
+    def _top(self):
+        return NEON_TOP if self.board.state.dock_neon else TOP
+
+    def _sync_neon(self):
+        """The neon only animates while it shows, moves, and the dock is up."""
+        state = self.board.state
+        moving = state.dock_neon and state.dock_neon_motion != "static" and \
+            self.isVisible() and self._running
+        if moving and not self._neon_timer.isActive():
+            self._neon_timer.start()
+        elif not moving:
+            self._neon_timer.stop()
+
+    def _neon_tick(self):
+        self._neon_img = None
+        self.update()
+
+    def _neon_frame(self):
+        """The current neon layer, or None. Recomputed once per tick, so the
+        bars' 50 fps repaints just draw it again."""
+        state = self.board.state
+        if not state.dock_neon or self._capsule.isEmpty():
+            return None
+        if self._neon_img is None:
+            self._neon_img = self._neon.frame(
+                self.size(), self._capsule, RADIUS * self._s, self._s, state.dock_neon_colors,
+                state.dock_neon_motion, state.dock_neon_strength, time.monotonic())
+        return self._neon_img
 
     def _place(self, screen=None):
         screen = screen or QApplication.primaryScreen()
@@ -576,7 +789,7 @@ class GlassDock(QWidget):
         g = screen.geometry()
         monitor = (g.x(), g.y(), g.x() + g.width(), g.y() + g.height())
         width = self._relayout(g.width() - round(48 * s))
-        height = round(WINDOW_H * s)
+        height = round((self._top() + WINDOW_H - TOP) * s)
         bar = self.lease.hwnd or shell.taskbar()
         # In place of the taskbar the dock sits at the screen's edge; beside it,
         # just above it. Either way maximised windows stop at the dock's top.
@@ -674,7 +887,8 @@ class GlassDock(QWidget):
         natural = fixed + music + len(row) * PLATE
         width = round(natural * s)
         ox = max(0.0, (self.width() - width) / 2) if self.preview else 0.0
-        y, h = round((TOP + (BAR_H - PLATE) / 2) * s), round(PLATE * s)
+        top = self._top()
+        y, h = round((top + (BAR_H - PLATE) / 2) * s), round(PLATE * s)
         items, seps = [], []
         cursor = SIDE + PAD
 
@@ -704,7 +918,7 @@ class GlassDock(QWidget):
             cursor += 2 if i else 0
             put(ident, w)
         self._items, self._seps, self._music_wide = items, seps, music == MUSIC_WIDE
-        self._capsule = QRectF(round(ox + SIDE * s), round(TOP * s),
+        self._capsule = QRectF(round(ox + SIDE * s), round(top * s),
                                width - 2 * round(SIDE * s), round(BAR_H * s))
         m = next(r for i, r, _ in items if i == "music")
         bw = round(3 * s) * BARS + round(2 * s) * (BARS - 1)
@@ -727,6 +941,9 @@ class GlassDock(QWidget):
             self._static = self._render()
         p = QPainter(self)
         p.drawPixmap(0, 0, self._static)
+        neon = self._neon_frame()
+        if neon is not None:
+            p.drawImage(0, 0, neon)
         if self._np.available and not self._bars.isEmpty():
             self._paint_bars(p)
         p.end()
@@ -1163,9 +1380,61 @@ class GlassDock(QWidget):
             menu.addAction("Use theme colour", lambda: self.board.set_dock("color", ""))
         side = "right" if state.dock_music_side == "left" else "left"
         menu.addAction(f"Move music to the {side}", lambda: self.board.set_dock("music_side", side))
+        self._neon_menu(menu.addMenu("Neon outline"))
         menu.addSeparator()
         menu.addAction("Show Windows taskbar", self.reveal_taskbar)
         menu.addAction("Turn off Glass Dock", lambda: self.board.set_dock("enabled", False))
+
+    def _neon_menu(self, menu):
+        state = self.board.state
+        on = menu.addAction("Neon outline")
+        on.setCheckable(True)
+        on.setChecked(state.dock_neon)
+        on.triggered.connect(lambda checked: self.board.set_dock("neon", checked))
+        self.neon_colour_menu(menu.addMenu("Colours"))
+        menu.addSeparator()
+        for key, label in NEON_MOTIONS:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(state.dock_neon_motion == key)
+            act.triggered.connect(lambda _=False, v=key: self._neon_set("neon_motion", v))
+        menu.addSeparator()
+        for key, label in NEON_STRENGTHS:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(state.dock_neon_strength == int(key))
+            act.triggered.connect(lambda _=False, v=int(key): self._neon_set("neon_strength", v))
+
+    def neon_colour_menu(self, menu):
+        """Presets, one colour of your own, or up to three blended round the ring.
+        Choosing one turns the outline on."""
+        current = [c.lower() for c in self.board.state.dock_neon_colors]
+        for name, colours in NEON_PRESETS:
+            act = menu.addAction(_swatch(colours), name)
+            act.setCheckable(True)
+            act.setChecked(current == [c.lower() for c in colours])
+            act.triggered.connect(lambda _=False, c=colours: self._neon_set("neon_colors", list(c)))
+        menu.addSeparator()
+        menu.addAction("Custom colour…", lambda: self._neon_pick(replace=True))
+        if len(current) < 3:
+            menu.addAction("Add a colour…", lambda: self._neon_pick(replace=False))
+        if len(current) > 1:
+            menu.addAction("Remove the last colour",
+                           lambda: self._neon_set("neon_colors", current[:-1]))
+        return menu
+
+    def _neon_pick(self, replace):
+        colours = self.board.state.dock_neon_colors
+        start = QColor(colours[-1] if colours else "#00e5ff")
+        picked = QColorDialog.getColor(start, None, "Neon colour")
+        if picked.isValid():
+            self._neon_set("neon_colors", [picked.name()] if replace
+                           else list(colours) + [picked.name()])
+
+    def _neon_set(self, key, value):
+        self.board.set_dock(key, value)
+        if not self.board.state.dock_neon:
+            self.board.set_dock("neon", True)
 
     def reveal_taskbar(self):
         """The real taskbar, in the dock's place, until it loses the focus."""
@@ -1277,6 +1546,23 @@ def _time() -> str:
 
 def _date() -> str:
     return time.strftime("%a %b %#d")
+
+
+def _swatch(colours):
+    """A menu icon: the preset's colours side by side."""
+    from PySide6.QtGui import QIcon
+    pm = QPixmap(18, 18)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    grad = QLinearGradient(2, 0, 16, 0)
+    for i, c in enumerate(colours):
+        grad.setColorAt(i / max(1, len(colours) - 1), QColor(c))
+    p.setBrush(QBrush(grad))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(QRectF(2, 2, 14, 14))
+    p.end()
+    return QIcon(pm)
 
 
 def _symbols(px: float) -> QFont:

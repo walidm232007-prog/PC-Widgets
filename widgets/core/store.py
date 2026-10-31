@@ -100,6 +100,10 @@ class BoardState:
     dock_replace_taskbar: bool = True
     dock_pins: List[str] = field(default_factory=list)
     dock_hidden: List[str] = field(default_factory=list)   # taskbar pins removed from the dock
+    dock_neon: bool = False         # a glowing outline round the dock
+    dock_neon_colors: List[str] = field(default_factory=lambda: ["#00e5ff", "#ff2bd6"])
+    dock_neon_motion: str = "circulate"     # static | fade | circulate
+    dock_neon_strength: int = 50    # 25 subtle, 50 medium, 75 bright, 100 intense
     placements: List[Placement] = field(default_factory=list)
     # Every display a widget belongs to, connected or not: its name, bounds and
     # work area, by device path - how one that is unplugged is still named, and
