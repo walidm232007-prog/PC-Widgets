@@ -769,22 +769,29 @@ class GlassDock(QWidget):
                                                self.x(), self.y())
             tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 235)
         p.fillPath(path, tint)
-        # Light from above: a sheen on the upper half of the glass.
-        sheen = QLinearGradient(0, cap.top(), 0, cap.center().y())
-        sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
-        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.fillPath(path, sheen)
+        glass = state.dock_style == "glass"
+        if glass:
+            # Light from above: a sheen on the upper half of the glass.
+            sheen = QLinearGradient(0, cap.top(), 0, cap.center().y())
+            sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
+            sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+            p.fillPath(path, sheen)
         p.restore()
-        # A hairline that catches that light along the top edge.
-        edge = QLinearGradient(0, cap.top(), 0, cap.bottom())
-        if pal.dark:
-            edge.setColorAt(0.0, QColor(255, 255, 255, 70))
-            edge.setColorAt(1.0, QColor(255, 255, 255, 18))
-        else:
-            edge.setColorAt(0.0, QColor(0, 0, 0, 22))
-            edge.setColorAt(1.0, QColor(0, 0, 0, 40))
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QBrush(edge), 1.0))
+        if glass:
+            # A hairline that catches that light along the top edge.
+            edge = QLinearGradient(0, cap.top(), 0, cap.bottom())
+            if pal.dark:
+                edge.setColorAt(0.0, QColor(255, 255, 255, 70))
+                edge.setColorAt(1.0, QColor(255, 255, 255, 18))
+            else:
+                edge.setColorAt(0.0, QColor(0, 0, 0, 22))
+                edge.setColorAt(1.0, QColor(0, 0, 0, 40))
+            p.setPen(QPen(QBrush(edge), 1.0))
+        else:
+            # Solid is matte: one flat colour and an even hairline, with no
+            # sheen or lit edge - those are what read as glass.
+            p.setPen(QPen(QColor(255, 255, 255, 20) if pal.dark else QColor(0, 0, 0, 26), 1.0))
         p.drawPath(squircle(cap.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
 
     def _plate(self, p, ident, rect, active=False, radius=10):

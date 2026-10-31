@@ -11,6 +11,11 @@ is in it. App icons are 32 px - the size Windows draws them, so they come out
 sharp rather than resampled. The first version drew them at about 23 px through
 a scaled painter with no smoothing, which is why they looked jagged.
 
+Frosted glass is the board's blurred wallpaper under a tint, with a sheen on
+its upper half and a hairline lit along the top edge. Solid colour is matte:
+one flat colour and an even hairline. It kept the sheen and the lit edge at
+first, and still read as glass.
+
 ## Start
 
 The Start button is the Windows 11 logo as Windows' own shell draws it - the
