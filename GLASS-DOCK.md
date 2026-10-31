@@ -5,6 +5,11 @@ the bottom edge of the main display, with apps in the middle, music on either
 side, and Windows controls at the right. It starts off, so updating PC Widgets
 doesn't change an existing desktop.
 
+The compact dock is 48 px tall inside a 64 px window (including the floating
+gap and shadow), scaled with the display. Its width grows from 720 to 980 px
+as apps are opened. Normal and minimised windows stay in the app list, including
+the PC Widgets app itself; app icons come from the windows when available.
+
 The material is the same blurred wallpaper the widgets use, with the board's
 glass strength. Solid colour skips that layer. Choose a colour for either
 material, or right-click the dock and choose **Use theme colour** to follow
@@ -32,6 +37,8 @@ Battery percentage appears on wider layouts when a battery is present.
 
 **Replace Windows taskbar** hides the primary taskbar while the dock is active.
 The dock reserves the extra space it needs so maximised windows stop above it.
+That changes the work area without changing widget coordinates: toggling the
+dock, changing taskbar height and restarting all preserve the saved arrangement.
 Other displays retain their native taskbars. Turning replacement off keeps
 Windows' taskbar and floats the dock above it. Fullscreen apps on the main
 display hide the dock. Disable the dock or quit PC Widgets to restore Windows.
@@ -40,6 +47,10 @@ Hiding Explorer is temporary: no registry or Explorer patch is involved. A
 small guard process holds a pipe from the board and restores the taskbar when
 the pipe closes, including when the board crashes. The desktop-space reservation
 belongs to a window, and Windows removes it when the process ends.
+
+The dock and Now Playing share one audio capture instance. Starting two capture
+instances at once could crash inside PortAudio's device discovery, before the
+dock had a chance to show its app buttons.
 
 ## Checks
 

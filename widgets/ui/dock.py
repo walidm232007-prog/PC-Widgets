@@ -6,7 +6,7 @@ import threading
 import time
 
 from PySide6.QtCore import QFileInfo, QPoint, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QFileIconProvider, QMenu, QWidget
 
 from ..core import audio, dock_shell as shell, media, palette, typography, winapi
@@ -30,6 +30,7 @@ class GlassDock(QWidget):
         self._reservation_window = QWidget(None, Qt.Tool | Qt.FramelessWindowHint)
         self._workarea = shell.WorkArea(int(self._reservation_window.winId()))
         self._icons = {}
+        self._icons_pending = False
         self._provider = QFileIconProvider()
         self._tasks = []
         self._hits = []
@@ -72,9 +73,11 @@ class GlassDock(QWidget):
         if not self._running:
             self._running = True
             self._stop = threading.Event()
-            if os.environ.get("PCWIDGETS_NO_AUDIO") != "1":
-                self._tap = audio.AudioTap()
-                self._tap.start()
+            # Media cards already share a process-wide capture. Opening a
+            # second PortAudio instance here can crash inside device discovery
+            # when the dock and a playing media card start together.
+            self._tap = audio.acquire()
+            audio.listen(True)
             stop = self._stop
             # Keep each worker's stop token: a quick off/on must never revive
             # an older worker when a slow WinRT read eventually finishes.
@@ -106,9 +109,9 @@ class GlassDock(QWidget):
         if self._stop:
             self._stop.set()
         if self._tap:
-            tap, self._tap = self._tap, None
-            # Audio shutdown may wait for the device: don't block the app UI.
-            threading.Thread(target=tap.stop, daemon=True).start()
+            self._tap = None
+            audio.listen(False)
+            audio.release()
 
     def _refresh(self):
         if self.preview or not self._running:
@@ -135,9 +138,12 @@ class GlassDock(QWidget):
                 self.lease.restore()
         else:
             self.lease.restore()
+        self._refresh_tasks()
         scale = max(1.0, screen.logicalDotsPerInch() / 96.0)
-        width = min(g.width() - 24, int(1320 * scale))
-        height = int(88 * scale)
+        # Compact by default; grow for apps instead of stretching across most
+        # of the screen even when only two windows are open.
+        width = min(g.width() - 24, round(min(980, max(720, 440 + len(self._entries()) * 36)) * scale))
+        height = round(64 * scale)
         if self.lease.hwnd:
             self._workarea.reserve((g.x(), g.y(), g.right() + 1, g.bottom() + 1),
                                    height, self.lease.hwnd)
@@ -145,15 +151,24 @@ class GlassDock(QWidget):
             self._workarea.release()
         bottom = g.bottom() if self.lease.hwnd else screen.availableGeometry().bottom()
         self.setGeometry(g.x() + (g.width() - width) // 2, bottom - height + 1, width, height)
-        fresh = shell.tasks()
+        self.show()
+        self._frame.start()
+        self.update()
+
+    def _refresh_tasks(self):
+        try:
+            fresh = shell.tasks()
+        except Exception as exc:
+            _log(f"dock: app enumeration failed ({exc!r})")
+            return  # retain the last known buttons on a transient failure
         # Keep app order stable as z-order changes on activation.
         by_id = {t.hwnd: t for t in fresh}
         old_ids = {t.hwnd for t in self._tasks}
         self._tasks = [by_id[t.hwnd] for t in self._tasks if t.hwnd in by_id]
         self._tasks += [t for t in fresh if t.hwnd not in old_ids]
-        self.show()
-        self._frame.start()
-        self.update()
+        if not self._icons_pending:
+            self._icons_pending = True
+            QTimer.singleShot(0, self._warm_icons)
 
     def _animate(self):
         levels = self._tap.levels() if self._tap else (0.0,) * 5
@@ -190,12 +205,40 @@ class GlassDock(QWidget):
             _log(f"dock: launcher failed ({exc!r})")
             self.setToolTip("Couldn't open this app. Right-click to remove or replace the pin.")
 
-    def _icon(self, path):
-        if path not in self._icons:
+    def _icon(self, path, hwnd=0):
+        # Paint must never query another window or call shell COM. Both can
+        # dispatch native messages and recursively enter the paint handler.
+        return self._icons.get((path, hwnd), QIcon())
+
+    def _warm_icons(self):
+        self._icons_pending = False
+        if not self._running and not self.preview:
+            return
+        for key, _, path, _ in self._entries():
+            if key == "start":
+                continue
+            task = next((t for t in self._tasks if key == f"task:{t.hwnd}" or
+                         (t.path and key == "pin:" + t.path)), None)
+            self._load_icon(path, task.hwnd if task else 0)
+        self.update()
+
+    def _load_icon(self, path, hwnd=0):
+        key = (path, hwnd)
+        if key not in self._icons:
             if len(self._icons) > 128:
                 self._icons.clear()
-            self._icons[path] = self._provider.icon(QFileInfo(path)) if path else QIcon()
-        return self._icons[path]
+            icon = QIcon()
+            if hwnd:
+                handle = shell.window_icon(hwnd)
+                if handle:
+                    try:
+                        icon = QIcon(QPixmap.fromImage(QImage.fromHICON(handle)))
+                    finally:
+                        shell.u.DestroyIcon(handle)
+            if icon.isNull() and path:
+                icon = self._provider.icon(QFileInfo(path))
+            self._icons[key] = icon
+        return self._icons[key]
 
     def paintEvent(self, event):
         from PySide6.QtGui import QImage
@@ -252,7 +295,7 @@ class GlassDock(QWidget):
                            else QColor(0, 0, 0, 15))
 
         # Compact layouts omit the artist before they crowd out system controls.
-        music_w = 248 if w >= 1000 else 166 if w >= 760 else 82
+        music_w = 248 if w >= 900 else 166 if w >= 760 else 82
         battery = winapi.battery()
         quick_w = (104 if battery.present else 64) if w >= 1000 else 48
         system_w = 142 + quick_w if w >= 760 else 130
@@ -265,13 +308,13 @@ class GlassDock(QWidget):
             h = 5 + max(0, min(1, level)) * 29
             p.drawRoundedRect(QRectF(music_x + 12 + i * 9, 41 - h / 2, 5, h), 2.5, 2.5)
         if music_w > 82:
-            p.setFont(typography.font(10, QFont.DemiBold))
+            p.setFont(typography.font(12, QFont.DemiBold))
             p.setPen(QColor(pal.text))
             title = self._np.title or "Nothing playing"
             tw = music_w - 75
             p.drawText(QRectF(music_x + 68, 22, tw, 20), Qt.AlignVCenter,
                        QFontMetrics(p.font()).elidedText(title, Qt.ElideRight, int(tw)))
-            p.setFont(typography.font(8))
+            p.setFont(typography.font(10))
             p.setPen(QColor(pal.text_dim))
             sub = self._np.artist or "Spotify / Apple Music"
             p.drawText(QRectF(music_x + 68, 42, tw, 16), Qt.AlignVCenter,
@@ -296,11 +339,13 @@ class GlassDock(QWidget):
                 p.setPen(QColor(pal.text))
                 p.drawText(rect, Qt.AlignCenter, "•••")
             else:
-                ico = self._icon(icon)
+                task = next((t for t in self._tasks if key == f"task:{t.hwnd}" or
+                             (t.path and key == "pin:" + t.path)), None)
+                ico = self._icon(icon, task.hwnd if task else 0)
                 if ico.isNull():
                     glyph(p, "desktop", QRectF(x + 10, 26, 26, 26), pal.text)
                 else:
-                    ico.paint(p, int(x + 8), 25, 28, 28)
+                    ico.paint(p, int(x + 6), 23, 32, 32)
                 active = key == f"task:{foreground}" or any(
                     t.hwnd == foreground and key == "pin:" + t.path for t in self._tasks)
                 running = key.startswith("task:") or any(key == "pin:" + t.path for t in self._tasks)

@@ -231,6 +231,13 @@ class Board(QObject):
         if pl.display and len(area) != 4:
             area = tuple(self.state.displays.get(pl.display, {}).get("work") or ())
         if pl.display and len(area) == 4:
+            d = displays.find(pl.display, self.screens)
+            old_rect = tuple(self.state.displays.get(pl.display, {}).get("rect", ()))
+            if d is not None and old_rect == d.rect:
+                # Restarting with a different taskbar height is not a monitor
+                # resize. Preserve the saved coordinates, including dock-off
+                # startup after saving while the dock was on.
+                area = d.work
             return Anchor(pl.display, int(pl.x), int(pl.y), tuple(int(v) for v in area))
         r = c.card_rect()
         d = displays.at(pl.x + r.center().x(), pl.y + r.center().y(), self.screens)
@@ -297,6 +304,8 @@ class Board(QObject):
         d = displays.find(a.display, self.screens)
         c.displaced = d is None
         if d is not None:
+            if a.area == d.work:
+                return a.x, a.y
             x, y = displays.carry(a.x + m, a.y + m, cw, ch, a.area, d.work)
             return x - m, y - m
         main = displays.primary(self.screens)
@@ -394,10 +403,17 @@ class Board(QObject):
         try:
             self._display_sig = displays.signature()
             before = [(d.key, d.rect, d.work, d.primary) for d in self.screens]
+            physical_before = [(d.key, d.rect, d.primary) for d in self.screens]
             self.screens = displays.current(force=True)
             if [(d.key, d.rect, d.work, d.primary) for d in self.screens] == before:
                 return False
-            self._place_all()
+            if [(d.key, d.rect, d.primary) for d in self.screens] == physical_before:
+                # Appbars change the work area, not the user's arrangement.
+                # Windows may already have nudged a window; restore its last
+                # intentional position before updating anchors and saving.
+                self._reassert_spots()
+            else:
+                self._place_all()
             for c in self.cards:
                 self._sync_anchor(c)        # in the arrangement's new terms
             self._remember_displays()

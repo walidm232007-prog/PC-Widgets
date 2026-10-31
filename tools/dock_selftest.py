@@ -20,9 +20,10 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 os.environ["PCWIDGETS_NO_AUDIO"] = "1"
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtGui import QIcon, QPixmap, QColor
 from PySide6.QtWidgets import QApplication, QWidget
-from widgets.core import dock_shell as shell, media, palette, store, winapi
+from widgets.core import audio, dock_shell as shell, media, palette, store, winapi
 from widgets.core.glass import GlassBackdrop
 from widgets.ui.dock import GlassDock
 
@@ -52,6 +53,121 @@ def pump(app, seconds):
         time.sleep(0.01)
 
 
+def check_positions():
+    from dataclasses import replace
+    from unittest.mock import patch
+    from main import _sandboxed_layout, _fake_displays, _desk
+    from widgets.core.board import Board, load_builtin_tiles
+    from widgets.core.card import WidgetCard
+    load_builtin_tiles()
+    primary, secondary = _desk()
+    reduced = replace(primary, work=(0, 0, 1920, 992))
+    placements = [store.Placement("clock", "small", 1600, 846, display=primary.key,
+                                   area=list(primary.work)),
+                  store.Placement("clock", "small", -700, 900, display=secondary.key,
+                                   area=list(secondary.work))]
+    with _sandboxed_layout(), _fake_displays([primary, secondary]) as desk, \
+            patch.object(WidgetCard, "show"), patch.object(Board, "apply_layer"):
+        board = Board(store.BoardState(placements=placements))
+        board.build()
+        before = [(c.x(), c.y()) for c in board.cards]
+        for _ in range(3):
+            for screen in (reduced, primary):
+                desk["screens"] = [screen, secondary]
+                # Simulate the OS clamping a window before delivering its
+                # work-area notification; the board must undo that nudge too.
+                board.cards[0].move(1600, 800)
+                board._displays_moved()
+                board._reassert_spots()
+                board.persist()
+                assert [(c.x(), c.y()) for c in board.cards] == before
+                assert [(p.x, p.y) for p in store.load().placements] == before
+        desk["screens"] = [reduced, secondary]
+        board._displays_moved()
+        board.close_all()
+        saved = store.load()
+        desk["screens"] = [primary, secondary]
+        restarted = Board(saved)
+        restarted.build()
+        assert [(c.x(), c.y()) for c in restarted.cards] == before, "restart shifted widgets"
+        restarted.close_all()
+    print("PASS: widget coordinates and saved positions survive repeated work-area changes and restart")
+
+
+def check_apps(app, board, out):
+    """Real Qt/Win32 windows, not a mocked task list or a mere list type check."""
+    from unittest.mock import patch
+    windows = []
+    dock = GlassDock(board, preview=True)
+    try:
+        for name, colour in (("Dock app test A", "#26cc70"), ("Dock app test B", "#ff7518")):
+            w = QWidget()
+            w.setWindowTitle(name)
+            pix = QPixmap(32, 32)
+            pix.fill(QColor(colour))
+            w.setWindowIcon(QIcon(pix))
+            w.show()
+            windows.append(w)
+        tool = QWidget(None, Qt.Tool)
+        tool.setWindowTitle("Dock tool test")
+        tool.show()
+        windows.append(tool)
+        windows[1].showMinimized()
+        pump(app, 0.1)
+        dock._refresh_tasks()
+        dock._warm_icons()
+        found = {t.hwnd for t in dock._tasks}
+        assert {int(w.winId()) for w in windows[:2]} <= found, "visible/minimized apps missing"
+        assert int(tool.winId()) not in found, "tool window leaked into app list"
+        dock.resize(720, 64)
+        with patch.object(shell, "window_icon", wraps=shell.window_icon) as icon_read:
+            dock.grab().save(str(out / "real-apps.png"))
+            assert not icon_read.called, "paint queried native icons instead of the cache"
+        hits = {h[1] for h in dock._hits}
+        for w in windows[:2]:
+            hwnd = int(w.winId())
+            assert f"task:{hwnd}" in hits, "running app missing from painted buttons"
+            path = next(t.path for t in dock._tasks if t.hwnd == hwnd)
+            icon = dock._icon(path, hwnd)
+            assert not icon.isNull(), "native window icon not loaded"
+            assert icon.pixmap(32, 32).toImage().pixelColor(16, 16).green() > 30
+        windows[0].close()
+        pump(app, 0.1)
+        dock._refresh_tasks()
+        assert int(windows[0].winId()) not in {t.hwnd for t in dock._tasks}
+    finally:
+        dock.close()
+        for w in windows:
+            w.close()
+    print("PASS: actual visible/minimized apps have buttons and native icons; tools excluded; closed apps removed")
+
+
+def check_shared_audio():
+    from unittest.mock import patch
+    initial = audio._users, audio._listeners
+    # A playing music card already holds this capture when the dock opens.
+    card_tap = audio.acquire()
+    audio.listen(True)
+    b = TestBoard()
+    with patch.object(GlassDock, "_refresh"), patch.object(GlassDock, "_poll"):
+        dock = GlassDock(b)
+        try:
+            for _ in range(3):
+                b.set_dock("enabled", True)
+                assert dock._tap is card_tap, "dock opened a second audio capture"
+                dock.sync()
+                assert (audio._users, audio._listeners) == (initial[0] + 2, initial[1] + 2)
+                b.set_dock("enabled", False)
+                dock.shutdown()
+                assert (audio._users, audio._listeners) == (initial[0] + 1, initial[1] + 1)
+        finally:
+            dock.close()
+            audio.listen(False)
+            audio.release()
+    assert (audio._users, audio._listeners) == initial
+    print("PASS: dock and media share capture; repeated enable/disable balances listeners without stopping the card")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(ROOT / "_selftest" / "dock"))
@@ -73,8 +189,8 @@ def main():
             board.palette = palette.build(theme)
             for side in ("left", "right"):
                 board.state.dock_music_side = side
-                for width in (640, 900, 1320):
-                    dock.resize(width, 88)
+                for width in (640, 720, 980):
+                    dock.resize(width, 64)
                     dock.invalidate()
                     pix = dock.grab()
                     assert not pix.isNull()
@@ -135,6 +251,10 @@ def main():
     print("PASS: taskbar guard restores a hidden test window after parent is killed")
     assert isinstance(shell.tasks(), list)
     print("PASS: native app enumeration")
+    board.state.dock_pins = []
+    check_apps(app, board, out)
+    check_positions()
+    check_shared_audio()
 
     if args.live:
         board.state.dock_enabled = True

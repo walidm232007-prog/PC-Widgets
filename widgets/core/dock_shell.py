@@ -37,6 +37,14 @@ k.QueryFullProcessImageNameW.argtypes = [W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(
 k.CloseHandle.argtypes = [W.HANDLE]
 dwm.DwmGetWindowAttribute.argtypes = [W.HWND, W.DWORD, C.c_void_p, W.DWORD]
 u.GetWindowRect.argtypes = [W.HWND, C.POINTER(W.RECT)]
+u.SendMessageTimeoutW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM,
+                                 W.UINT, W.UINT, C.POINTER(C.c_size_t)]
+u.SendMessageTimeoutW.restype = C.c_ssize_t
+u.GetClassLongPtrW.argtypes = [W.HWND, C.c_int]
+u.GetClassLongPtrW.restype = C.c_size_t
+u.CopyIcon.argtypes = [W.HICON]
+u.CopyIcon.restype = W.HICON
+u.DestroyIcon.argtypes = [W.HICON]
 
 
 class APPBARDATA(C.Structure):
@@ -110,8 +118,8 @@ def tasks() -> list[Task]:
             return True
         pid = W.DWORD()
         u.GetWindowThreadProcessId(hwnd, C.byref(pid))
-        if pid.value == os.getpid():
-            return True
+        # Do not exclude our whole process: the PC Widgets app is a normal
+        # taskbar window too. Its cards/dock are already excluded as tool windows.
         cloaked = W.DWORD()
         dwm.DwmGetWindowAttribute(hwnd, 14, C.byref(cloaked), C.sizeof(cloaked))
         if cloaked.value:
@@ -134,8 +142,29 @@ def tasks() -> list[Task]:
         found.append(Task(int(hwnd), title.value, paths[pid.value]))
         return True
 
-    u.EnumWindows(visit, 0)
+    if not u.EnumWindows(visit, 0):
+        raise C.WinError(C.get_last_error())
     return found
+
+
+def window_icon(hwnd: int):
+    """An owned copy of the window's actual icon, not its host executable's.
+
+    Hosted/Store apps often have a generic executable icon. Never wait on an
+    unresponsive window without a timeout. The caller must DestroyIcon the copy.
+    """
+    result = C.c_size_t()
+    for size in (1, 2, 0):  # ICON_BIG, SMALL2, SMALL
+        # SMTO_BLOCK prevents incoming messages re-entering Qt while waiting;
+        # a reentrant paint can otherwise call shell COM in a sent-message
+        # handler (RPC_E_CANTCALLOUT_ININPUTSYNCCALL).
+        if u.SendMessageTimeoutW(hwnd, 0x7F, size, 0, 3, 40, C.byref(result)) and result.value:
+            return u.CopyIcon(result.value)
+    for slot in (-14, -34):  # GCLP_HICON, GCLP_HICONSM
+        icon = u.GetClassLongPtrW(hwnd, slot)
+        if icon:
+            return u.CopyIcon(icon)
+    return None
 
 
 def activate(hwnd: int) -> None:
