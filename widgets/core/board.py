@@ -852,7 +852,7 @@ class Board(QObject):
             from PySide6.QtGui import QColor
             if value and not QColor(value).isValid():
                 return
-        elif key == "pins":
+        elif key in ("pins", "hidden"):
             if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
                 return
             value = list(dict.fromkeys(value))
