@@ -141,6 +141,50 @@ def check_renders(out, board):
           "playing and idle; buttons inside the glass and apart; type without colour fringes")
 
 
+def check_neon(out, board):
+    """The neon fits inside the window, runs at an even pace round the
+    outline, moves when it should and only then, and is off by default."""
+    import numpy as np
+    assert store.BoardState().dock_neon is False
+    dock = GlassDock(board, preview=True)
+    dock._snap = fake_snapshot()
+    board.state.dock_neon = True
+    dock.sync()
+    dock.resize(1000, 74)
+    dock.invalidate()
+    assert dock._capsule.top() == dockmod.NEON_TOP, "no room above the capsule for the glow"
+    frame = lambda motion, t, colours=("#00e5ff", "#ff2bd6"), strength=100: dock._neon.frame(
+        dock.size(), dock._capsule, dockmod.RADIUS, 1.0, list(colours), motion, strength, t)
+    img = frame("static", 0.0)
+    top = max(img.pixelColor(x, 0).alpha() for x in range(img.width()))
+    assert top <= 12, f"the glow is cut off at the window's top edge ({top})"
+    assert frame("static", 0.0) is frame("static", 2.0), "a still ring was drawn again"
+    a, b = frame("circulate", 0.0), frame("circulate", dockmod.LAP_S / 4)
+    assert a != b, "circulate did not move"
+    f1, f2 = frame("fade", 0.0), frame("fade", dockmod.FADE_S / 2)
+    assert f1.pixelColor(500, int(dock._capsule.top())).alpha() < \
+        f2.pixelColor(500, int(dock._capsule.top())).alpha(), "fade did not brighten"
+    cap = dock._capsule
+    xs = np.linspace(cap.left() + 30, cap.right() - 30, 50)
+    u = dockmod._perimeter(np, xs, np.full_like(xs, cap.top()), cap, 18.0)
+    steps = np.diff(u)
+    assert (steps > 0).all() and steps.max() / steps.min() < 1.01, "uneven pace along the edge"
+    t0 = time.perf_counter()
+    for i in range(20):
+        frame("circulate", i * 0.033)
+    ms = (time.perf_counter() - t0) / 20 * 1000
+    for motion in ("static", "fade", "circulate"):
+        board.state.dock_neon_motion = motion
+        dock.invalidate()
+        assert dock.grab().save(str(out / f"neon-{motion}.png"))
+    board.state.dock_neon, board.state.dock_neon_motion = False, "circulate"
+    dock.sync()
+    assert dock._capsule.top() == dockmod.TOP
+    dock.close()
+    print(f"PASS: neon fits the window, keeps an even pace round the outline, circulates and "
+          f"fades, holds still when static ({ms:.1f} ms a moving frame)")
+
+
 def check_pictures():
     """The shell's pictures come out the right way up, with their transparency."""
     img = shell.shell_image(NOTEPAD, 32)
@@ -491,6 +535,7 @@ def main():
     check_pictures()
     check_logo(out)
     check_renders(out, board)
+    check_neon(out, board)
     check_rows(board)
     check_native()
     check_watcher(app)

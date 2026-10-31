@@ -1609,6 +1609,26 @@ class SettingsPage(QWidget):
         dock.add(setting_row("plus", "#30d158", "Pinned apps",
                              "Right-click a dock app to pin or unpin it.",
                              Button("Add…", "secondary", slot=self._dock_pin)), self.INSET)
+        from .dock import NEON_MOTIONS, NEON_STRENGTHS
+        self.dock_neon = Switch()
+        self.dock_neon.toggled.connect(lambda on: board.set_dock("neon", on))
+        dock.add(setting_row("moon", "#ff2bd6", "Neon outline",
+                             "A glowing ring round the dock.", self.dock_neon), self.INSET)
+        dock.add(setting_row("halfcircle", "#00c3ff", "Neon colours",
+                             "A preset, your own, or up to three blended round the ring.",
+                             Button("Choose…", "secondary", slot=self._dock_neon_colours)),
+                 self.INSET)
+        self.dock_neon_motion = Segmented(NEON_MOTIONS)
+        self.dock_neon_motion.changed.connect(lambda v: board.set_dock("neon_motion", v))
+        dock.add(setting_row("reset", "#bf5af2", "Neon motion",
+                             "Still, fading in and out, or running round the dock.",
+                             self.dock_neon_motion), self.INSET)
+        self.dock_neon_strength = Segmented(NEON_STRENGTHS)
+        self.dock_neon_strength.changed.connect(
+            lambda v: board.set_dock("neon_strength", int(v)))
+        dock.add(setting_row("sliders", "#ff9f0a", "Neon strength",
+                             "How wide and bright the glow is.", self.dock_neon_strength),
+                 self.INSET)
 
         app = self._group(col, "App")
         self.boot = Switch()
@@ -1666,6 +1686,9 @@ class SettingsPage(QWidget):
         self.dock_style.set_current(s.dock_style)
         self.dock_music.set_current(s.dock_music_side)
         self.dock_replace.set_quietly(s.dock_replace_taskbar)
+        self.dock_neon.set_quietly(s.dock_neon)
+        self.dock_neon_motion.set_current(s.dock_neon_motion)
+        self.dock_neon_strength.set_current(str(s.dock_neon_strength))
         self.boot.set_quietly(startup.is_enabled())
         self.start_menu.setText("Update" if startup.has_start_menu_shortcut() else "Add")
         if s.layer == "top":
@@ -1683,6 +1706,12 @@ class SettingsPage(QWidget):
     def _dock_pin(self) -> None:
         if self.win.board.dock is not None:
             self.win.board.dock.add_pin()
+
+    def _dock_neon_colours(self) -> None:
+        if self.win.board.dock is not None:
+            from PySide6.QtGui import QCursor
+            from PySide6.QtWidgets import QMenu
+            self.win.board.dock.neon_colour_menu(QMenu(self)).exec(QCursor.pos())
 
     def _set_startup(self, on: bool) -> None:
         self.boot.setEnabled(False)

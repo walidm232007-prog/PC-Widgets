@@ -16,6 +16,25 @@ its upper half and a hairline lit along the top edge. Solid colour is matte:
 one flat colour and an even hairline. It kept the sheen and the lit edge at
 first, and still read as glass.
 
+## Neon outline
+
+**Settings → Glass Dock → Neon outline**, or right-click the dock → Glass Dock
+→ Neon outline, puts a glowing ring round the dock: a hot, near-white core on
+the edge and a bloom of colour around it. Colours are a preset (Cyber, Cyan,
+Magenta, Aurora, Sunset, Fire, Toxic, Ice), one of your own, or up to three,
+blended round the ring. Motion is Static, Fade (in and out over three seconds)
+or Circulate (one lap in six; a single colour runs as a comet with a tail).
+Strength - Subtle, Medium, Bright, Intense - sets how wide and bright the glow
+is. It is off by default.
+
+The colour is laid along the outline by distance travelled round it, not by
+angle from the centre: on a bar fifteen times wider than it is tall, angle
+crawls along the long edges and races round the ends. The glow is a real blur,
+built once per size and strength; a moving frame only re-colours the pixels the
+glow covers, about 1.5 ms, 30 times a second while the dock shows. Static costs
+nothing after the first frame. The window grows 10 px taller while the outline
+is on, so the glow above the dock isn't cut off.
+
 ## Start
 
 The Start button is the Windows 11 logo as Windows' own shell draws it - the
