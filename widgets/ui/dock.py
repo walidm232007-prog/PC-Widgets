@@ -32,7 +32,7 @@ from .theme import paint_shadow
 WINDOW_H = 64       # the window: the capsule, the gap under it and room for its shadow
 TOP, BAR_H = 4, 52  # the capsule inside it, floating 8 px above the screen's edge
 SIDE = 16           # transparent room left and right, for the shadow
-RADIUS = 18
+RADIUS = 12
 PAD = 4             # inside the capsule, before the first plate
 PLATE = 44          # a button's hover plate, and the pitch of the app row
 ICON = 32           # Windows' own app icon size, so icons come out sharp, not resampled
