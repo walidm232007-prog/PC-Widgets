@@ -3,9 +3,10 @@ build_exe.py
 ============
 Build ``PC Widgets.exe`` from a commit, then check the build works.
 
-    python tools/build_exe.py [--out build] [--ref HEAD] [--no-test]
+    python tools/build_exe.py [--out build] [--ref HEAD] [--no-test] [--installer]
 
 Run it with a Python that has the packages in packaging/requirements.txt.
+``--installer`` also compiles packaging/pc-widgets.iss with Inno Setup 6.
 
 The exe is built from ``git archive`` of the commit, never the working folder.
 A working folder holds things that must not ship: a local SF Pro copy in
@@ -21,6 +22,12 @@ Then three checks, each on the built exe rather than the source:
 - the media helper answers with JSON, the WinRT projection importable.
 
 Output: ``<out>/dist/PC Widgets/``, the folder the installer packs.
+
+With ``--installer``: ``<out>/PC-Widgets-Setup-<version>.exe``, then installed
+silently into ``<out>/test-install``, its exe and Start menu shortcut checked,
+and uninstalled again. The Start menu, Startup and Desktop shortcuts called
+"PC Widgets" are put back as they were afterwards: on a developer's machine
+they are the checkout's own, and the test install replaces the Start menu one.
 """
 
 from __future__ import annotations
@@ -128,11 +135,107 @@ def check_media_helper(exe: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def iscc() -> str:
+    """Inno Setup's compiler: $ISCC, PATH, or where its installer puts it."""
+    found = os.environ.get("ISCC") or shutil.which("ISCC")
+    if found:
+        return found
+    folders = [os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+               os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", "")]
+    for folder in folders:
+        cand = os.path.join(folder, "Inno Setup 6", "ISCC.exe")
+        if folder and os.path.exists(cand):
+            return cand
+    raise SystemExit("Inno Setup 6 not found: install it (winget install "
+                     "JRSoftware.InnoSetup) or set ISCC to ISCC.exe")
+
+
+def version(src: str) -> str:
+    with open(os.path.join(src, "widgets", "version.py"), encoding="utf-8") as fh:
+        return fh.read().split('VERSION = "')[1].split('"')[0]
+
+
+def build_installer(src: str, app: str, out: str) -> str:
+    ver = version(src)
+    subprocess.run([iscc(), "/Q", f"/DAppVersion={ver}", f"/DSourceDir={app}",
+                    f"/DOutputDir={out}",
+                    os.path.join(src, "packaging", "pc-widgets.iss")], check=True)
+    setup = os.path.join(out, f"PC-Widgets-Setup-{ver}.exe")
+    assert os.path.exists(setup), f"Inno Setup made no {setup}"
+    print(f"  built {setup}  ({os.path.getsize(setup) / 1e6:.0f} MB)")
+    return setup
+
+
+def shortcuts() -> list:
+    programs = os.path.join(os.environ["APPDATA"], "Microsoft", "Windows",
+                            "Start Menu", "Programs")
+    return [os.path.join(programs, "PC Widgets.lnk"),
+            os.path.join(programs, "Startup", "PC Widgets.lnk"),
+            os.path.join(os.environ["USERPROFILE"], "Desktop", "PC Widgets.lnk")]
+
+
+def link_target(path: str) -> str:
+    script = "(New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK).TargetPath"
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                          env=dict(os.environ, LNK=path), capture_output=True, text=True,
+                          creationflags=NO_WINDOW).stdout.strip()
+
+
+def check_installer(setup: str, out: str) -> None:
+    """Install silently, look, uninstall, and leave the shortcuts as they were.
+
+    Silent, so nothing shows and the installed app is never opened (the
+    finish page's "Open PC Widgets" is skipped). No tasks, so it adds no
+    Startup or Desktop shortcut.
+    """
+    target = os.path.join(out, "test-install")
+    shutil.rmtree(target, ignore_errors=True)
+    saved = {p: open(p, "rb").read() for p in shortcuts() if os.path.exists(p)}
+    try:
+        subprocess.run([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                        f"/DIR={target}", "/TASKS=", f"/LOG={out}\\install.log"],
+                       check=True, timeout=300)
+        exe = os.path.join(target, "PC Widgets.exe")
+        assert os.path.exists(exe), "the installer put no exe in place"
+        menu = shortcuts()[0]
+        assert os.path.normcase(link_target(menu)) == os.path.normcase(exe), (
+            "the Start menu shortcut doesn't open the installed exe")
+        check_media_helper(exe)
+
+        uninstaller = os.path.join(target, "unins000.exe")
+        subprocess.run([uninstaller, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                       check=True, timeout=300)
+        # The uninstaller hands over to a copy of itself in %TEMP% and returns.
+        deadline = time.monotonic() + 60
+        while os.path.exists(exe) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        assert not os.path.exists(exe), "the uninstaller left the exe behind"
+        time.sleep(2)
+        assert not os.path.exists(menu), "the uninstaller left the Start menu shortcut"
+        left = [n for n in os.listdir(target)] if os.path.isdir(target) else []
+        assert not left, f"the uninstaller left {left}"
+        print("  ok    installs, its Start menu shortcut opens it, and it uninstalls cleanly")
+    finally:
+        for path, data in saved.items():
+            try:
+                if open(path, "rb").read() == data:
+                    continue
+            except OSError:
+                pass
+            # Rewritten in place: Windows refuses to replace a hidden file, and
+            # a person may well have hidden a desktop shortcut.
+            with open(path, "r+b" if os.path.exists(path) else "wb") as fh:
+                fh.write(data)
+                fh.truncate()
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=os.path.join(ROOT, "build"))
     ap.add_argument("--ref", default="HEAD")
     ap.add_argument("--no-test", action="store_true")
+    ap.add_argument("--installer", action="store_true")
     args = ap.parse_args()
     out = os.path.abspath(args.out)
 
@@ -160,6 +263,10 @@ def main() -> int:
         check_media_helper(exe)
         check_guard(exe)
         check_selftest(exe, out)
+    if args.installer:
+        setup = build_installer(src, app, out)
+        if not args.no_test:
+            check_installer(setup, out)
     print("done.")
     return 0
 

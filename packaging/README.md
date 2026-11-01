@@ -1,7 +1,7 @@
 # Packaging
 
-How `PC Widgets.exe` is built, so people can install PC Widgets without
-installing Python, running pip or opening a terminal.
+How `PC Widgets.exe` and its installer are built, so people can install PC
+Widgets without installing Python, running pip or opening a terminal.
 
 ## Build it
 
@@ -39,6 +39,46 @@ refuses to build if an `.otf` turns up anyway. Then it checks the exe itself:
   folder for the test, so nothing lands in the profile.
 
 `--no-test` skips them.
+
+## The installer
+
+```bash
+C:\pcw-build\env\Scripts\python tools/build_exe.py --out C:\pcw-build\out --installer
+```
+
+That also compiles `packaging/pc-widgets.iss` with Inno Setup 6 (free;
+`winget install JRSoftware.InnoSetup --scope user`) into
+`<out>\PC-Widgets-Setup-<version>.exe`, about 30 MB. What it does:
+
+- **No admin.** It installs for the current user, to
+  `%LOCALAPPDATA%\Programs\PC Widgets`, so there is no UAC prompt and nothing
+  for other accounts on the PC.
+- **Three clicks.** Choose whether it starts with Windows (on) and whether it
+  gets a desktop shortcut (off), Install, then Finish, which opens it.
+- **The app's own shortcuts.** The Start menu and Startup shortcuts are at the
+  paths the app uses itself, so Settings → Start with Windows and the
+  installer's box are the same switch, and the app never makes a second one.
+- **Updates** are the newer installer run over the old one. It replaces the
+  bundle whole, so nothing from an older build lingers, and if the board is
+  running Windows closes it first (which also ends the taskbar guard, so the
+  taskbar comes back). The layout, presets and settings are in `%APPDATA%`
+  and stay.
+- **Uninstall** is in Settings → Apps like any other program. It removes the
+  program folder and every "PC Widgets" shortcut that points into it, and
+  leaves alone one that points anywhere else - a copy run from a checkout
+  makes shortcuts with the same name. The layout stays in `%APPDATA%\PCWidgets`
+  in case it is reinstalled.
+
+`--installer` checks it too: a silent install into `<out>\test-install` with no
+Startup or Desktop shortcut, the Start menu shortcut opening the installed exe,
+the installed exe's media helper, then a silent uninstall leaving nothing
+behind. The installed app is never opened. A developer's own "PC Widgets"
+shortcuts are put back byte for byte afterwards, since the test install
+replaces the Start menu one.
+
+**Unsigned**, Windows SmartScreen shows "Windows protected your PC" the first
+time; More info → Run anyway. Signing the installer and the exe removes that,
+and needs a code-signing certificate or signing service.
 
 ## What is in it
 
