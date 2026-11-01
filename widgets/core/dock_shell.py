@@ -580,6 +580,14 @@ def place_above(hwnd: int, cx: int, top: int, screen) -> None:
     u.SetWindowPos(hwnd, None, x, top - h, 0, 0, 0x0001 | 0x0004 | 0x0010)  # no size/z/activate
 
 
+def close_overflow() -> None:
+    """Dismiss the hidden-icons flyout the way a person would, with Escape -
+    only while it has the keyboard, so the key never lands anywhere else."""
+    flyout = overflow_window()
+    if flyout and foreground() == flyout:
+        key(0x1B)
+
+
 _oleaut = C.WinDLL("oleaut32")
 _oleaut.SysFreeString.argtypes = [C.c_void_p]
 CLSID_CUIAutomation = _guid("ff48dba4-60ef-4201-aa87-54103eef594e")
@@ -764,6 +772,40 @@ def close(hwnd: int) -> None:
 
 def foreground() -> int:
     return u.GetForegroundWindow() or 0
+
+
+u.IsZoomed.argtypes = [W.HWND]
+
+
+def maximised_on(hwnds, monitor) -> bool:
+    """Whether any of these windows is maximised on that monitor. Plain
+    window-state reads: nothing here waits on the windows' apps."""
+    for hwnd in hwnds:
+        if u.IsWindow(hwnd) and u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd) \
+                and u.IsZoomed(hwnd):
+            r = W.RECT()
+            u.GetWindowRect(hwnd, C.byref(r))
+            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+            if monitor[0] <= cx < monitor[2] and monitor[1] <= cy < monitor[3]:
+                return True
+    return False
+
+
+class CURSORINFO(C.Structure):
+    _fields_ = [("cbSize", W.DWORD), ("flags", W.DWORD), ("hCursor", W.HANDLE),
+                ("ptScreenPos", W.POINT)]
+
+
+u.GetCursorInfo.argtypes = [C.POINTER(CURSORINFO)]
+
+
+def cursor():
+    """(x, y, shown) for the mouse pointer. A game that has captured the mouse
+    hides the pointer, which is how the dock knows not to pop up over it."""
+    info = CURSORINFO(cbSize=C.sizeof(CURSORINFO))
+    if not u.GetCursorInfo(C.byref(info)):
+        return 0, 0, False
+    return info.ptScreenPos.x, info.ptScreenPos.y, bool(info.flags & 0x1)   # CURSOR_SHOWING
 
 
 _shell.GetCurrentProcessExplicitAppUserModelID.argtypes = [C.POINTER(C.c_void_p)]

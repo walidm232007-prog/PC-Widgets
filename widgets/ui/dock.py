@@ -19,7 +19,8 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Optional
 
-from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QObject, QPointF, QRect, QRectF,
+                            Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QWidget
@@ -525,6 +526,16 @@ class GlassDock(QWidget):
         self._tray_timer = QTimer(self)
         self._tray_timer.setInterval(250)
         self._tray_timer.timeout.connect(self._refresh)
+        self._flyout_at_press = False
+        self._auto = False            # something fullscreen: the dock waits below the edge
+        self._up = True               # where it is (or is going) meanwhile
+        self._dwell = self._away = 0
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(100)
+        self._edge_timer.timeout.connect(self._edge_tick)
+        self._slider = QVariantAnimation(self)
+        self._slider.valueChanged.connect(lambda v: self.move(self.x(), int(v)))
+        self._slider.finished.connect(self._slid)
         self._neon = NeonRing()
         self._neon_img = None
         self._neon_timer = QTimer(self)
@@ -615,6 +626,9 @@ class GlassDock(QWidget):
         self._tray_timer.stop()
         self._tray_since = 0.0
         self._neon_timer.stop()
+        self._edge_timer.stop()
+        self._slider.stop()
+        self._auto, self._up = False, True
         self.hide()
         if self._workarea is not None:
             self._workarea.release()
@@ -698,6 +712,8 @@ class GlassDock(QWidget):
     def _poke(self):
         if self._watcher is not None:
             self._watcher.poke()
+        if self._running and not self.preview:
+            self._refresh()             # a window maximised, restored or gone: react now
 
     # -- placement -------------------------------------------------------- #
     def _refresh(self):
@@ -710,13 +726,21 @@ class GlassDock(QWidget):
             self.lease.restore()
             return
         g = screen.geometry()
-        full = winapi.fullscreen_monitor()
-        if full and QRect(full[0], full[1], full[2] - full[0], full[3] - full[1]).intersects(g):
-            # A game or a video fills the main display. Step aside and leave the
-            # taskbar alone: the game covers it either way, and showing it used
-            # to activate it - taking the focus from the game every second.
-            self._conceal()
+        if self._covered(g):
+            # A maximised or fullscreen window fills the main display: the dock
+            # slides down off the edge, as an auto-hiding taskbar does, and the
+            # mouse resting on the bottom edge brings it back (see _edge_tick).
+            # The taskbar is left alone: showing it used to activate it, taking
+            # the focus from a fullscreen game every second.
+            if not self._auto:
+                self._auto, self._dwell, self._away = True, 0, 0
+                self._edge_timer.start()
+                if self.isVisible():
+                    self._slide(False)
             return
+        if self._auto:
+            self._auto = False
+            self._edge_timer.stop()
         if self._tray_since:
             if self._tray_busy():
                 if self.lease.hwnd:
@@ -736,16 +760,86 @@ class GlassDock(QWidget):
         if fg != self._fg or minute != self._minute:
             self._fg, self._minute = fg, minute
             self.invalidate()
-        if not self.isVisible():
+        if not self._up:
+            self._slide(True)               # the fullscreen app has gone: back up
+        elif not self.isVisible():
             self.show()
             if self._listening:
                 self._frame.start()
         self._sync_neon()
 
+    def _covered(self, g):
+        """A window maximised or fullscreen on the main display. Maximised
+        counts: most people's "full screen" is the maximise button."""
+        full = winapi.fullscreen_monitor()
+        if full and QRect(full[0], full[1], full[2] - full[0], full[3] - full[1]).intersects(g):
+            return True
+        return shell.maximised_on([t.hwnd for t in self._snap.tasks],
+                                  (g.x(), g.y(), g.x() + g.width(), g.y() + g.height()))
+
     def _conceal(self):
+        self._slider.stop()
+        self._up = True
         self.hide()
         self._frame.stop()
         self._neon_timer.stop()
+
+    def _slide(self, up):
+        """Down off the screen's bottom edge, or back up, the way the taskbar
+        goes when something is fullscreen."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        rect = self._target(screen)
+        below = screen.geometry().y() + screen.geometry().height()
+        self._slider.stop()
+        self._up = up
+        if up and not self.isVisible():
+            self.setGeometry(rect.translated(0, below - rect.y()))
+            self.show()
+            if self._listening:
+                self._frame.start()
+            self._sync_neon()
+        elif not up and not self.isVisible():
+            return
+        self.move(rect.x(), self.y())
+        self._slider.setStartValue(self.y())
+        self._slider.setEndValue(rect.y() if up else below)
+        self._slider.setDuration(180 if up else 240)
+        self._slider.setEasingCurve(QEasingCurve.OutCubic if up else QEasingCurve.InCubic)
+        self._slider.start()
+
+    def _slid(self):
+        if not self._up:
+            self.hide()
+            self._frame.stop()
+            self._neon_timer.stop()
+
+    def _edge_tick(self):
+        """While something is fullscreen: the pointer resting on the main
+        display's bottom edge brings the dock up; once it has been away from
+        the dock for a moment, it goes back down. A hidden pointer - a game
+        that has captured the mouse - never brings it up."""
+        screen = QApplication.primaryScreen()
+        if screen is None or self._slider.state() == QAbstractAnimation.Running:
+            return
+        g = screen.geometry()
+        x, y, shown = shell.cursor()
+        if not self._up:
+            edge = shown and g.x() <= x < g.x() + g.width() and y >= g.y() + g.height() - 1
+            self._dwell = self._dwell + 1 if edge else 0
+            if self._dwell >= 2:            # resting there, not just passing through
+                self._dwell = 0
+                self._slide(True)
+            return
+        near = self.geometry().adjusted(-12, -24, 12, 0).contains(x, y)
+        if near or QApplication.activePopupWidget() is not None:
+            self._away = 0
+            return
+        self._away += 1
+        if self._away >= 6:
+            self._away = 0
+            self._slide(False)
 
     def _top(self):
         return NEON_TOP if self.board.state.dock_neon else TOP
@@ -780,6 +874,13 @@ class GlassDock(QWidget):
         screen = screen or QApplication.primaryScreen()
         if screen is None or self._workarea is None:
             return
+        rect = self._target(screen)
+        if self._up and self._slider.state() != QAbstractAnimation.Running and \
+                self.geometry() != rect:
+            self.setGeometry(rect)
+
+    def _target(self, screen):
+        """Where the dock belongs on the main display, reserving its space."""
         s = max(1.0, screen.logicalDotsPerInch() / 96.0)
         if s != self._s:
             self._s, self._fonts = s, None
@@ -792,12 +893,12 @@ class GlassDock(QWidget):
         height = round((self._top() + WINDOW_H - TOP) * s)
         bar = self.lease.hwnd or shell.taskbar()
         # In place of the taskbar the dock sits at the screen's edge; beside it,
-        # just above it. Either way maximised windows stop at the dock's top.
+        # just above it. It reserves no space: like an auto-hiding taskbar it
+        # gets out of the way of a maximised window instead, which keeps the
+        # whole height. (Reserving it left maximised windows 64 px short.)
         bottom = monitor[3] if self.lease.hwnd else shell.taskbar_edge(monitor, bar)
-        self._workarea.reserve(monitor, bottom - height, bar)
-        rect = QRect(g.x() + (g.width() - width) // 2, bottom - height, width, height)
-        if self.geometry() != rect:
-            self.setGeometry(rect)
+        self._workarea.release()
+        return QRect(g.x() + (g.width() - width) // 2, bottom - height, width, height)
 
     def resizeEvent(self, event):
         if self.preview:
@@ -1201,6 +1302,9 @@ class GlassDock(QWidget):
         hit = self._hit(event.position())
         if event.button() in (Qt.LeftButton, Qt.MiddleButton) and hit:
             self._pressed = hit[0]
+            # Whether the hidden icons were open as the arrow went down - by the
+            # release the click may already have started to dismiss them.
+            self._flyout_at_press = hit[0] == "tray" and bool(shell.overflow_window())
             self.invalidate()
 
     def mouseReleaseEvent(self, event):
@@ -1228,7 +1332,10 @@ class GlassDock(QWidget):
         elif ident == "music":
             media.play_pause()
         elif ident == "tray":
-            self.open_tray()
+            if self._flyout_at_press:
+                shell.close_overflow()            # a second click closes them, at once
+            else:
+                self.open_tray()
         elif ident == "quick":
             shell.shortcut(0x41)                  # Win+A: quick settings
         elif ident == "clock":
