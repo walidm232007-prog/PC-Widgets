@@ -1,0 +1,5 @@
+# What tools/build_exe.py builds with. Pinned: these are the versions the
+# release was tested on, and PySide6_Essentials is all of Qt the app uses.
+pyinstaller==6.22.3
+PySide6_Essentials==6.11.1
+numpy==2.4.6

@@ -284,8 +284,7 @@ def _check_vendored_closure() -> None:
 
     from widgets.core import paths
     if paths.FROZEN:
-        # No interpreter to start with -s; the bundle is checked when it is built.
-        print("  vendored closure: skipped, running as the installed exe")
+        _check_vendored_closure_here()
         return
     root = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isdir(os.path.join(root, "vendor")):
@@ -334,6 +333,31 @@ def _check_vendored_closure() -> None:
         f"stdout: {got} stderr: {res.stderr.strip()[:400]}")
     print(f"  vendored closure: media API and audio capture import with user "
           f"site-packages off ({got[1]} loopback endpoint(s))")
+
+
+def _check_vendored_closure_here() -> None:
+    """The same, in the installed exe. There is no interpreter to start with
+    ``-s``, and no need: the exe never sees a user site, so this process is
+    already the broken machine's case. Only the vendored copies can load."""
+    from widgets.core import audio, media
+
+    src = media.MediaSource()
+    src.poll()
+    assert src.backend == "winrt", (
+        f"the installed exe's media backend fell back to {src.backend} - "
+        "vendor/ is missing from the bundle or incomplete")
+    audio._use_vendored()
+    import pyaudiowpatch as pa
+    vendor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
+    assert pa.__file__.startswith(vendor), (
+        f"the audio capture loaded from {pa.__file__}, not the bundled vendor/")
+    p = pa.PyAudio()
+    try:
+        endpoints = sum(1 for _ in p.get_loopback_device_info_generator())
+    finally:
+        p.terminate()
+    print(f"  vendored closure: media API and audio capture load from the "
+          f"bundle ({endpoints} loopback endpoint(s))")
 
 
 def _check_tls() -> None:
@@ -1788,6 +1812,8 @@ def run(open_window: bool = True) -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("PC Widgets")
+    from widgets.version import VERSION
+    app.setApplicationVersion(VERSION)
     if startup.icon_path():
         app.setWindowIcon(QIcon(startup.icon_path()))
 
@@ -1853,12 +1879,34 @@ def _helper(mode: str) -> int:
     return winrt_read._main()
 
 
+def _logged_selftest() -> int:
+    """The self test, from the installed exe.
+
+    The exe has no console, so the report would go nowhere, and an exception
+    ends in an error dialog rather than a traceback. Both go to
+    ``_selftest/selftest.log`` in the write directory instead, and the exit
+    code says whether it passed.
+    """
+    import traceback
+
+    out = os.path.join(_write_dir(), "_selftest")
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "selftest.log"), "w", encoding="utf-8") as log:
+        sys.stdout = sys.stderr = log
+        try:
+            return selftest()
+        except BaseException:
+            traceback.print_exc()
+            return 1
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] in HELPER_MODES:
         return _helper(sys.argv[1])
     args = set(sys.argv[1:])
     if "--selftest" in args:
-        return selftest()
+        from widgets.core import paths
+        return _logged_selftest() if paths.FROZEN else selftest()
     # The shortcut flags combine - the README's "fix all three in one go" is
     # `--app --shortcut --install-startup` - so each one runs, then it exits.
     shortcut_flags = {"--install-startup", "--startup", "--autostart",

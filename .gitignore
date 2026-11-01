@@ -19,6 +19,8 @@ fonts/*.woff2
 #  Local, generated, or machine-specific
 # --------------------------------------------------------------------------- #
 _selftest/
+# tools/build_exe.py output.
+build/
 _run.log
 *.log
 
