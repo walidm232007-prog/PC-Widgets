@@ -462,6 +462,62 @@ def check_listening():
     print("PASS: one shared capture, open only while a track plays, balanced across on/off")
 
 
+def check_fullscreen(app):
+    """Fullscreen: the dock slides off the edge; the pointer resting on the
+    bottom edge brings it up, leaving lets it go, and a hidden pointer (a game
+    holding the mouse) never does. Nothing reaches the screen: the window is
+    never mapped, and the work area and taskbar are left alone."""
+    from unittest.mock import patch
+    b = TestBoard()
+    b.state.dock_replace_taskbar = False
+    g = app.primaryScreen().geometry()
+    full, maxed = [None], [False]
+    pointer = [(g.center().x(), g.center().y(), True)]
+    with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
+            patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
+            patch.object(winapi, "fullscreen_monitor", lambda: full[0]), \
+            patch.object(shell, "maximised_on", lambda hwnds, monitor: maxed[0]), \
+            patch.object(shell, "cursor", lambda: pointer[0]):
+        dock = GlassDock(b)
+        dock.setAttribute(Qt.WA_DontShowOnScreen)
+        try:
+            b.set_dock("enabled", True)
+            up_y = dock.y()
+            assert dock.isVisible()
+            maxed[0] = True
+            dock._refresh()
+            pump(app, 0.5)
+            assert not dock.isVisible(), "stayed up over a maximised window"
+            pointer[0] = (g.center().x(), g.y() + g.height() - 1, False)
+            pump(app, 0.6)
+            assert not dock.isVisible(), "came up for a hidden (captured) pointer"
+            pointer[0] = (g.center().x(), g.y() + g.height() - 1, True)
+            pump(app, 0.6)
+            assert dock.isVisible() and dock.y() == up_y, "the bottom edge did not bring it up"
+            dock._refresh()
+            assert dock.isVisible(), "the 1 s refresh sent it back down under the pointer"
+            pointer[0] = (g.center().x(), g.center().y(), True)
+            pump(app, 1.2)
+            assert not dock.isVisible(), "did not go back down when the pointer left"
+            maxed[0] = False
+            dock._refresh()
+            pump(app, 0.5)
+            assert dock.isVisible() and dock.y() == up_y, "did not come back after the window"
+            full[0] = (g.x(), g.y(), g.x() + g.width(), g.y() + g.height())
+            dock._refresh()
+            pump(app, 0.5)
+            assert not dock.isVisible(), "stayed up over a fullscreen app"
+            full[0] = None
+            dock._refresh()
+            pump(app, 0.5)
+            assert dock.isVisible(), "did not come back after fullscreen"
+        finally:
+            dock.close()
+    print("PASS: a maximised or fullscreen window sends the dock below the edge; resting on the "
+          "edge brings it up, leaving lets it down, a captured pointer never does, and it "
+          "returns afterwards")
+
+
 def check_windows(app, board, out):
     """Real app windows get buttons with their own icons; tool windows do not."""
     windows = []
@@ -506,8 +562,7 @@ def check_live(app, board, out):
         if was_visible:
             assert live.lease.hwnd, "could not acquire the native taskbar"
             assert not shell.u.IsWindowVisible(native)
-        assert winapi.work_area()[3] <= live.y() + 1, (
-            "maximised windows would overlap the dock", winapi.work_area(), live.geometry())
+        assert winapi.work_area() == old_work, "the dock took screen space it moves out of"
         live.grab().save(str(out / "live.png"))
         board.set_dock("enabled", False)
         pump(app, 0.3)
@@ -543,6 +598,7 @@ def main():
     check_guard(app)
     check_positions()
     check_listening()
+    check_fullscreen(app)
     if args.windows:
         check_windows(app, board, out)
     if args.live:

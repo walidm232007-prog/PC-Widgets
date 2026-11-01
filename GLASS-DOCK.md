@@ -112,17 +112,27 @@ taskbar when the pipe closes - when the dock is turned off, the board quits, or
 the board crashes. Other displays keep their own taskbars. Turning replacement
 off keeps the taskbar and floats the dock just above it.
 
-Either way maximised windows stop at the dock's top. The dock reserves only
-what Explorer does not already keep (with an auto-hiding taskbar, that is all
-of it), through a hidden window of its own, and Windows drops the reservation
-with that window. Widget coordinates do not move when only the work area
-changes: toggling the dock, changing taskbar height and restarting all keep the
-saved arrangement.
+The dock works like an auto-hiding taskbar. A maximised or fullscreen window
+on the main display - most people's "full screen" is the maximise button -
+sends it down below the screen's edge, and that window keeps the whole height.
+Rest the pointer on the bottom edge for a moment and the dock slides back up
+over the window; move away and it slides down again. With nothing maximised it
+simply stays up. A hidden pointer never brings it up: a game that has captured
+the mouse hides the pointer, so the dock can't appear mid-match, only in menus
+where the pointer shows. The edge is watched ten times a second, only while the
+dock is down.
 
-A fullscreen app on the main display - a game, a video - hides the dock, and
-the taskbar is left alone. The first version showed the hidden taskbar every
-second during a game with a call that also activated it, which takes the focus
-away from a fullscreen game.
+So the dock reserves no screen space. It did at first, and maximised windows
+stopped 64 px short of the bottom; a dock that moves out of their way is what
+an auto-hiding taskbar does instead. With replacement on and Windows' own
+taskbar not set to auto-hide, Explorer still keeps its own strip, so maximised
+windows stop at the top of the hidden bar. Widget coordinates do not move when
+only the work area changes: toggling the dock, changing taskbar height and
+restarting all keep the saved arrangement.
+
+The taskbar is left alone while something is fullscreen. The first version
+showed the hidden taskbar every second during a game with a call that also
+activated it, which takes the focus away from a fullscreen game.
 
 ## How it stays out of the way
 
