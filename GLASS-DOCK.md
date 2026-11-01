@@ -163,5 +163,4 @@ real taskbar and checks the work area comes back. `py -3.13 main.py
 --selftest` exercises the widgets and the app window.
 
 The dock is for the main display on Windows 11. Taskbar thumbnails, drag to
-reorder, importing the taskbar's pins, a dock on each display and auto-hide
-are not part of it yet.
+reorder and a dock on each display are not part of it yet.

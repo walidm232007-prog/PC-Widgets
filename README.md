@@ -500,6 +500,15 @@ happens to be behind. In the default desktop layer that is exactly correct,
 since nothing is between the cards and the wallpaper. When the board is peeked
 to the front over an app, the material still shows wallpaper.
 
+## Glass Dock
+
+**Settings → Glass Dock → Floating dock** puts a dock along the bottom of the
+main display: music, Start, the taskbar's pins and open apps, and Windows' own
+tray, network, volume and clock. It can stand in for the taskbar, hides like
+an auto-hiding one when a window is maximised, and can carry a neon outline.
+It is off by default. `GLASS-DOCK.md` covers how each part works and why, and
+`py -3.13 tools/dock_selftest.py` checks it without putting anything on screen.
+
 ## Layers
 
 Phone and Mac widgets sit *on* the desktop, below your work — which is right
