@@ -1,0 +1,91 @@
+# Builds PC Widgets.exe and its installer, tests both, and publishes a release.
+#
+# - Push a tag like v1.0.0 (matching widgets/version.py): build, test, and a
+#   GitHub Release with the installer attached.
+# - Run it by hand (Actions -> Release -> Run workflow): build and test only,
+#   the installer kept as a workflow artifact for a week. Do this before
+#   tagging, to see a build pass on a clean machine.
+#
+# packaging/README.md explains the build itself.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build tools
+        run: python -m pip install --disable-pip-version-check -r packaging/requirements.txt
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup did not install" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path widgets/version.py -Pattern 'VERSION = "([\d.]+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "tag $env:GITHUB_REF_NAME doesn't match widgets/version.py ($v)"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build and test
+        run: python tools/build_exe.py --out build --installer
+
+      - name: Self-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-log
+          path: build/test-localappdata/PCWidgets/_selftest/selftest.log
+          if-no-files-found: ignore
+
+      - name: Keep the installer
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PC-Widgets-Setup-${{ steps.version.outputs.version }}
+          path: build/PC-Widgets-Setup-${{ steps.version.outputs.version }}.exe
+          retention-days: 7
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $v = $env:VERSION
+          $setup = "build/PC-Widgets-Setup-$v.exe"
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          $notes = @"
+          **Download PC-Widgets-Setup-$v.exe below and run it.** Windows 10 or 11, 64-bit. No admin needed, and nothing else to install.
+
+          The installer isn't signed yet, so the first time Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+
+          To update, run a newer installer over this one; your widgets and settings stay. Uninstall from Settings -> Apps.
+
+          SHA-256: ``$hash``
+          "@
+          gh release create $env:GITHUB_REF_NAME $setup --title "PC Widgets $v" --notes $notes

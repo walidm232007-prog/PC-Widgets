@@ -3,6 +3,15 @@
 iPhone/Mac-style widgets for the Windows desktop. Rounded translucent cards that
 live *on* your desktop, snap to a grid, and come to the front on a hotkey.
 
+## Download
+
+**[Get the installer from the latest release](../../releases/latest)** -
+`PC-Widgets-Setup-<version>.exe` - and run it. Windows 10 or 11, 64-bit. No
+admin, no Python, nothing else to install. It isn't signed yet, so Windows may
+say "Windows protected your PC" the first time: **More info**, then **Run
+anyway**. A newer installer run over it updates it and keeps your widgets.
+`packaging/README.md` covers how it is built.
+
 ## From a fresh clone
 
 Windows 10 or 11 and Python 3.11+.

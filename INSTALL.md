@@ -1,5 +1,13 @@
 # Setting this up on a new PC
 
+**The easy way:** download `PC-Widgets-Setup-<version>.exe` from the
+repository's Releases page and run it. Nothing else to install, no admin. If
+Windows says "Windows protected your PC", click **More info**, then **Run
+anyway** - the installer isn't signed yet. To update, run a newer installer;
+to remove it, Settings → Apps.
+
+The rest of this page is for running it from the source code instead.
+
 Windows 10 or 11. Two things to install, then double-click and it runs.
 
 ## 1. Python

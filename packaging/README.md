@@ -80,6 +80,23 @@ replaces the Start menu one.
 time; More info → Run anyway. Signing the installer and the exe removes that,
 and needs a code-signing certificate or signing service.
 
+## Releasing
+
+`.github/workflows/release.yml` does the build above on a clean GitHub Windows
+machine, so a release never depends on what one PC has installed.
+
+1. Raise `VERSION` in `widgets/version.py` and commit it to `main`.
+2. **Actions → Release → Run workflow** on `main`. That builds and tests
+   everything, `--installer` included, and keeps the installer as an artifact
+   for a week, to try before anyone else gets it.
+3. Tag the commit and push the tag: `git tag v1.0.0`, then
+   `git push origin v1.0.0`. The workflow runs again and publishes a GitHub
+   Release with the installer and its SHA-256. A tag that doesn't match
+   `widgets/version.py` fails before anything is built.
+
+The README's download link points at the latest release, so it needs no
+change. If a test fails, the self test's log is attached to the run.
+
 ## What is in it
 
 `packaging/pc-widgets.spec` says what goes in, and why:
