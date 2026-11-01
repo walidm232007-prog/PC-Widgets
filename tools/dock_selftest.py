@@ -12,6 +12,7 @@ itself and hides and restores the real taskbar.
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -27,7 +28,7 @@ os.environ["PCWIDGETS_NO_AUDIO"] = "1"
 from PySide6.QtCore import QFileInfo, QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QFileIconProvider, QWidget
-from widgets.core import audio, dock_shell as shell, media, palette, store, winapi
+from widgets.core import audio, dock_shell as shell, media, palette, paths, store, winapi
 from widgets.core.glass import GlassBackdrop
 from widgets.ui import dock as dockmod
 from widgets.ui.dock import Entry, GlassDock, Snapshot, Watcher, paint_windows_logo
@@ -347,13 +348,18 @@ def check_guard(app):
     window.show()
     pump(app, 0.1)
     hwnd = int(window.winId())
+    # The command the dock itself starts the guard with, whichever form the
+    # app is in (see widgets/core/paths.py).
+    command = paths.helper("--guard", os.path.abspath(shell.__file__), str(hwnd))
+    if os.environ.get("PCWIDGETS_EXE"):
+        command = [os.environ["PCWIDGETS_EXE"], "--guard", str(hwnd)]
     script = (
-        "import subprocess,sys,time; "
-        "p=subprocess.Popen([sys.executable,sys.argv[1],'--guard',sys.argv[2]],"
+        "import json,subprocess,sys,time; "
+        "p=subprocess.Popen(json.loads(sys.argv[1]),"
         "stdin=subprocess.PIPE,creationflags=0x08000000); "
         "print('ready',flush=True); time.sleep(30)"
     )
-    parent = subprocess.Popen([sys.executable, "-c", script, shell.__file__, str(hwnd)],
+    parent = subprocess.Popen([sys.executable, "-c", script, json.dumps(command)],
                               stdout=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
     try:
         assert parent.stdout.readline().strip() == b"ready"

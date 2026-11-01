@@ -904,11 +904,9 @@ class TaskbarLease:
             # The guard starts before hiding. If process creation fails, leave
             # Explorer alone. All pipe handles close when the parent dies.
             try:
-                executable = sys.executable
-                if os.path.basename(executable).lower() == "pythonw.exe":
-                    executable = os.path.join(os.path.dirname(executable), "python.exe")
+                from . import paths
                 self.guard = subprocess.Popen(
-                    [executable, os.path.abspath(__file__), "--guard", str(hwnd)],
+                    paths.helper("--guard", os.path.abspath(__file__), str(hwnd)),
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
                 self.hwnd = hwnd

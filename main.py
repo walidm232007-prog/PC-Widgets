@@ -6,6 +6,9 @@ PC Widgets - iPhone/Mac-style widgets for the Windows desktop.
     python main.py --selftest    render every widget offscreen to _selftest/*.png
     python main.py --reset       forget the layout
 
+Installed, ``PC Widgets.exe`` takes the same flags, plus two it runs as its own
+helper processes (``--guard`` and ``--winrt-read``; see widgets/core/paths.py).
+
 Launching it while it is already running opens the running copy's window
 rather than starting a second board.
 
@@ -32,6 +35,14 @@ HOTKEY_ID = 0xB01D
 VK_W = 0x57
 APP_ID = "PCWidgets.Board"
 BACKGROUND_FLAGS = {"--background", "--tray"}
+# The installed exe's helper modes. From a checkout each is a script run by
+# Python; the exe can't run a script, so it is started again with one of these.
+HELPER_MODES = {"--guard", "--winrt-read"}
+
+
+def _write_dir() -> str:
+    from widgets.core import paths
+    return paths.write_dir()
 
 
 def _already_running() -> bool:
@@ -64,7 +75,7 @@ def selftest() -> int:
 
     app = QApplication.instance() or QApplication(sys.argv)
     load_builtin_tiles()
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_selftest")
+    out = os.path.join(_write_dir(), "_selftest")
     os.makedirs(out, exist_ok=True)
 
     from widgets.core import typography
@@ -271,6 +282,11 @@ def _check_vendored_closure() -> None:
     """
     import subprocess
 
+    from widgets.core import paths
+    if paths.FROZEN:
+        # No interpreter to start with -s; the bundle is checked when it is built.
+        print("  vendored closure: skipped, running as the installed exe")
+        return
     root = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isdir(os.path.join(root, "vendor")):
         print("  vendored closure: skipped, no vendor/ directory")
@@ -1070,7 +1086,7 @@ def _check_app_window() -> None:
         r = c.card_rect()
         return QRectF(c.x() + r.left(), c.y() + r.top(), r.width(), r.height())
 
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_selftest")
+    out = os.path.join(_write_dir(), "_selftest")
     real_start = WidgetCard.start
     WidgetCard.start = lambda self: None        # never put a card on screen
     try:
@@ -1813,7 +1829,33 @@ def _knock() -> bool:
     return False
 
 
+def _helper(mode: str) -> int:
+    """Run as a helper process: nothing of the board, and no Qt.
+
+    The guard has to be up before the dock hides the taskbar, and the media
+    helper is started every few seconds, so neither waits for anything else.
+    """
+    # A windowed exe starts with no sys.stdin or sys.stdout even when the parent
+    # handed it pipes; the pipes are still descriptors 0 and 1.
+    for name, fd, how in (("stdin", 0, "r"), ("stdout", 1, "w")):
+        if getattr(sys, name) is None:
+            try:
+                setattr(sys, name, os.fdopen(fd, how, encoding="utf-8"))
+            except OSError:
+                pass
+    # sys.argv is the same as when they run as scripts: the mode, then its
+    # arguments.
+    if mode == "--guard":
+        from widgets.core import dock_shell
+        dock_shell._guard(int(sys.argv[2]))
+        return 0
+    from widgets.core import winrt_read
+    return winrt_read._main()
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in HELPER_MODES:
+        return _helper(sys.argv[1])
     args = set(sys.argv[1:])
     if "--selftest" in args:
         return selftest()

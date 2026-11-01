@@ -14,6 +14,8 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List
 
+from . import paths
+
 
 def _dir() -> str:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
@@ -26,9 +28,7 @@ def _path() -> str:
 
 def _mirror_dir() -> str:
     """A second home for the layout, beside the app rather than in the profile."""
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), ".boardstate")
+    return os.path.join(paths.write_dir(), ".boardstate")
 
 
 def _mirror_path() -> str:
@@ -235,9 +235,7 @@ def report(msg: str) -> None:
     """
     _log(msg)
     try:
-        here = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))))
-        with open(os.path.join(here, "_widgets.log"), "a",
+        with open(os.path.join(paths.write_dir(), "_widgets.log"), "a",
                   encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
     except Exception:

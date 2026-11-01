@@ -11,7 +11,8 @@ fresh ``sys.path`` and fresh import caches.
 
 ``prefer`` is a player id ("auto", "spotify", "applemusic"). ``known-track-key``
 lets the caller say which sleeve it already has, so a 200KB cover is not
-base64-encoded onto the pipe for every poll of the same track.
+base64-encoded onto the pipe for every poll of the same track. The board starts
+it with ``--winrt-read`` first (widgets/core/paths.py), which is skipped here.
 """
 
 from __future__ import annotations
@@ -24,8 +25,11 @@ import sys
 
 
 def _main() -> int:
-    prefer = sys.argv[1] if len(sys.argv) > 1 else "auto"
-    known = sys.argv[2] if len(sys.argv) > 2 else ""
+    args = sys.argv[1:]
+    if args[:1] == ["--winrt-read"]:
+        args = args[1:]
+    prefer = args[0] if args else "auto"
+    known = args[1] if len(args) > 1 else ""
 
     here = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))))

@@ -19,25 +19,15 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from typing import Optional
+
+from . import paths
 
 APP_NAME = "PC Widgets"
 LNK = f"{APP_NAME}.lnk"
 # Starting with Windows brings the widgets back without opening the app window;
 # every other launcher opens it.
 BACKGROUND = "--background"
-
-
-def _project_root() -> str:
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def pythonw() -> str:
-    """The windowed interpreter, so no console flashes up at boot."""
-    exe = sys.executable
-    cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
-    return cand if os.path.exists(cand) else exe
 
 
 def start_menu_dir() -> str:
@@ -73,27 +63,29 @@ def app_link() -> str:
     ``run.bat`` already worked, but a .bat shows a generic script icon and
     flashes a console on the way through. This is the same shortcut as the
     desktop one, sitting next to the code, so the folder has an obvious thing
-    to double-click.
+    to double-click. Installed, the program folder is the place.
     """
-    return os.path.join(_project_root(), LNK)
+    return os.path.join(paths.install_dir(), LNK)
 
 
 def icon_path() -> Optional[str]:
-    p = os.path.join(_project_root(), "assets", "widgets.ico")
+    p = os.path.join(paths.project_root(), "assets", "widgets.ico")
     return p if os.path.exists(p) else None
 
 
 # --------------------------------------------------------------------------- #
-def _make_shortcut(path: str, args: str = "main.py", style: int = 1) -> bool:
+def _make_shortcut(path: str, args: str = "", style: int = 1) -> bool:
     """``style`` is the shortcut's Run setting: 1 normal, 7 minimised.
 
     Launchers that open the app window must be normal. Windows applies a
     minimised Run setting to the first ordinary window the process shows, which
     is now the app window - it would open straight onto the taskbar.
     """
-    root = _project_root()
-    target = pythonw()
-    icon = icon_path() or target
+    root = paths.install_dir()
+    target = paths.launcher()
+    args = paths.launch_args(args)
+    # Installed, the exe carries the icon itself.
+    icon = target if paths.FROZEN else (icon_path() or target)
     script = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK_PATH); "
         "$s.TargetPath = $env:LNK_TARGET; "
@@ -133,7 +125,7 @@ def is_enabled() -> bool:
 def enable() -> bool:
     os.makedirs(startup_dir(), exist_ok=True)
     # Minimised is harmless here: a background start shows no ordinary window.
-    return _make_shortcut(startup_link(), f"main.py {BACKGROUND}", style=7)
+    return _make_shortcut(startup_link(), BACKGROUND, style=7)
 
 
 def startup_link_is_current() -> bool:

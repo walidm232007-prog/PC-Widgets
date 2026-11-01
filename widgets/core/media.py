@@ -457,9 +457,8 @@ def _report(msg: str) -> None:
     except Exception:
         pass
     try:
-        here = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))))
-        with open(os.path.join(here, "_media.log"), "a",
+        from . import paths
+        with open(os.path.join(paths.write_dir(), "_media.log"), "a",
                   encoding="utf-8") as fh:
             fh.write(line)
     except Exception:
@@ -629,16 +628,6 @@ def _from_winrt(prefer: str = "auto") -> NowPlaying:
 HELPER_TIMEOUT = 8.0
 
 
-def _helper_python() -> str:
-    """The console interpreter, so no window flashes on every poll."""
-    exe = sys.executable or "python"
-    if os.path.basename(exe).lower() == "pythonw.exe":
-        cand = os.path.join(os.path.dirname(exe), "python.exe")
-        if os.path.exists(cand):
-            return cand
-    return exe
-
-
 def _from_subprocess(prefer: str, known: str) -> Tuple[NowPlaying, str]:
     """Read the session in a *new* process, and return it with its track key.
 
@@ -652,11 +641,12 @@ def _from_subprocess(prefer: str, known: str) -> Tuple[NowPlaying, str]:
     About a quarter of a second per call, so the caller polls slower in this
     mode. A card a second behind beats a card that has been wrong for days.
     """
+    from . import paths
     helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "winrt_read.py")
     try:
         res = subprocess.run(
-            [_helper_python(), helper, prefer, known],
+            paths.helper("--winrt-read", helper, prefer, known),
             capture_output=True, text=True, timeout=HELPER_TIMEOUT,
             creationflags=0x08000000)          # CREATE_NO_WINDOW
         data = json.loads(res.stdout.strip() or "{}")
