@@ -43,6 +43,7 @@ u.GetWindowLongPtrW.restype = C.c_ssize_t
 for name in ("IsWindowVisible", "IsWindow", "IsIconic", "SetForegroundWindow"):
     getattr(u, name).argtypes = [W.HWND]
 u.ShowWindow.argtypes = [W.HWND, C.c_int]
+u.ShowWindowAsync.argtypes = [W.HWND, C.c_int]
 u.SwitchToThisWindow.argtypes = [W.HWND, W.BOOL]
 u.SwitchToThisWindow.restype = None
 u.PostMessageW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM]
@@ -833,6 +834,7 @@ u.SetWinEventHook.argtypes = [W.DWORD, W.DWORD, W.HMODULE, WINEVENTPROC, W.DWORD
 u.SetWinEventHook.restype = W.HANDLE
 u.UnhookWinEvent.argtypes = [W.HANDLE]
 EVENT_FOREGROUND = 0x0003
+EVENT_SHOW = 0x8002
 
 
 class WindowEvents:
@@ -920,6 +922,14 @@ class TaskbarLease:
         if u.IsWindowVisible(hwnd):
             u.ShowWindow(hwnd, SW_HIDE)
         return True
+
+    def rehide(self) -> None:
+        """Hide the leased bar again after Explorer showed it by itself. Async:
+        this runs from a window-event callback, and a busy Explorer must not
+        stall the dock's thread."""
+        if self.guard is not None and self.guard.poll() is None and self.hwnd \
+                and u.IsWindowVisible(self.hwnd):
+            u.ShowWindowAsync(self.hwnd, SW_HIDE)
 
     def reveal(self) -> None:
         # SW_SHOWNA, never SW_SHOW: showing the bar must not activate it. An

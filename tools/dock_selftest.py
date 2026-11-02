@@ -518,6 +518,67 @@ def check_fullscreen(app):
           "returns afterwards")
 
 
+def check_rehide(app):
+    """Explorer re-shows a hidden auto-hiding taskbar when the pointer touches
+    the bottom edge, the same move that brings the dock up over a maximised
+    window. The dock must hide it again, there too, but leave alone a bar
+    raised on purpose for its tray. A stand-in lease: the real bar is never
+    touched."""
+    from unittest.mock import patch
+
+    class Lease:
+        hwnd = 4242
+
+        def __init__(self):
+            self.calls = []
+
+        def hide(self):
+            self.calls.append("hide")
+            return True
+
+        def rehide(self):
+            self.calls.append("rehide")
+
+        def reveal(self):
+            self.calls.append("reveal")
+
+        def restore(self):
+            self.calls.append("restore")
+
+    b = TestBoard()
+    b.state.dock_replace_taskbar = True
+    with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
+            patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
+            patch.object(winapi, "fullscreen_monitor", lambda: None), \
+            patch.object(shell, "maximised_on", lambda hwnds, monitor: True):
+        dock = GlassDock(b)
+        dock.setAttribute(Qt.WA_DontShowOnScreen)
+        lease = dock.lease = Lease()
+        try:
+            b.set_dock("enabled", True)
+            assert "hide" in lease.calls, "a maximised window stopped the dock hiding the taskbar"
+            lease.calls.clear()
+            dock._window_event(shell.EVENT_SHOW, Lease.hwnd)
+            assert lease.calls == ["rehide"], "Explorer showing the bar was not undone"
+            lease.calls.clear()
+            dock._window_event(shell.EVENT_SHOW, 777)
+            assert "rehide" not in lease.calls, "hid a window that is not the taskbar"
+            dock._tray_since = time.monotonic()
+            lease.calls.clear()
+            dock._window_event(shell.EVENT_SHOW, Lease.hwnd)
+            dock._refresh()
+            assert not {"hide", "rehide"} & set(lease.calls), "hid the bar raised for its tray"
+            dock._tray_since = 0.0
+            b.state.dock_replace_taskbar = False
+            lease.calls.clear()
+            dock._window_event(shell.EVENT_SHOW, Lease.hwnd)
+            assert "rehide" not in lease.calls, "hid the bar with 'replace the taskbar' off"
+        finally:
+            dock.close()
+    print("PASS: Explorer re-showing the hidden taskbar is undone, over maximised windows too, "
+          "but not when it was raised for its tray or the dock sits beside it")
+
+
 def check_windows(app, board, out):
     """Real app windows get buttons with their own icons; tool windows do not."""
     windows = []
@@ -599,6 +660,7 @@ def main():
     check_positions()
     check_listening()
     check_fullscreen(app)
+    check_rehide(app)
     if args.windows:
         check_windows(app, board, out)
     if args.live:

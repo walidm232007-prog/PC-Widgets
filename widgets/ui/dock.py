@@ -703,6 +703,13 @@ class GlassDock(QWidget):
         self.invalidate()
 
     def _window_event(self, event, hwnd):
+        if event == shell.EVENT_SHOW and hwnd == self.lease.hwnd:
+            # Explorer shows its hidden bar by itself: an auto-hiding one when
+            # the pointer touches the bottom edge - the very move that brings
+            # the dock up - and on Start, Win+B and the like. Hide it again at
+            # once, unless it was raised on purpose for its tray.
+            if self._running and not self._tray_since and self.board.state.dock_replace_taskbar:
+                self.lease.rehide()
         if event == shell.EVENT_FOREGROUND and hwnd != self._fg:
             self._fg = hwnd
             self.invalidate()
@@ -730,8 +737,12 @@ class GlassDock(QWidget):
             # A maximised or fullscreen window fills the main display: the dock
             # slides down off the edge, as an auto-hiding taskbar does, and the
             # mouse resting on the bottom edge brings it back (see _edge_tick).
-            # The taskbar is left alone: showing it used to activate it, taking
-            # the focus from a fullscreen game every second.
+            # The taskbar is never shown here: showing it used to activate it,
+            # taking the focus from a fullscreen game every second. It is kept
+            # hidden, though - that same edge raises an auto-hiding bar, and
+            # leaving it visible here put it up beside the dock.
+            if not self._tray_since:
+                self._lease_taskbar()
             if not self._auto:
                 self._auto, self._dwell, self._away = True, 0, 0
                 self._edge_timer.start()
@@ -749,11 +760,7 @@ class GlassDock(QWidget):
                 return
             self._tray_since = 0.0
             self._tray_timer.stop()
-        if self.board.state.dock_replace_taskbar:
-            if not self.lease.hide():
-                self.lease.restore()        # fail open: the dock floats above the bar
-        else:
-            self.lease.restore()
+        self._lease_taskbar()
         self._place(screen)
         fg = shell.foreground()
         minute = time.strftime("%H:%M")
@@ -767,6 +774,13 @@ class GlassDock(QWidget):
             if self._listening:
                 self._frame.start()
         self._sync_neon()
+
+    def _lease_taskbar(self):
+        if self.board.state.dock_replace_taskbar:
+            if not self.lease.hide():
+                self.lease.restore()        # fail open: the dock floats above the bar
+        else:
+            self.lease.restore()
 
     def _covered(self, g):
         """A window maximised or fullscreen on the main display. Maximised
