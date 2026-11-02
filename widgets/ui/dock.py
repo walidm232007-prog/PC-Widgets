@@ -833,13 +833,19 @@ class GlassDock(QWidget):
         """While something is fullscreen: the pointer resting on the main
         display's bottom edge brings the dock up; once it has been away from
         the dock for a moment, it goes back down. A hidden pointer - a game
-        that has captured the mouse - never brings it up."""
+        that has captured the mouse - never brings it up. Start does, as it
+        brings up the taskbar, and holds it up until Start closes."""
         screen = QApplication.primaryScreen()
         if screen is None or self._slider.state() == QAbstractAnimation.Running:
             return
         g = screen.geometry()
         x, y, shown = shell.cursor()
+        start = shell.is_start(shell.foreground())
         if not self._up:
+            if start:
+                self._dwell = 0
+                self._slide(True)
+                return
             edge = shown and g.x() <= x < g.x() + g.width() and y >= g.y() + g.height() - 1
             self._dwell = self._dwell + 1 if edge else 0
             if self._dwell >= 2:            # resting there, not just passing through
@@ -847,7 +853,7 @@ class GlassDock(QWidget):
                 self._slide(True)
             return
         near = self.geometry().adjusted(-12, -24, 12, 0).contains(x, y)
-        if near or QApplication.activePopupWidget() is not None:
+        if start or near or QApplication.activePopupWidget() is not None:
             self._away = 0
             return
         self._away += 1

@@ -290,6 +290,25 @@ def check_rows(board):
           "clicks cycle, bring forward and minimise")
 
 
+def check_start_host():
+    """Only Start's and search's host processes count as Start."""
+    from unittest.mock import patch
+    paths = {11: r"C:\Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_x\StartMenuExperienceHost.exe",
+             12: r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_x\SearchHost.exe",
+             13: NOTEPAD}
+
+    def pid_of(hwnd, out):
+        out._obj.value = hwnd - 100
+        return 1
+    shell._start_pids.clear()
+    with patch.object(shell.u, "GetWindowThreadProcessId", pid_of), \
+            patch.object(shell, "process_path", lambda pid: paths.get(pid, "")):
+        assert shell.is_start(111) and shell.is_start(112), "Start or search not recognised"
+        assert not shell.is_start(113) and not shell.is_start(0), "an app taken for Start"
+    shell._start_pids.clear()
+    print("PASS: Start and search are told apart from apps by their host process")
+
+
 def check_native():
     assert isinstance(shell.tasks(), list)
     assert shell.network() in ("ethernet", "wifi", "cellular", "offline")
@@ -471,13 +490,14 @@ def check_fullscreen(app):
     b = TestBoard()
     b.state.dock_replace_taskbar = False
     g = app.primaryScreen().geometry()
-    full, maxed = [None], [False]
+    full, maxed, start = [None], [False], [False]
     pointer = [(g.center().x(), g.center().y(), True)]
     with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
             patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
             patch.object(winapi, "fullscreen_monitor", lambda: full[0]), \
             patch.object(shell, "maximised_on", lambda hwnds, monitor: maxed[0]), \
-            patch.object(shell, "cursor", lambda: pointer[0]):
+            patch.object(shell, "cursor", lambda: pointer[0]), \
+            patch.object(shell, "is_start", lambda hwnd: start[0]):
         dock = GlassDock(b)
         dock.setAttribute(Qt.WA_DontShowOnScreen)
         try:
@@ -499,6 +519,14 @@ def check_fullscreen(app):
             pointer[0] = (g.center().x(), g.center().y(), True)
             pump(app, 1.2)
             assert not dock.isVisible(), "did not go back down when the pointer left"
+            start[0] = True
+            pump(app, 0.5)
+            assert dock.isVisible() and dock.y() == up_y, "Start did not bring it up"
+            pump(app, 1.0)
+            assert dock.isVisible(), "went down while Start was still open"
+            start[0] = False
+            pump(app, 1.2)
+            assert not dock.isVisible(), "stayed up after Start closed"
             maxed[0] = False
             dock._refresh()
             pump(app, 0.5)
@@ -514,8 +542,8 @@ def check_fullscreen(app):
         finally:
             dock.close()
     print("PASS: a maximised or fullscreen window sends the dock below the edge; resting on the "
-          "edge brings it up, leaving lets it down, a captured pointer never does, and it "
-          "returns afterwards")
+          "edge or opening Start brings it up, leaving or closing Start lets it down, a "
+          "captured pointer never does, and it returns afterwards")
 
 
 def check_rehide(app):
@@ -654,6 +682,7 @@ def main():
     check_neon(out, board)
     check_rows(board)
     check_native()
+    check_start_host()
     check_watcher(app)
     check_store()
     check_guard(app)

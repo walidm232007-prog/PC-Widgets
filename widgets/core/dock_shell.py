@@ -778,6 +778,26 @@ def foreground() -> int:
 u.IsZoomed.argtypes = [W.HWND]
 
 
+_START_HOSTS = {"startmenuexperiencehost.exe", "searchhost.exe"}
+_start_pids: dict = {}       # pid -> whether it is Start's (or search's) host
+
+
+def is_start(hwnd: int) -> bool:
+    """Start, or the search it turns into as you type: each lives in its own
+    host process, whatever its window's class or title."""
+    if not hwnd:
+        return False
+    pid = W.DWORD()
+    u.GetWindowThreadProcessId(hwnd, C.byref(pid))
+    known = _start_pids.get(pid.value)
+    if known is None:
+        if len(_start_pids) > 64:
+            _start_pids.clear()
+        known = _start_pids[pid.value] = \
+            os.path.basename(process_path(pid.value)).lower() in _START_HOSTS
+    return known
+
+
 def maximised_on(hwnds, monitor) -> bool:
     """Whether any of these windows is maximised on that monitor. Plain
     window-state reads: nothing here waits on the windows' apps."""
