@@ -851,6 +851,9 @@ class Board(QObject):
         elif key == "neon_motion":
             if value not in ("static", "fade", "circulate"):
                 return
+        elif key == "bars":
+            if value not in ("default", "neon"):
+                return
         elif key == "neon_strength":
             try:
                 value = max(10, min(100, int(value)))

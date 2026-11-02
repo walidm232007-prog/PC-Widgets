@@ -80,6 +80,18 @@ Playing: the cover, title and artist, and five bars from the music widget's
 analyser. Hover shows play or pause over the cover; click toggles it;
 right-click has previous and next.
 
+**Visualiser** (Settings → Glass Dock, or right-click the dock) is Default,
+the bars in the accent colour, or Neon: the bars take the neon outline's
+colours, motion and strength, whether or not the outline itself is on. Still
+or fading, the colours spread across the five bars once; circulating, they run
+across them at the ring's pace, and a single colour is the ring's comet, a
+bright head with a tail. Each bar gets the tube's near-white core and a glow
+sized by the strength. The tail keeps a floor, unlike the ring's, so a bar
+behind the head never vanishes while it still meters the music. Paused, the
+bars keep their colours, dimmed, still and without a glow. The glow is a few
+stepped layers rather than the ring's blur: at 3 px wide, a real blur 50 times
+a second buys nothing you can see.
+
 The bars meter the speakers only while a track is playing, exactly as Now
 Playing does. The first version opened the capture as soon as the dock was on
 and never closed it, so the bars moved to a voice call or a game with no music

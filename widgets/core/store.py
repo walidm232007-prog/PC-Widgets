@@ -104,6 +104,7 @@ class BoardState:
     dock_neon_colors: List[str] = field(default_factory=lambda: ["#00e5ff", "#ff2bd6"])
     dock_neon_motion: str = "circulate"     # static | fade | circulate
     dock_neon_strength: int = 50    # 25 subtle, 50 medium, 75 bright, 100 intense
+    dock_bars: str = "default"      # default (the accent) | neon (the outline's colours and motion)
     placements: List[Placement] = field(default_factory=list)
     # Every display a widget belongs to, connected or not: its name, bounds and
     # work area, by device path - how one that is unplugged is still named, and

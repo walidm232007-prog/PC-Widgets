@@ -1609,7 +1609,7 @@ class SettingsPage(QWidget):
         dock.add(setting_row("plus", "#30d158", "Pinned apps",
                              "Right-click a dock app to pin or unpin it.",
                              Button("Add…", "secondary", slot=self._dock_pin)), self.INSET)
-        from .dock import NEON_MOTIONS, NEON_STRENGTHS
+        from .dock import BAR_STYLES, NEON_MOTIONS, NEON_STRENGTHS
         self.dock_neon = Switch()
         self.dock_neon.toggled.connect(lambda on: board.set_dock("neon", on))
         dock.add(setting_row("moon", "#ff2bd6", "Neon outline",
@@ -1629,6 +1629,11 @@ class SettingsPage(QWidget):
         dock.add(setting_row("sliders", "#ff9f0a", "Neon strength",
                              "How wide and bright the glow is.", self.dock_neon_strength),
                  self.INSET)
+        self.dock_bars = Segmented(BAR_STYLES)
+        self.dock_bars.changed.connect(lambda v: board.set_dock("bars", v))
+        dock.add(setting_row("sliders", "#30b0c7", "Visualiser",
+                             "The accent colour, or the neon outline's colours, motion "
+                             "and glow.", self.dock_bars), self.INSET)
 
         app = self._group(col, "App")
         self.boot = Switch()
@@ -1689,6 +1694,7 @@ class SettingsPage(QWidget):
         self.dock_neon.set_quietly(s.dock_neon)
         self.dock_neon_motion.set_current(s.dock_neon_motion)
         self.dock_neon_strength.set_current(str(s.dock_neon_strength))
+        self.dock_bars.set_current(s.dock_bars)
         self.boot.set_quietly(startup.is_enabled())
         self.start_menu.setText("Update" if startup.has_start_menu_shortcut() else "Add")
         if s.layer == "top":
