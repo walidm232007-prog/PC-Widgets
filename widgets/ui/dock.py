@@ -123,6 +123,7 @@ NEON_PRESETS = (("Cyber", ["#00e5ff", "#ff2bd6"]), ("Cyan", ["#00e5ff"]),
                 ("Toxic", ["#b6ff00"]), ("Ice", ["#e6f9ff", "#38bdf8"]))
 NEON_MOTIONS = (("static", "Static"), ("fade", "Fade"), ("circulate", "Circulate"))
 NEON_STRENGTHS = (("25", "Subtle"), ("50", "Medium"), ("75", "Bright"), ("100", "Intense"))
+BAR_STYLES = (("default", "Default"), ("neon", "Neon"))
 FADE_S, LAP_S = 3.0, 6.0        # a breath in and out; one lap of the dock
 
 
@@ -259,6 +260,46 @@ class NeonRing:
             p.drawPath(squircle(capsule, radius))
         p.end()
         return img
+
+
+def neon_bars(colours, motion, t, n=BARS):
+    """The neon outline carried onto the visualiser: a (colour, brightness)
+    for each bar, left to right.
+
+    Still or fading, the colours spread across the bars once, left to right.
+    Circulating, they run across them at the ring's pace, wrapping round as
+    the ring does, and a single colour is the ring's comet: a bright head
+    with a tail behind it. The tail keeps a floor here, unlike the ring's,
+    or a bar behind the head would vanish while it still meters the music.
+    """
+    cols = [QColor(c) for c in colours if QColor(c).isValid()] or [QColor("#00e5ff")]
+    level = 0.3 + 0.7 * (0.5 - 0.5 * math.cos(2 * math.pi * t / FADE_S)) \
+        if motion == "fade" else 1.0
+    shift = (t / LAP_S) % 1.0 if motion == "circulate" else 0.0
+
+    def mix(a, b, f):
+        return QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * f,
+                               a.greenF() + (b.greenF() - a.greenF()) * f,
+                               a.blueF() + (b.blueF() - a.blueF()) * f)
+
+    out = []
+    for i in range(n):
+        if len(cols) == 1:
+            colour, bright = QColor(cols[0]), 1.0
+            if motion == "circulate":
+                behind = (1.0 - (i / n - shift)) % 1.0
+                head = math.exp(-behind * 2.6) * (1.0 - math.exp(-behind / 0.02))
+                bright = 0.35 + 0.65 * head
+        elif motion == "circulate":
+            pos = (i / n - shift) % 1.0 * len(cols)        # the ring's stops, wrapping
+            k = int(pos)
+            colour, bright = mix(cols[k % len(cols)], cols[(k + 1) % len(cols)], pos - k), 1.0
+        else:
+            pos = i / max(1, n - 1) * (len(cols) - 1)       # once across, no wrap
+            k = min(int(pos), len(cols) - 2)
+            colour, bright = mix(cols[k], cols[k + 1], pos - k), 1.0
+        out.append((colour, bright * level))
+    return out
 
 
 def _perimeter(np, x, y, rect, r):
@@ -1283,23 +1324,60 @@ class GlassDock(QWidget):
 
     def _paint_bars(self, p):
         """The visualiser, redrawn alone at 50 fps over the cached dock."""
-        s, pal = self._s, self._pal or self.board.palette
+        s, pal, state = self._s, self._pal or self.board.palette, self.board.state
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(pal.accent) if self._listening else QColor(pal.text_faint))
         bw, gap = round(3 * s), round(2 * s)
         c = self._bars.center().y()
+        rects = []
         for i, level in enumerate(self._levels if self._listening else (0.0,) * BARS):
             h = (4 + 18 * max(0.0, min(1.0, level))) * s
-            p.drawRoundedRect(QRectF(self._bars.x() + i * (bw + gap), c - h / 2, bw, h),
-                              bw / 2, bw / 2)
+            rects.append(QRectF(self._bars.x() + i * (bw + gap), c - h / 2, bw, h))
+        if state.dock_bars != "neon":
+            p.setBrush(QColor(pal.accent) if self._listening else QColor(pal.text_faint))
+            for r in rects:
+                p.drawRoundedRect(r, bw / 2, bw / 2)
+            return
+        # Paused, the bars keep their colours, dimmed and still, without a glow.
+        k = max(0.1, min(1.0, state.dock_neon_strength / 100.0))
+        t = time.monotonic() if self._listening else 0.0
+        for r, (colour, bright) in zip(rects, neon_bars(state.dock_neon_colors,
+                                                        state.dock_neon_motion, t)):
+            if not self._listening:
+                bright *= 0.45
+            if self._listening:
+                # A stepped bloom, as the ring draws without numpy: at 3 px
+                # wide a real blur 50 times a second buys nothing visible.
+                for grow, alpha in ((1.0 + 3.0 * k, 0.12), (0.5 + 1.5 * k, 0.25)):
+                    glow = QColor(colour)
+                    glow.setAlphaF(alpha * (0.6 + 0.6 * k) * bright)
+                    g = grow * s
+                    p.setBrush(glow)
+                    p.drawRoundedRect(r.adjusted(-g, -g, g, g), bw / 2 + g, bw / 2 + g)
+            body = QColor(colour)
+            body.setAlphaF(min(1.0, 0.25 + 0.75 * bright))
+            p.setBrush(body)
+            p.drawRoundedRect(r, bw / 2, bw / 2)
+            # The tube's hot, near-white core, as on the outline.
+            core = QColor(255, 255, 255)
+            core.setAlphaF(0.55 * bright)
+            p.setBrush(core)
+            cw = max(1.0, bw / 3)
+            p.drawRoundedRect(QRectF(r.center().x() - cw / 2, r.top() + cw, cw,
+                                     max(0.0, r.height() - 2 * cw)), cw / 2, cw / 2)
+
+    def _bars_moving(self):
+        """Neon bars that fade or circulate change between level readings."""
+        state = self.board.state
+        return state.dock_bars == "neon" and state.dock_neon_motion != "static"
 
     def _animate(self):
         levels = self._tap.levels() if self._tap else self._levels
-        if levels != self._levels:
+        if levels != self._levels or self._bars_moving():
             self._levels = levels
             if not self._bars.isEmpty():
-                self.update(self._bars.toAlignedRect().adjusted(-1, -1, 1, 1))
+                g = round(6 * self._s) if self.board.state.dock_bars == "neon" else 1
+                self.update(self._bars.toAlignedRect().adjusted(-g, -g, g, g))
 
     # -- input ------------------------------------------------------------ #
     def _hit(self, pos):
@@ -1508,6 +1586,12 @@ class GlassDock(QWidget):
         side = "right" if state.dock_music_side == "left" else "left"
         menu.addAction(f"Move music to the {side}", lambda: self.board.set_dock("music_side", side))
         self._neon_menu(menu.addMenu("Neon outline"))
+        bars = menu.addMenu("Visualiser")
+        for key, label in BAR_STYLES:
+            act = bars.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(state.dock_bars == key)
+            act.triggered.connect(lambda _=False, v=key: self.board.set_dock("bars", v))
         menu.addSeparator()
         menu.addAction("Show Windows taskbar", self.reveal_taskbar)
         menu.addAction("Turn off Glass Dock", lambda: self.board.set_dock("enabled", False))

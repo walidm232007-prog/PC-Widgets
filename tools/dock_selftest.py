@@ -186,6 +186,81 @@ def check_neon(out, board):
           f"fades, holds still when static ({ms:.1f} ms a moving frame)")
 
 
+def check_neon_bars(out, board):
+    """The visualiser copies the neon outline when asked, and stays the accent
+    by default."""
+    from types import SimpleNamespace
+    from widgets.core.board import Board
+    assert store.BoardState().dock_bars == "default"
+    fake = SimpleNamespace(state=store.BoardState(), persist=lambda: None,
+                           prefs_changed=SimpleNamespace(emit=lambda: None))
+    Board.set_dock(fake, "bars", "rainbow")
+    assert fake.state.dock_bars == "default", "an unknown visualiser style was accepted"
+    Board.set_dock(fake, "bars", "neon")
+    assert fake.state.dock_bars == "neon", "the board refused the neon visualiser"
+    cyber = ["#00e5ff", "#ff2bd6"]
+    still = dockmod.neon_bars(cyber, "static", 0.0)
+    assert still[0][0].name() == cyber[0] and still[-1][0].name() == cyber[1], \
+        "still colours do not spread once across the bars"
+    assert still == dockmod.neon_bars(cyber, "static", 4.0), "still bars changed over time"
+    moved = dockmod.neon_bars(cyber, "circulate", dockmod.LAP_S / 4)
+    assert [c.name() for c, _ in moved] != [c.name() for c, _ in
+                                            dockmod.neon_bars(cyber, "circulate", 0.0)], \
+        "circulating colours did not move"
+    comet = [v for _, v in dockmod.neon_bars(["#00e5ff"], "circulate", 1.3)]
+    assert min(comet) >= 0.35 and max(comet) - min(comet) > 0.15, f"no comet, or a bar vanished {comet}"
+    dim = dockmod.neon_bars(cyber, "fade", 0.0)[0][1]
+    bright = dockmod.neon_bars(cyber, "fade", dockmod.FADE_S / 2)[0][1]
+    assert dim < bright, "fading bars did not brighten"
+
+    dock = GlassDock(board, preview=True)
+    dock._snap = fake_snapshot()
+    art = QImage(300, 300, QImage.Format_ARGB32_Premultiplied)
+    art.fill(QColor("#d94f8a"))
+    dock._np = media.NowPlaying(title="A song", artist="The artist", playing=True,
+                                available=True, art=art)
+    dock._listening = True
+    dock._levels = (0.3, 0.75, 1.0, 0.6, 0.25)
+    board.palette = palette.build("dark")
+    board.state.dock_neon_colors, board.state.dock_neon_motion = cyber, "static"
+
+    def bars_crop(name):
+        dock.sync()
+        dock.resize(1000, 64)
+        dock.invalidate()
+        img = dock.grab().toImage()
+        r = dock._bars.toAlignedRect().adjusted(-8, -8, 8, 8)
+        crop = img.copy(r)
+        crop.scaled(crop.width() * 6, crop.height() * 6, Qt.IgnoreAspectRatio,
+                    Qt.FastTransformation).save(str(out / f"bars-{name}.png"))
+        return img, dock._bars
+
+    img, bars = bars_crop("default")
+    accent = QColor(board.palette.accent)
+    mid = img.pixelColor(int(bars.center().x()), int(bars.center().y()))
+    assert abs(mid.hue() - accent.hue()) <= 12 or accent.saturation() < 30, \
+        f"default bars are not the accent ({mid.name()} vs {accent.name()})"
+    board.state.dock_bars = "neon"
+    img, bars = bars_crop("neon-static")
+    first = img.pixelColor(int(bars.left()) + 1, int(bars.center().y()) + 4)
+    last = img.pixelColor(int(bars.right()) - 2, int(bars.center().y()) + 4)
+    assert first.blue() > first.red() and last.red() > last.green(), \
+        f"neon bars are not cyan to magenta ({first.name()}, {last.name()})"
+    for motion, colours in (("circulate", ["#00e5ff"]), ("circulate", ["#21ffb2", "#00c3ff", "#9d4bff"])):
+        board.state.dock_neon_colors, board.state.dock_neon_motion = colours, motion
+        bars_crop(f"neon-{motion}-{len(colours)}")
+    assert dock._bars_moving(), "circulating neon bars would not be redrawn"
+    dock._listening = False
+    bars_crop("neon-paused")
+    board.state.dock_bars, board.state.dock_neon_colors = "default", cyber
+    board.state.dock_neon_motion = "circulate"
+    assert not dock._bars_moving()
+    dock.close()
+    print("PASS: the visualiser is the accent by default; Neon copies the outline's colours, "
+          "spreads them still, runs them circulating (a comet that never drops a bar), fades, "
+          "and dims while paused")
+
+
 def check_pictures():
     """The shell's pictures come out the right way up, with their transparency."""
     img = shell.shell_image(NOTEPAD, 32)
@@ -686,6 +761,7 @@ def main():
     check_logo(out)
     check_renders(out, board)
     check_neon(out, board)
+    check_neon_bars(out, board)
     check_rows(board)
     check_native()
     check_start_host()
