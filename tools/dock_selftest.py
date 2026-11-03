@@ -339,6 +339,101 @@ def check_row_animation(app, out, board):
           f"and settling exactly; closing ones can't be clicked ({ms:.1f} ms a frame)")
 
 
+def check_previews(app, out):
+    """Hovering an app with windows raises live previews of them after a
+    moment, one card each, laid out without overlap above its button; moving
+    off lets them go; a pinned app with none keeps its tooltip. The windows
+    previewed are tool windows parked off every monitor, and the dock and its
+    panel are never mapped: nothing reaches the screen."""
+    from unittest.mock import patch
+    from widgets.ui.dock_previews import WindowPreviews
+    sources = []
+    for i, (w, h) in enumerate(((800, 500), (400, 600))):
+        src = QWidget(None, Qt.Tool | Qt.FramelessWindowHint)
+        src.setAttribute(Qt.WA_ShowWithoutActivating)
+        src.setGeometry(-32000 + i * 1000, -32000, w, h)
+        src.show()
+        sources.append(src)
+    pump(app, 0.1)
+    b = TestBoard()
+    b.state.dock_replace_taskbar = False
+    shown = []
+    real_show = WindowPreviews.show_for
+
+    def show_for(self, *args):
+        self.setAttribute(Qt.WA_DontShowOnScreen)
+        real_show(self, *args)
+        shown.append(self)
+    with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
+            patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
+            patch.object(winapi, "fullscreen_monitor", lambda: None), \
+            patch.object(shell, "maximised_on", lambda hwnds, monitor: False), \
+            patch.object(WindowPreviews, "show_for", show_for):
+        dock = GlassDock(b)
+        dock.setAttribute(Qt.WA_DontShowOnScreen)
+        try:
+            b.set_dock("enabled", True)
+            tasks = [shell.Task(int(s.winId()), f"Preview test {n}", r"C:\Apps\preview.exe")
+                     for n, s in enumerate(sources)]
+            dock._snap = Snapshot(tasks=tasks, taskbar_pins=[NOTEPAD])
+            dock._rebuild()
+            dock._row_key = None
+            dock._place()
+            app_hit = next(item for item in dock._items
+                           if item[0].startswith("app:") and item[2].windows)
+            pin_hit = next(item for item in dock._items
+                           if item[0].startswith("app:") and not item[2].windows)
+            assert dock._tip(app_hit) == "", "an app with windows still shows a tooltip"
+            assert dock._tip(pin_hit), "a pinned app with no windows lost its tooltip"
+
+            dock._hover = app_hit[0]
+            dock._hover_previews(app_hit)
+            pump(app, dockmod.PEEK_MS / 1000 * 0.5)
+            assert not dock._previews_up(), "previews rose before the hover delay"
+            pump(app, dockmod.PEEK_MS / 1000 * 0.8)
+            assert dock._previews_up(), "previews did not rise on hover"
+            panel = dock._previews
+            ex = shell.u.GetWindowLongPtrW(int(panel.winId()), -20)
+            assert not ex & 0x80000, "the panel is layered: the compositor draws no thumbnails there"
+            assert len(panel.cards) == 2 and all(c.picture is not None for c in panel.cards), \
+                "a window's live thumbnail did not register"
+            for c, src in zip(panel.cards, sources):
+                sw, sh = c.picture.size()
+                assert (sw, sh) == (src.width(), src.height()), f"source size {sw}x{sh}"
+                assert abs(c.thumb.width() / c.thumb.height() - sw / sh) < 0.05, "picture stretched"
+                assert c.rect.contains(c.thumb) and c.rect.contains(c.close), "spills off its card"
+            a, z = panel.cards
+            assert not a.rect.intersects(z.rect), "cards overlap"
+            cx = dock.x() + app_hit[1].center().x()
+            assert abs(panel.geometry().center().x() - cx) <= 2 or panel.x() <= 8 or \
+                panel.geometry().right() >= app.primaryScreen().geometry().right() - 8, \
+                "not centred over its button"
+            assert panel.geometry().bottom() < dock.y() + dock._capsule.top(), "not above the dock"
+            panel.grab().save(str(out / "previews.png"))
+
+            dock._snap = Snapshot(tasks=tasks[:1], taskbar_pins=[NOTEPAD])
+            dock._rebuild()
+            dock._relayout()
+            dock._refresh_previews()
+            assert dock._previews_up() and len(panel.cards) == 1, "a closed window kept its card"
+
+            dock._hover = ""
+            dock._hover_previews(None)
+            pump(app, dockmod.UNPEEK_MS / 1000 + 0.2)
+            assert not dock._previews_up() and not panel.cards, "previews stayed after leaving"
+            dock._hover = pin_hit[0]
+            dock._hover_previews(pin_hit)
+            pump(app, dockmod.PEEK_MS / 1000 + 0.2)
+            assert not dock._previews_up(), "a pinned app with no windows raised previews"
+        finally:
+            dock.close()
+            for s in sources:
+                s.close()
+    print("PASS: hovering an app raises live previews of its windows after a moment, unlayered, "
+          "one card each, unstretched and apart, above its button; they follow a window closing "
+          "and go when the pointer leaves")
+
+
 def check_pictures():
     """The shell's pictures come out the right way up, with their transparency."""
     img = shell.shell_image(NOTEPAD, 32)
@@ -851,6 +946,7 @@ def main():
     check_listening()
     check_fullscreen(app)
     check_rehide(app)
+    check_previews(app, out)
     if args.windows:
         check_windows(app, board, out)
     if args.live:
