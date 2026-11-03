@@ -13,9 +13,15 @@ something else, it glides there; dismissed, it folds back down and only then
 hides. With the dock's neon outline on, a see-through window just behind it
 carries the same neon round its edge, where an opaque panel can't draw a glow.
 
+A panel with nothing the compositor draws into it can be see-through instead
+(TRANSLUCENT): then it is the dock's own capsule - its squircle corners,
+shadow, glass and neon, drawn by the dock's code - and it really fades,
+sliding up a little as it does, rather than unfolding. The music menu is.
+
 A subclass lays out its content (``layout`` returns where the panel goes),
 paints it (``paint_content``, in the content's own coordinates, already
-faded), and may place anything the compositor draws (``place_extras``).
+faded; a see-through one paints its own capsule), and may place anything the
+compositor draws (``place_extras``).
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ import time
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, \
     QVariantAnimation
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..core import dock_shell as shell
@@ -32,6 +38,7 @@ from .dock import NeonRing
 CORNER = 8                      # Windows 11's rounding of a popup, at 100%
 HALO = 14                       # room round the panel for a neon glow, at 100%
 SHOW_MS, MOVE_MS, HIDE_MS = 190, 170, 130
+RISE = 10                       # how far a see-through panel slides up as it fades in
 
 
 def _lerp(a: QRect, b: QRect, t: float) -> QRect:
@@ -88,6 +95,7 @@ class NeonHalo(QWidget):
 class DockPanel(QWidget):
     offscreen = False               # the selftest's: never map the panel or its outline
     TITLE = "PC Widgets Glass Dock panel"
+    TRANSLUCENT = False             # the dock's own capsule, see-through, instead of opaque
 
     def __init__(self, dock):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
@@ -95,10 +103,16 @@ class DockPanel(QWidget):
         self.dock = dock
         self.setWindowTitle(self.TITLE)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        if self.TRANSLUCENT:
+            self.setAttribute(Qt.WA_TranslucentBackground)
         if self.offscreen:
             self.setAttribute(Qt.WA_DontShowOnScreen)
         self.setMouseTracking(True)
         self.halo = None
+        self._neon_timer = QTimer(self)   # a see-through panel's own moving neon
+        self._neon_timer.setInterval(33)
+        self._neon_timer.setTimerType(Qt.PreciseTimer)
+        self._neon_timer.timeout.connect(self.update)
         self._rounded = False
         self._border = True           # Windows' hairline; off while neon draws the edge
         self._content = QSize()       # the size the content was laid out for
@@ -143,12 +157,12 @@ class DockPanel(QWidget):
     def present(self, fresh=False):
         """Lay out and show: rise out of the dock, or glide to the new place -
         new content (fresh) fading in on the way - or just repaint."""
-        if not self._rounded:
+        if not self._rounded and not self.TRANSLUCENT:
             shell.round_corners(int(self.winId()))
             self._rounded = True
         final = self.layout()
         if not self.isVisible():
-            start = _folded(final)
+            start = self._below(final)
             self._leaving = False
             self._frame(start, 0.0)
             self.show()
@@ -167,11 +181,19 @@ class DockPanel(QWidget):
             self._reset()
         elif not self._leaving:
             self._leaving = True
-            self._run(self.geometry(), self._alpha, _folded(self.geometry()), 0.0, HIDE_MS,
+            self._run(self.geometry(), self._alpha, self._below(self.geometry()), 0.0, HIDE_MS,
                       QEasingCurve.InCubic)
+
+    def _below(self, r: QRect) -> QRect:
+        """Where it rises from and sinks back to: unfolded from its lower half
+        when opaque; a little lower, fading, when see-through."""
+        if self.TRANSLUCENT:
+            return r.translated(0, round(RISE * self.dock._s))
+        return _folded(r)
 
     def _reset(self):
         self._anim.stop()
+        self._neon_timer.stop()
         self.hide()
         if self.halo is not None:
             self.halo.timer.stop()
@@ -211,6 +233,14 @@ class DockPanel(QWidget):
     def _sync_halo(self, geometry):
         state = self.dock.board.state
         neon = state.dock_neon
+        if self.TRANSLUCENT:
+            # Its neon is its own, drawn round its capsule as the dock's is.
+            moving = neon and state.dock_neon_motion != "static"
+            if moving and not self._neon_timer.isActive():
+                self._neon_timer.start()
+            elif not moving:
+                self._neon_timer.stop()
+            return
         if neon == self._border:
             self._border = not neon
             shell.window_border(int(self.winId()), self._border)
@@ -239,6 +269,26 @@ class DockPanel(QWidget):
         dock, s = self.dock, self.dock._s
         pal, tint = dock._palette()
         state = dock.board.state
+        if self.TRANSLUCENT:
+            # Drawn on a straight-alpha image, then faded onto the window, as
+            # the dock draws itself: on a premultiplied one Qt renders text
+            # with ClearType, and every letter came out with red and blue edges.
+            img = QImage(self.size(), QImage.Format_ARGB32)
+            img.fill(Qt.transparent)
+            dpm = round(self.logicalDpiX() / 0.0254)
+            img.setDotsPerMeterX(dpm)
+            img.setDotsPerMeterY(dpm)
+            q = QPainter(img)
+            q.setRenderHint(QPainter.Antialiasing)
+            q.setRenderHint(QPainter.SmoothPixmapTransform)
+            q.translate(self._offset)
+            self.paint_content(q, pal, s)
+            q.end()
+            p = QPainter(self)
+            p.setOpacity(self._alpha)
+            p.drawImage(0, 0, img)
+            p.end()
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)

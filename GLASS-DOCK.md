@@ -116,14 +116,29 @@ Playing: the cover, title and artist, and five bars from the music widget's
 analyser. Click it for the music menu; right-click still has previous, play or
 pause, and next.
 
-The music menu rises above it like the window previews, and folds away the same
-way, with the neon round it when the outline is on. It shows the cover, the
-title, artist, player and album, and how far through the track it is - the
+A new track's cover dissolves into the next over 420 ms, eased, as on the Now
+Playing widget, by the widget's rule: a new sleeve is a new track, or a cover
+arriving for one - never a fresh copy of the same image, which the backend
+decodes on every poll and which restarted the widget's fade endlessly once. A
+title that lands before its cover shows the track's colour, and the cover fades
+in when it comes. The outgoing cover stays solid under the incoming one: both
+at half strength let the dark dock show through mid-fade, which the widget's
+covers, already dimmed behind its glass, hide but the dock's would not. The
+music menu shares the dock's fade, so the two change together.
+
+The music menu is the dock's own capsule: the same squircle corners, shadow,
+frosted glass or matte fill, sheen and hairline, and the same neon when the
+outline is on, all drawn by the dock's code. It is see-through like the dock,
+so it fades in as it slides up above the music, and out as it sinks. The first
+version was an opaque panel like the window previews, with Windows' smaller,
+rounder corners, and it didn't match; only the previews need to be opaque. It
+is compact - 264 by about 140 px at 100% - with a 48 px cover, the title,
+artist, player and album beside it, and how far through the track it is - the
 player reports the position at most once a second, and between readings it is
-counted on locally so the bar moves smoothly. Below are previous, play or pause
-and next; play and pause show the new state at once, before the player
-confirms it. Then the volume: a slider, the mouse wheel anywhere over the menu,
-and the speaker to mute. It is Windows' own volume, the default output's, as
+counted on locally so the bar moves smoothly. Below, one row: previous, play or
+pause and next - play and pause show the new state at once, before the player
+confirms it - then the speaker, to mute, and the volume slider; the mouse wheel
+anywhere over the menu sets the volume too. It is Windows' own volume, the default output's, as
 quick settings sets it, so it is the same number the dock's speaker shows and
 the volume keys change; dragging up unmutes, as in quick settings. With
 nothing playing the buttons dim and the volume still works. The menu never

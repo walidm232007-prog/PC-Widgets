@@ -549,19 +549,34 @@ def check_music_menu(app, out):
             panel = dock._music
             assert panel is not None and panel.up, "the click did not open the menu"
             assert calls == [], "the click still played or paused the track"
-            pump(app, dpn.SHOW_MS / 1000 * 0.4)
-            assert panel.geometry().height() < panel._target.height(), "the menu did not rise"
+            # See-through like the dock: it slides up as it fades in.
+            assert panel.testAttribute(Qt.WA_TranslucentBackground), "the menu is opaque"
+            end = time.monotonic() + dpn.SHOW_MS / 1000 * 0.4
+            while time.monotonic() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            assert panel.geometry().y() > panel._target.y() and 0.0 < panel._alpha < 1.0, \
+                "the menu did not slide up fading in"
             pump(app, dpn.SHOW_MS / 1000 + 0.1)
             assert panel.geometry() == panel._target and panel._alpha == 1.0
-            assert panel.geometry().bottom() < dock.y() + dock._capsule.top(), "not above the dock"
-            assert abs(panel.geometry().center().x() - (dock.x() + music[1].center().x())) <= 2 or \
-                panel.x() <= 8, "not over the music"
-            content = QRectF(0, 0, panel._content.width(), panel._content.height())
+            cap = panel.capsule_on_screen()
+            assert cap.bottom() < dock.y() + dock._capsule.top(), "not above the dock"
+            assert abs(cap.center().x() - (dock.x() + music[1].center().x())) <= 2 or \
+                cap.left() <= 8, "not over the music"
+            assert panel._capsule.width() <= 270 * dock._s and panel._capsule.height() <= 160 * dock._s, \
+                f"not compact: {panel._capsule}"
             rects = [panel._art_rect, panel._bar] + [panel._rects[k] for k in
                                                      ("prev", "play", "next", "mute", "volume")]
             for n, r in enumerate(rects):
-                assert content.contains(r), f"control {n} spills out of the menu"
+                assert panel._capsule.contains(r), f"control {n} spills out of the menu"
                 assert all(not r.intersects(o) for o in rects[n + 1:]), f"control {n} overlaps"
+            # The dock's own corners: the capsule's corner pixel is clear,
+            # as the dock's squircle leaves it, and its edge midpoints are not.
+            img = panel.grab().toImage()
+            c = panel._capsule
+            corner = img.pixelColor(int(c.left()) + 1, int(c.top()) + 1).alpha()
+            edge = img.pixelColor(int(c.center().x()), int(c.top()) + 2).alpha()
+            assert corner < edge, f"corners not rounded like the dock's ({corner}, {edge})"
 
             def centre(name):
                 c = panel._rects[name].center()
@@ -606,9 +621,17 @@ def check_music_menu(app, out):
             QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("play"))
             assert calls == [], "the buttons acted with nothing playing"
 
+            # Neon drawn round its own capsule, as the dock draws its own:
+            # glow in the clear margin above the top edge, none without it.
+            c = panel._capsule
+            spot = (int(c.center().x()), int(c.top()) - 4)
+            plain = panel.grab().toImage().pixelColor(*spot)
             b.state.dock_neon = True
             panel._frame(panel.geometry(), 1.0)
-            assert panel.halo is not None and panel.halo.isVisible(), "no neon round the menu"
+            lit = panel.grab().toImage().pixelColor(*spot)
+            assert lit.alpha() > plain.alpha() + 30 and (panel.halo is None or not panel.halo.isVisible()), \
+                f"no neon round the menu ({plain.alpha()} -> {lit.alpha()})"
+            panel.grab().save(str(out / "music-neon.png"))
             b.state.dock_neon = False
             panel._frame(panel.geometry(), 1.0)
 
@@ -635,6 +658,76 @@ def check_music_menu(app, out):
     print("PASS: the music opens a menu that rises above it - cover, track, progress, previous, "
           "play/pause (flipping at once), next, volume slider, wheel and mute - in both themes, "
           "with neon when on; a click outside or on the music again closes it")
+
+
+def check_cover_fade(app, out, board):
+    """Covers cross-fade as on the Now Playing widget: a new track dissolves
+    one into the next over ART_FADE_MS; a fresh copy of the same sleeve -
+    the backend decodes it on every poll - never restarts it; a title that
+    lands before its cover fades the cover in when it arrives; and the cached
+    dock ends on the new cover, not a frame short of it."""
+    def sleeve(colour):
+        img = QImage(120, 120, QImage.Format_ARGB32_Premultiplied)
+        img.fill(QColor(colour))
+        return img
+
+    def track(title, art):
+        return media.NowPlaying(title=title, artist="Someone", playing=True, available=True, art=art)
+
+    board.palette = palette.build("dark")
+    dock = GlassDock(board, preview=True)
+    dock._snap = fake_snapshot()
+    dock.sync()
+    dock.resize(1000, 64)
+
+    def shown(np):
+        dock._np = np
+        dock._check_artwork(np)
+        dock.invalidate()
+
+    def pixel():
+        img = dock.grab().toImage()         # lays the dock out; read the cover's place after
+        music = next(r for i, r, _ in dock._items if i == "music")
+        return img.pixelColor(int(music.x() + 6 * dock._s + dockmod.ICON * dock._s / 2),
+                              int(music.center().y()))
+    shown(track("One", sleeve("#ff0000")))
+    assert not dock._art_fade.active, "the first cover faded in from nothing"
+    assert pixel().red() > 200
+    shown(track("One", sleeve("#ff0000")))             # the same sleeve, decoded again
+    assert not dock._art_fade.active, "a fresh copy of the same cover restarted the fade"
+    shown(track("Two", sleeve("#0000ff")))
+    assert dock._art_fade.active, "a new track's cover did not fade"
+    frames = [dock.grab()]
+    end = time.monotonic() + dockmod.ART_FADE_MS / 1000 * 0.5
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.005)
+    mid = pixel()
+    frames.append(dock.grab())
+    assert mid.red() > 40 and mid.blue() > 40, f"no dissolve halfway ({mid.name()})"
+    assert mid.red() + mid.blue() > 200, f"the dock shows through mid-fade ({mid.name()})"
+    assert dock.covers(dock._np)[1] is not None, "the music menu would not see the outgoing cover"
+    pump(app, dockmod.ART_FADE_MS / 1000 + 0.15)
+    end_px = pixel()
+    frames.append(dock.grab())
+    assert not dock._art_fade.active and end_px.blue() > 200 and end_px.red() < 30, \
+        f"did not end on the new cover ({end_px.name()})"
+    shown(track("Three", None))                        # the title, before its cover
+    pump(app, dockmod.ART_FADE_MS / 1000 + 0.15)
+    shown(track("Three", sleeve("#00ff00")))
+    assert dock._art_fade.active, "a cover arriving after its title did not fade in"
+    pump(app, dockmod.ART_FADE_MS / 1000 + 0.15)
+    assert pixel().green() > 200
+    dock.close()
+    strip = QImage(frames[0].width(), sum(f.height() for f in frames), QImage.Format_ARGB32)
+    strip.fill(QColor("#202024"))
+    p = QPainter(strip)
+    for n, f in enumerate(frames):
+        p.drawPixmap(0, n * f.height(), f)
+    p.end()
+    strip.save(str(out / "cover-fade.png"))
+    print("PASS: covers cross-fade as on the widget - a new track dissolves, the same sleeve "
+          "decoded again doesn't restart it, a late cover fades in, and the dock ends on it")
 
 
 def check_pictures():
@@ -1134,6 +1227,7 @@ def main():
     check_neon(out, board)
     check_neon_bars(out, board)
     check_row_animation(app, out, board)
+    check_cover_fade(app, out, board)
     check_rows(board)
     check_native()
     check_start_host()
