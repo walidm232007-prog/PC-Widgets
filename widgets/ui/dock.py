@@ -571,6 +571,8 @@ class GlassDock(QWidget):
         self._fading = {}             # id -> presence, for those opening or closing
         self._animate_rows = not preview
         self._previews = None         # the live window previews, made on first hover
+        self._music = None            # the music menu, made on first click
+        self._live = None             # (NowPlaying, when read): every reading, position and all
         self._peek = QTimer(self)     # hover that long on an app before its previews rise
         self._peek.setSingleShot(True)
         self._peek.setInterval(PEEK_MS)
@@ -706,6 +708,7 @@ class GlassDock(QWidget):
         self._grow.stop()
         self._row_key, self._fading = None, {}    # the next layout starts settled
         self.hide_previews()
+        self.close_music()
         self._auto, self._up = False, True
         self.hide()
         if self._workarea is not None:
@@ -731,8 +734,9 @@ class GlassDock(QWidget):
         self.shutdown()
         if self._reservation is not None:
             self._reservation.close()
-        if self._previews is not None:
-            self._previews.close()
+        for panel in (self._previews, self._music):
+            if panel is not None:
+                panel.close()
         super().closeEvent(event)
 
     # -- what the worker threads hand over -------------------------------- #
@@ -742,6 +746,9 @@ class GlassDock(QWidget):
         while not stop.is_set():
             try:
                 np = source.poll()
+                # The music menu counts the position on from here; the dock
+                # itself repaints only when what it shows changed.
+                self._live = (np, time.monotonic())
                 signature = (np.title, np.artist, np.playing, np.available, id(np.art), np.source)
                 if signature != last and not stop.is_set():
                     last = signature
@@ -756,6 +763,8 @@ class GlassDock(QWidget):
         self._np = np
         self._listen(np.playing and np.available)
         self.invalidate()
+        if self._music is not None:
+            self._music.refresh()
 
     def _listen(self, want):
         """Meter the speakers only while a track plays, as Now Playing does.
@@ -874,6 +883,7 @@ class GlassDock(QWidget):
 
     def _conceal(self):
         self.hide_previews()
+        self.close_music()
         self._slider.stop()
         self._up = True
         self.hide()
@@ -890,6 +900,7 @@ class GlassDock(QWidget):
         below = screen.geometry().y() + screen.geometry().height()
         if not up:
             self.hide_previews()
+            self.close_music()
         self._slider.stop()
         self._up = up
         if up and not self.isVisible():
@@ -937,7 +948,7 @@ class GlassDock(QWidget):
                 self._slide(True)
             return
         near = self.geometry().adjusted(-12, -24, 12, 0).contains(x, y) or \
-            (self._previews_up() and self._previews.geometry().contains(x, y))
+            self._over_panels(x, y) or (self._music is not None and self._music.up)
         if start or near or QApplication.activePopupWidget() is not None:
             self._away = 0
             return
@@ -1416,9 +1427,6 @@ class GlassDock(QWidget):
             p.setFont(self._font_set()["note"])
             p.setPen(QColor(255, 255, 255, 235) if np.available else QColor(pal.text_dim))
             p.drawText(art, Qt.AlignCenter, "")
-        if self._hover == "music" and np.available:
-            p.fillPath(shape, QColor(0, 0, 0, 110))
-            _play_pause(p, art.center(), 12 * s, playing=np.playing)
         if not self._music_wide:
             return
         f = self._font_set()
@@ -1586,9 +1594,34 @@ class GlassDock(QWidget):
         if self._previews is not None:
             self._previews.dismiss()
 
+    # -- the music menu --------------------------------------------------- #
+    def toggle_music(self, rect):
+        """The music menu above the music: open it, or close it again."""
+        if self._music is not None and self._music.up:
+            self._music.dismiss()
+            return
+        if self.preview or not self.isVisible() or not self._up:
+            return
+        if self._music is None:
+            from .dock_music import MusicPanel
+            self._music = MusicPanel(self)
+        self.hide_previews()
+        QToolTip.hideText()
+        self._music.open(self.x() + rect.center().x(), self.y() + self._capsule.top())
+
+    def close_music(self):
+        if self._music is not None:
+            self._music.dismiss()
+
+    def _over_panels(self, x, y):
+        return any(panel is not None and panel.up and panel.geometry().contains(x, y)
+                   for panel in (self._previews, self._music))
+
     def mousePressEvent(self, event):
         self.hide_previews()                    # a click acts on the app; the taskbar's go too
         hit = self._hit(event.position())
+        if not hit or hit[0] != "music":
+            self.close_music()                  # its release toggles it instead
         if event.button() in (Qt.LeftButton, Qt.MiddleButton) and hit:
             self._pressed = hit[0]
             # Whether the hidden icons were open as the arrow went down - by the
@@ -1619,7 +1652,7 @@ class GlassDock(QWidget):
         if ident == "start":
             shell.shortcut()
         elif ident == "music":
-            media.play_pause()
+            self.toggle_music(rect)
         elif ident == "tray":
             if self._flyout_at_press:
                 shell.close_overflow()            # a second click closes them, at once
@@ -1711,6 +1744,7 @@ class GlassDock(QWidget):
     # -- menus ------------------------------------------------------------ #
     def contextMenuEvent(self, event):
         self.hide_previews()
+        self.close_music()
         hit = self._hit(QPointF(event.pos()))
         if hit and hit[0] == "start":
             shell.shortcut(0x58)                  # Win+X, as Start's own right-click
@@ -1994,22 +2028,3 @@ def _letter_tile(p, box, name, s, font):
     p.setPen(QColor(255, 255, 255))
     p.setFont(font)
     p.drawText(box, Qt.AlignCenter, (name.strip()[:1] or "?").upper())
-
-
-def _play_pause(p, centre, size, playing):
-    """What a click on the music does next: pause while playing, else play."""
-    p.save()
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor(255, 255, 255))
-    x, y = centre.x(), centre.y()
-    if playing:
-        w, gap = size * 0.28, size * 0.22
-        for dx in (-gap / 2 - w, gap / 2):
-            p.drawRoundedRect(QRectF(x + dx, y - size / 2, w, size), w / 3, w / 3)
-    else:
-        tri = QPainterPath(QPointF(x - size * 0.35, y - size / 2))
-        tri.lineTo(QPointF(x + size * 0.5, y))
-        tri.lineTo(QPointF(x - size * 0.35, y + size / 2))
-        tri.closeSubpath()
-        p.drawPath(tri)
-    p.restore()

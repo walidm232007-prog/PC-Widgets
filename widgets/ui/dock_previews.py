@@ -7,40 +7,25 @@ forward; close it from its button or with a middle-click.
 
 The pictures are the compositor's own thumbnails (DwmRegisterThumbnail), the
 same live images the taskbar uses, video and all - nothing is captured or
-copied, and they cost this process nothing to keep up to date. The compositor
-never draws one into a layered window, and Qt makes every see-through
-frameless window layered, so this panel is opaque: the board's frosted
-wallpaper painted edge to edge, like the dock's glass, with Windows 11's own
-rounded corners, border and shadow round it.
-
-Being opaque, it can't fade as a whole. It rises instead: it unfolds upward
-from the dock, its bottom edge still, while what is in it fades in - the
-pictures through the compositor's own opacity. Moving to another app glides
-it there; leaving folds it back down. With the dock's neon outline on, a
-see-through window just behind it carries the same neon round its edge,
-where an opaque panel can't draw a glow.
+copied, and they cost this process nothing to keep up to date. They are why
+the panel is opaque (see dock_panel): the compositor never draws one into a
+layered window. They fade in with the rest through the compositor's own
+thumbnail opacity.
 """
 from __future__ import annotations
 
-import time
-
-from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, \
-    QVariantAnimation
-from PySide6.QtGui import QColor, QFontMetricsF, QPainter
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFontMetricsF
 
 from ..core import dock_shell as shell
 from ..core.card import squircle
-from .dock import NeonRing
+from .dock_panel import DockPanel, HALO, SHOW_MS, MOVE_MS, HIDE_MS  # noqa: F401 (the selftest's)
 
 THUMB_W, THUMB_H = 200, 120     # the largest a picture gets, at 100% scaling
 CARD_MIN = 150                  # a card is never narrower, so a title has room
 PAD, GAP, HEAD = 8, 6, 28       # the panel's margin, between cards, a card's title row
 CLOSE = 24
 CLOSE_GLYPH = ""          # Segoe Fluent Icons' ChromeClose
-CORNER = 8                      # Windows 11's rounding of a popup, at 100%
-HALO = 14                       # room round the panel for a neon glow, at 100%
-SHOW_MS, MOVE_MS, HIDE_MS = 190, 170, 130
 
 
 class Card:
@@ -51,108 +36,27 @@ class Card:
         self.rect = self.thumb = self.close = QRectF()
 
 
-def _lerp(a: QRect, b: QRect, t: float) -> QRect:
-    return QRect(round(a.x() + (b.x() - a.x()) * t), round(a.y() + (b.y() - a.y()) * t),
-                 round(a.width() + (b.width() - a.width()) * t),
-                 round(a.height() + (b.height() - a.height()) * t))
-
-
-def _folded(r: QRect) -> QRect:
-    """Where the panel rises from and folds back to: its lower half, the
-    bottom edge where it always is, just above the dock."""
-    return QRect(r.x(), r.y() + r.height() // 2, r.width(), r.height() - r.height() // 2)
-
-
-class NeonHalo(QWidget):
-    """The neon outline round the panel, in a see-through window just behind
-    it: the tube runs along the panel's edge and its bloom shines outward."""
-
-    def __init__(self, previews):
-        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
-                         Qt.WindowDoesNotAcceptFocus | Qt.WindowTransparentForInput)
-        self.previews = previews
-        self.setWindowTitle("PC Widgets Glass Dock preview outline")
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        if previews.offscreen:
-            self.setAttribute(Qt.WA_DontShowOnScreen)
-        self.ring = NeonRing()
-        self.alpha = 1.0
-        self.timer = QTimer(self)
-        self.timer.setInterval(33)
-        self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.timeout.connect(self.update)
-
-    def frame(self):
-        dock = self.previews.dock
-        state, s = dock.board.state, dock._s
-        m = round(HALO * s)
-        # Just outside the panel, so the tube's core shows beside its edge.
-        edge = QRectF(m, m, self.width() - 2 * m, self.height() - 2 * m).adjusted(-1, -1, 1, 1)
-        return self.ring.frame(self.size(), edge, CORNER * s + 1, s, state.dock_neon_colors,
-                               state.dock_neon_motion, state.dock_neon_strength, time.monotonic(),
-                               rounded=True)
-
-    def paintEvent(self, event):
-        img = self.frame()
-        p = QPainter(self)
-        p.setOpacity(self.alpha)
-        p.drawImage(0, 0, img)
-        p.end()
-
-
-class WindowPreviews(QWidget):
-    offscreen = False               # the selftest's: never map the panel or its outline
+class WindowPreviews(DockPanel):
+    TITLE = "PC Widgets Glass Dock previews"
 
     def __init__(self, dock):
-        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
-                         Qt.WindowDoesNotAcceptFocus)
-        self.dock = dock
-        self.setWindowTitle("PC Widgets Glass Dock previews")
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        if self.offscreen:
-            self.setAttribute(Qt.WA_DontShowOnScreen)
-        self.setMouseTracking(True)
+        super().__init__(dock)
         self.ident = ""
         self.entry = None
         self.cards: list[Card] = []
-        self.halo = None
         self._hover = None            # (hwnd, "card" | "close")
         self._pressed = None
         self._anchor = (0, 0)
-        self._rounded = False
-        self._border = True           # Windows' hairline; off while neon draws the edge
-        self._content = QSize()       # the size the cards were laid out for
-        self._target = QRect()        # where the panel is going
-        self._alpha = 0.0             # what is in it: 0 faded out, 1 shown
-        self._offset = QPointF()      # the cards' origin in the window as it is now
-        self._leaving = False
-        self._from = self._to = None  # (geometry, alpha) the animation runs between
-        self._anim = QVariantAnimation(self)
-        self._anim.setStartValue(0.0)
-        self._anim.setEndValue(1.0)
-        self._anim.valueChanged.connect(self._step)
-        self._anim.finished.connect(self._settled)
 
-    @property
-    def up(self) -> bool:
-        """Showing, or on its way up - not folding away."""
-        return self.isVisible() and not self._leaving
-
-    # -- showing ---------------------------------------------------------- #
     def show_for(self, ident, entry, cx, top):
         """Above the button whose centre is at x = cx and the dock's top at y =
         top, both on the screen. The same app again only refreshes titles and
         place; a different set of windows registers its pictures afresh."""
         hwnds = [t.hwnd for t in entry.windows]
-        hwnd = int(self.winId())
-        if not self._rounded:
-            shell.round_corners(hwnd)
-            self._rounded = True
         fresh = ident != self.ident or hwnds != [c.hwnd for c in self.cards]
         if fresh:
             self.release()
+            hwnd = int(self.winId())
             for t in entry.windows:
                 try:
                     picture = shell.Thumbnail(hwnd, t.hwnd)
@@ -164,31 +68,7 @@ class WindowPreviews(QWidget):
             for c in self.cards:
                 c.title = titles.get(c.hwnd, c.title)
         self.ident, self.entry, self._anchor = ident, entry, (cx, top)
-        final = self._layout()
-        if not self.isVisible():
-            start = _folded(final)          # rise out of the dock
-            self._leaving = False
-            self._frame(start, 0.0)
-            self.show()
-            self._run(start, 0.0, final, 1.0, SHOW_MS, QEasingCurve.OutCubic)
-        elif self._leaving or final != self._target or fresh:
-            # Back up from wherever it is; or along to another app, whose
-            # cards fade in as the panel glides over to it.
-            self._leaving = False
-            alpha = min(self._alpha, 0.35) if fresh else self._alpha
-            self._run(self.geometry(), alpha, final, 1.0, MOVE_MS, QEasingCurve.OutCubic)
-        else:
-            self._frame(self.geometry(), self._alpha)
-        self.raise_()
-
-    def dismiss(self):
-        """Fold back down into the dock, fading, then go."""
-        if not self.isVisible():
-            self._reset()
-        elif not self._leaving:
-            self._leaving = True
-            self._run(self.geometry(), self._alpha, _folded(self.geometry()), 0.0, HIDE_MS,
-                      QEasingCurve.InCubic)
+        self.present(fresh and self.isVisible())
 
     def release(self):
         for c in self.cards:
@@ -198,79 +78,13 @@ class WindowPreviews(QWidget):
         self._hover = self._pressed = None
 
     def _reset(self):
-        self._anim.stop()
-        self.hide()
-        if self.halo is not None:
-            self.halo.timer.stop()
-            self.halo.hide()
-        self.release()
-        self.ident, self.entry, self._leaving, self._alpha = "", None, False, 0.0
+        super()._reset()
+        self.ident, self.entry = "", None
 
-    def _run(self, g0, a0, g1, a1, ms, curve):
-        self._anim.stop()
-        self._from, self._to, self._target = (g0, a0), (g1, a1), g1
-        self._anim.setDuration(ms)
-        self._anim.setEasingCurve(curve)
-        self._anim.start()
-
-    def _step(self, t):
-        if self._from is None:
-            return
-        (g0, a0), (g1, a1) = self._from, self._to
-        self._frame(_lerp(g0, g1, t), a0 + (a1 - a0) * t)
-
-    def _settled(self):
-        if self._leaving:
-            self._reset()
-
-    def _frame(self, geometry, alpha):
-        """The panel at one moment: its window, its cards in it - centred
-        across, held to its bottom edge - and its pictures and outline."""
-        self._alpha = alpha
-        self._offset = QPointF(round((geometry.width() - self._content.width()) / 2),
-                               geometry.height() - self._content.height())
-        if self.geometry() != geometry:
-            self.setGeometry(geometry)
-        for c in self.cards:
-            if c.picture is not None:
-                r = c.thumb.translated(self._offset)
-                c.picture.place(int(r.left()), int(r.top()), int(r.right()), int(r.bottom()),
-                                round(255 * alpha))
-        self._sync_halo(geometry)
-        self.update()
-
-    def _sync_halo(self, geometry):
-        state = self.dock.board.state
-        neon = state.dock_neon
-        if neon == self._border:
-            self._border = not neon
-            shell.window_border(int(self.winId()), self._border)
-        if not neon:
-            if self.halo is not None and self.halo.isVisible():
-                self.halo.timer.stop()
-                self.halo.hide()
-            return
-        if self.halo is None:
-            self.halo = NeonHalo(self)
-        m = round(HALO * self.dock._s)
-        self.halo.setGeometry(geometry.adjusted(-m, -m, m, m))
-        self.halo.alpha = self._alpha
-        if not self.halo.isVisible():
-            self.halo.show()
-            self.raise_()                   # the panel stays in front of its outline
-        moving = state.dock_neon_motion != "static"
-        if moving and not self.halo.timer.isActive():
-            self.halo.timer.start()
-        elif not moving:
-            self.halo.timer.stop()
-        self.halo.update()
-
-    def _layout(self) -> QRect:
-        """Lays the cards out and returns where the panel goes when settled."""
+    def layout(self) -> QRect:
         s = self.dock._s
         cx, top = self._anchor
-        screen = QApplication.screenAt(self.dock.geometry().center()) or QApplication.primaryScreen()
-        g = screen.geometry()
+        g = self.screen_rect()
         sizes = [(c.picture.size() if c.picture else (0, 0)) for c in self.cards]
         sizes = [(w, h) if w > 0 and h > 0 else (16, 10) for w, h in sizes]
         # Shrink every picture alike until the row fits on the screen.
@@ -300,21 +114,15 @@ class WindowPreviews(QWidget):
         self._content = QSize(total, height)
         return QRect(x, y, total, height)
 
-    # -- painting --------------------------------------------------------- #
-    def paintEvent(self, event):
-        dock, s = self.dock, self.dock._s
-        pal, tint = dock._palette()
-        state = dock.board.state
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        whole = QRectF(self.rect())
-        drew = state.dock_style == "glass" and \
-            dock.board.glass.paint_into(p, whole, self.x(), self.y())
-        tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 255)
-        p.fillRect(whole, tint)
-        p.translate(self._offset)
-        p.setOpacity(self._alpha)
+    def place_extras(self):
+        for c in self.cards:
+            if c.picture is not None:
+                r = c.thumb.translated(self._offset)
+                c.picture.place(int(r.left()), int(r.top()), int(r.right()), int(r.bottom()),
+                                round(255 * self._alpha))
+
+    def paint_content(self, p, pal, s):
+        dock = self.dock
         fonts = dock._font_set()
         fm = QFontMetricsF(fonts["sub"])
         icon = dock._picture(self.entry, round(32 * s)) if self.entry else None
@@ -351,13 +159,12 @@ class WindowPreviews(QWidget):
                 px = 32 * s
                 p.drawPixmap(QRectF(c.thumb.center().x() - px / 2, c.thumb.center().y() - px / 2,
                                     px, px), icon, QRectF(icon.rect()))
-        p.end()
 
     # -- input ------------------------------------------------------------ #
     def _at(self, pos):
         if self._leaving:
             return None
-        pos = pos - self._offset
+        pos = self.local(pos)
         for c in self.cards:
             if c.rect.contains(pos):
                 return c.hwnd, "close" if c.close.contains(pos) else "card"
@@ -392,10 +199,3 @@ class WindowPreviews(QWidget):
             self.dock.hide_previews()
             shell.activate(hwnd)
             self.dock._poke()
-
-    def closeEvent(self, event):
-        self._anim.stop()
-        self.release()
-        if self.halo is not None:
-            self.halo.close()
-        super().closeEvent(event)
