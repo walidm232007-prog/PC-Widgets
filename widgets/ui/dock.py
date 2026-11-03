@@ -148,8 +148,12 @@ class NeonRing:
         self._geo_key = self._geo = None
         self._lut_key = self._lut = None
         self._still = (None, None)
+        self._shape = squircle
 
-    def frame(self, size, capsule, radius, s, colours, motion, strength, t):
+    def frame(self, size, capsule, radius, s, colours, motion, strength, t, rounded=False):
+        """rounded: a plain rounded rectangle - Windows 11's own corners, round a
+        popup - instead of the dock's squircle."""
+        self._shape = _rounded if rounded else squircle
         try:
             import numpy as np
         except ImportError:
@@ -183,7 +187,8 @@ class NeonRing:
     def _geometry(self, np, size, capsule, radius, s, strength):
         w, h = size.width(), size.height()
         key = (w, h, capsule.x(), capsule.y(), capsule.width(), capsule.height(),
-               round(radius, 2), round(s, 3), strength)
+               round(radius, 2), round(s, 3), strength, self._shape)
+        shape = self._shape
         if key == self._geo_key:
             return self._geo
         from .theme import _blur_alpha
@@ -202,10 +207,10 @@ class NeonRing:
         def tube(p):
             p.setPen(QPen(QColor(255, 255, 255), (1.3 + 0.9 * k) * s))
             p.setBrush(Qt.NoBrush)
-            p.drawPath(squircle(capsule, radius))
+            p.drawPath(shape(capsule, radius))
 
         def inside(p):
-            p.fillPath(squircle(capsule, radius), QColor(255, 255, 255))
+            p.fillPath(shape(capsule, radius), QColor(255, 255, 255))
 
         core = alpha_of(tube)
         glow = _blur_alpha(core * 255.0, max(1, round((1.5 + 2.5 * k) * s))) / 255.0
@@ -259,9 +264,15 @@ class NeonRing:
         for width, alpha in ((9, 30), (5, 70), (2, 255)):
             c.setAlpha(alpha)
             p.setPen(QPen(c, width * s))
-            p.drawPath(squircle(capsule, radius))
+            p.drawPath(self._shape(capsule, radius))
         p.end()
         return img
+
+
+def _rounded(rect, radius):
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    return path
 
 
 def neon_bars(colours, motion, t, n=BARS):
@@ -1535,7 +1546,7 @@ class GlassDock(QWidget):
                 self._unpeek.start()
 
     def _previews_up(self):
-        return self._previews is not None and self._previews.isVisible()
+        return self._previews is not None and self._previews.up
 
     def _show_previews(self):
         hit = next(((i, r, e) for i, r, e in self._items if i == self._hover), None)

@@ -355,20 +355,14 @@ def check_previews(app, out):
         src.show()
         sources.append(src)
     pump(app, 0.1)
+    from widgets.ui import dock_previews as dp
     b = TestBoard()
     b.state.dock_replace_taskbar = False
-    shown = []
-    real_show = WindowPreviews.show_for
-
-    def show_for(self, *args):
-        self.setAttribute(Qt.WA_DontShowOnScreen)
-        real_show(self, *args)
-        shown.append(self)
     with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
             patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
             patch.object(winapi, "fullscreen_monitor", lambda: None), \
             patch.object(shell, "maximised_on", lambda hwnds, monitor: False), \
-            patch.object(WindowPreviews, "show_for", show_for):
+            patch.object(WindowPreviews, "offscreen", True):
         dock = GlassDock(b)
         dock.setAttribute(Qt.WA_DontShowOnScreen)
         try:
@@ -390,9 +384,20 @@ def check_previews(app, out):
             dock._hover_previews(app_hit)
             pump(app, dockmod.PEEK_MS / 1000 * 0.5)
             assert not dock._previews_up(), "previews rose before the hover delay"
-            pump(app, dockmod.PEEK_MS / 1000 * 0.8)
+            # It rises: shorter than it will be, its bottom edge already in
+            # place, its content partly faded in.
+            end = time.monotonic() + dockmod.PEEK_MS / 1000 * 0.5 + dp.SHOW_MS / 1000 * 0.4
+            while time.monotonic() < end:
+                app.processEvents()
+                time.sleep(0.005)
             assert dock._previews_up(), "previews did not rise on hover"
             panel = dock._previews
+            final = panel._target
+            mid, mid_alpha = panel.geometry(), panel._alpha
+            assert final.height() > mid.height() and abs(mid.bottom() - final.bottom()) <= 1 \
+                and 0.0 < mid_alpha < 1.0, f"no rise: {mid} -> {final}, alpha {mid_alpha:.2f}"
+            pump(app, dp.SHOW_MS / 1000 + 0.1)
+            assert panel.geometry() == final and panel._alpha == 1.0, "did not settle"
             ex = shell.u.GetWindowLongPtrW(int(panel.winId()), -20)
             assert not ex & 0x80000, "the panel is layered: the compositor draws no thumbnails there"
             assert len(panel.cards) == 2 and all(c.picture is not None for c in panel.cards), \
@@ -411,16 +416,63 @@ def check_previews(app, out):
             assert panel.geometry().bottom() < dock.y() + dock._capsule.top(), "not above the dock"
             panel.grab().save(str(out / "previews.png"))
 
+            # Neon on: an outline window behind the panel, glowing just past
+            # its edge, Windows' own border off; off again, both back.
+            assert panel.halo is None or not panel.halo.isVisible(), "an outline with neon off"
+            b.state.dock_neon = True
+            panel._frame(panel.geometry(), 1.0)
+            halo = panel.halo
+            m = round(dp.HALO * dock._s)
+            assert halo is not None and halo.isVisible() and \
+                halo.geometry() == panel.geometry().adjusted(-m, -m, m, m), "no outline round the panel"
+            ring = halo.frame()
+            glow = ring.pixelColor(m - 3, halo.height() // 2).alpha()
+            far = ring.pixelColor(1, halo.height() // 2).alpha()
+            assert glow > 40 and glow > far, f"no glow beside the panel's edge ({glow}, {far})"
+            assert not panel._border, "Windows' border still drawn over the neon"
+            assert not shell.u.GetWindowLongPtrW(int(panel.winId()), -20) & 0x80000, \
+                "the panel turned layered"
+            halo.grab().save(str(out / "previews-neon.png"))
+            b.state.dock_neon = False
+            panel._frame(panel.geometry(), 1.0)
+            assert not halo.isVisible() and panel._border, "the outline stayed with neon off"
+
+            # Along to another app: the panel glides there, its cards fading in.
+            before = panel.geometry()
+            other = shell.Task(int(sources[1].winId()), "Other", r"C:\Apps\other.exe")
+            fake = Entry("other", "Other", [other])
+            panel.show_for("app:other", fake, before.center().x() + 300, dock.y() + dock._capsule.top())
+            end = time.monotonic() + dp.MOVE_MS / 1000 * 0.4
+            while time.monotonic() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            glide = panel.geometry()
+            assert glide != before and glide != panel._target and panel._alpha < 1.0, \
+                f"jumped instead of gliding ({before} -> {glide} -> {panel._target})"
+            pump(app, dp.MOVE_MS / 1000 + 0.1)
+            assert panel.geometry() == panel._target, "did not settle on the other app"
+            dock._hover = app_hit[0]
+            dock._show_previews()
+            pump(app, dp.MOVE_MS / 1000 + 0.1)
+
             dock._snap = Snapshot(tasks=tasks[:1], taskbar_pins=[NOTEPAD])
             dock._rebuild()
             dock._relayout()
             dock._refresh_previews()
             assert dock._previews_up() and len(panel.cards) == 1, "a closed window kept its card"
 
+            # Away: it folds back down, fading, and only then goes.
+            top_before = panel.geometry().top()
             dock._hover = ""
             dock._hover_previews(None)
-            pump(app, dockmod.UNPEEK_MS / 1000 + 0.2)
-            assert not dock._previews_up() and not panel.cards, "previews stayed after leaving"
+            end = time.monotonic() + dockmod.UNPEEK_MS / 1000 + dp.HIDE_MS / 1000 * 0.6
+            while time.monotonic() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            assert panel.isVisible() and not dock._previews_up() and \
+                panel.geometry().top() > top_before, "did not fold down before going"
+            pump(app, dp.HIDE_MS / 1000 + 0.15)
+            assert not panel.isVisible() and not panel.cards, "previews stayed after leaving"
             dock._hover = pin_hit[0]
             dock._hover_previews(pin_hit)
             pump(app, dockmod.PEEK_MS / 1000 + 0.2)
@@ -430,8 +482,9 @@ def check_previews(app, out):
             for s in sources:
                 s.close()
     print("PASS: hovering an app raises live previews of its windows after a moment, unlayered, "
-          "one card each, unstretched and apart, above its button; they follow a window closing "
-          "and go when the pointer leaves")
+          "one card each, unstretched and apart, above its button; they rise, glide to another "
+          "app, follow a window closing and fold away; with neon on, a neon outline glows round "
+          "them")
 
 
 def check_pictures():
