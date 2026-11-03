@@ -26,7 +26,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinear
 from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QToolTip, QWidget
 
 from ..core import audio, dock_shell as shell, media, palette, typography, winapi
-from ..core.card import squircle
+from ..core.card import Fader, squircle
 from ..core.store import _log, report
 from .theme import paint_shadow
 
@@ -44,6 +44,7 @@ SEP = 17            # a hairline and the room either side of it
 MUSIC_WIDE, MUSIC_NARROW = 216, 80
 BARS = 5            # the visualiser's bands, 3 px wide and 2 px apart
 ROW_MS = 260        # an app opening into the row, or closing out of it
+ART_FADE_MS = 420   # one cover dissolving into the next, as on the Now Playing widget
 PEEK_MS, UNPEEK_MS = 450, 350       # window previews: hover to show, away to hide
 ICON_FONT = "Segoe Fluent Icons"    # Windows 11's own symbols; MDL2 on Windows 10
 NETWORK_GLYPH = {"ethernet": "", "wifi": "", "cellular": "",
@@ -315,6 +316,46 @@ def neon_bars(colours, motion, t, n=BARS):
     return out
 
 
+def paint_material(p, cap, s, pal, board, tint, area, x, y):
+    """The dock's capsule - its shadow, frosted glass or matte fill, sheen and
+    hairline - in a window whose whole rect is area, at x, y on the screen.
+    The music menu draws itself with this too, so the two match exactly."""
+    state = board.state
+    radius = RADIUS * s
+    paint_shadow(p, cap, radius, blur=round(14 * s), alpha=80 if pal.dark else 50, dy=3 * s)
+    path = squircle(cap, radius)
+    p.save()
+    p.setClipPath(path)
+    glass = state.dock_style == "glass"
+    if glass:
+        drew = board.glass.paint_into(p, area, x, y)
+        tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 235)
+    p.fillPath(path, tint)
+    if glass:
+        # Light from above: a sheen on the upper half of the glass.
+        sheen = QLinearGradient(0, cap.top(), 0, cap.center().y())
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillPath(path, sheen)
+    p.restore()
+    p.setBrush(Qt.NoBrush)
+    if glass:
+        # A hairline that catches that light along the top edge.
+        edge = QLinearGradient(0, cap.top(), 0, cap.bottom())
+        if pal.dark:
+            edge.setColorAt(0.0, QColor(255, 255, 255, 70))
+            edge.setColorAt(1.0, QColor(255, 255, 255, 18))
+        else:
+            edge.setColorAt(0.0, QColor(0, 0, 0, 22))
+            edge.setColorAt(1.0, QColor(0, 0, 0, 40))
+        p.setPen(QPen(QBrush(edge), 1.0))
+    else:
+        # Solid is matte: one flat colour and an even hairline, with no
+        # sheen or lit edge - those are what read as glass.
+        p.setPen(QPen(QColor(255, 255, 255, 20) if pal.dark else QColor(0, 0, 0, 26), 1.0))
+    p.drawPath(squircle(cap.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
+
+
 def _perimeter(np, x, y, rect, r):
     """How far round a rounded rectangle's outline each point sits, 0..1,
     clockwise from the top edge's left end - measured to its nearest point."""
@@ -535,6 +576,21 @@ class Entry:
     own: bool = False             # the PC Widgets app window itself
 
 
+class _Repaint(QObject):
+    """What a cover fade repaints each step: the dock, and the music menu
+    when it is open - they share the one fade."""
+
+    def __init__(self, dock):
+        super().__init__(dock)
+        self.dock = dock
+
+    def update(self):
+        self.dock.update()
+        music = self.dock._music
+        if music is not None and music.isVisible():
+            music.update()
+
+
 # --------------------------------------------------------------------------- #
 #  The dock
 # --------------------------------------------------------------------------- #
@@ -592,7 +648,14 @@ class GlassDock(QWidget):
         self._bars = QRectF()
         self._music_wide = True
         self._pixmaps = {}            # picture key -> (QImage cacheKey, QPixmap)
-        self._art = None              # (art id, px, QPixmap)
+        self._art = {}                # (art id, px) -> QPixmap: the two a cross-fade needs
+        # Cover cross-fade, as the Now Playing widget does it: the outgoing
+        # sleeve is kept until the ramp ends. The music menu shares it.
+        self._art_id = None           # (track, has a cover): what counts as a new sleeve
+        self._art_shown = self._art_prev = None
+        self._art_fade = Fader(_Repaint(self), fps=30)
+        self._art_fade.finish()       # nothing to fade into on the first paint
+        self._static_fade = 1.0       # the fade's value the cached image was drawn at
         self._static = None           # everything but the bars, until something changes
         self._pal = None
         self._fonts = None
@@ -762,9 +825,39 @@ class GlassDock(QWidget):
             return
         self._np = np
         self._listen(np.playing and np.available)
+        self._check_artwork(np)
         self.invalidate()
         if self._music is not None:
             self._music.refresh()
+
+    def _check_artwork(self, np):
+        """Start a cross-fade when the cover changes - the Now Playing
+        widget's rule. Identity is the track, plus whether a cover exists yet,
+        never the image object: the backend decodes the thumbnail afresh on
+        every poll, and keying on that restarted the widget's fade endlessly.
+        The title can land a poll or two before its cover, which then fades in
+        rather than appears."""
+        art = np.art if np.available else None
+        has = art is not None and not art.isNull()
+        ident = (f"{np.artist} — {np.title}".strip(" —") if np.available and np.title else "", has)
+        if ident == self._art_id:
+            if has:
+                self._art_shown = art       # same sleeve, freshly decoded: no fade
+            return
+        had = self._art_id is not None
+        self._art_id = ident
+        self._art_prev, self._art_shown = self._art_shown, art if has else None
+        if had and (self._art_prev is not None or has):
+            self._art_fade.start(ART_FADE_MS)
+        else:
+            self._art_fade.finish()         # the first cover: nothing to dissolve from
+
+    def covers(self, np):
+        """(cover now, outgoing cover or None, how far the fade is, 0..1)."""
+        fade = self._art_fade
+        art = self._art_shown if self._art_id is not None else (np.art if np.available else None)
+        prev = self._art_prev if fade.active else None
+        return art, prev, (fade.value if fade.active else 1.0)
 
     def _listen(self, want):
         """Meter the speakers only while a track plays, as Now Playing does.
@@ -1221,7 +1314,11 @@ class GlassDock(QWidget):
         return pal, colour
 
     def paintEvent(self, event):
-        if self._static is None or self._static.size() != self.size():
+        # A cover fade redraws the cached dock at each of its steps, the last
+        # one included - the ramp has stopped by the time that one paints.
+        fade = self._art_fade.value
+        if self._static is None or self._static.size() != self.size() or fade != self._static_fade:
+            self._static_fade = fade
             self._static = self._render()
         p = QPainter(self)
         p.drawPixmap(0, 0, self._static)
@@ -1273,41 +1370,8 @@ class GlassDock(QWidget):
         return QPixmap.fromImage(img)
 
     def _paint_material(self, p, tint):
-        s, pal, state = self._s, self._pal, self.board.state
-        cap, radius = self._capsule, RADIUS * s
-        paint_shadow(p, cap, radius, blur=round(14 * s), alpha=80 if pal.dark else 50, dy=3 * s)
-        path = squircle(cap, radius)
-        p.save()
-        p.setClipPath(path)
-        if state.dock_style == "glass":
-            drew = self.board.glass.paint_into(p, QRectF(0, 0, self.width(), self.height()),
-                                               self.x(), self.y())
-            tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 235)
-        p.fillPath(path, tint)
-        glass = state.dock_style == "glass"
-        if glass:
-            # Light from above: a sheen on the upper half of the glass.
-            sheen = QLinearGradient(0, cap.top(), 0, cap.center().y())
-            sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
-            sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
-            p.fillPath(path, sheen)
-        p.restore()
-        p.setBrush(Qt.NoBrush)
-        if glass:
-            # A hairline that catches that light along the top edge.
-            edge = QLinearGradient(0, cap.top(), 0, cap.bottom())
-            if pal.dark:
-                edge.setColorAt(0.0, QColor(255, 255, 255, 70))
-                edge.setColorAt(1.0, QColor(255, 255, 255, 18))
-            else:
-                edge.setColorAt(0.0, QColor(0, 0, 0, 22))
-                edge.setColorAt(1.0, QColor(0, 0, 0, 40))
-            p.setPen(QPen(QBrush(edge), 1.0))
-        else:
-            # Solid is matte: one flat colour and an even hairline, with no
-            # sheen or lit edge - those are what read as glass.
-            p.setPen(QPen(QColor(255, 255, 255, 20) if pal.dark else QColor(0, 0, 0, 26), 1.0))
-        p.drawPath(squircle(cap.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5))
+        paint_material(p, self._capsule, self._s, self._pal, self.board, tint,
+                       QRectF(0, 0, self.width(), self.height()), self.x(), self.y())
 
     def _plate(self, p, ident, rect, active=False, radius=10):
         dark = self._pal.dark
@@ -1414,16 +1478,24 @@ class GlassDock(QWidget):
         px = round(ICON * s)
         art = QRectF(rect.x() + round(6 * s), round(rect.center().y() - px / 2), px, px)
         shape = squircle(art, 7 * s)
-        pm = self._art_pixmap(np.art, px) if np.available else None
-        if pm is not None:
-            p.save()
-            p.setClipPath(shape)
-            p.drawPixmap(art, pm, QRectF(pm.rect()))
-            p.restore()
-        else:
-            # No cover: the track's own colour, or a quiet plate when idle.
+        cover, prev, t = self.covers(np)
+        pm, old = self._art_pixmap(cover, px), self._art_pixmap(prev, px)
+        if pm is None or (old is None and t < 1.0):
+            # No cover: the track's own colour, or a quiet plate when idle -
+            # also what a cover fades in from, and fades out to.
             p.fillPath(shape, QColor(*np.tint()) if np.available else
                        QColor(255, 255, 255, 30) if pal.dark else QColor(0, 0, 0, 16))
+        # The outgoing cover stays solid under the incoming one while it fades
+        # in; both at half strength let the dark dock show through mid-fade.
+        # It fades out itself only when no cover follows it.
+        for picture, alpha in ((old, 1.0 if pm is not None else 1.0 - t), (pm, t)):
+            if picture is not None and alpha > 0.004:
+                p.save()
+                p.setClipPath(shape)
+                p.setOpacity(alpha)
+                p.drawPixmap(art, picture, QRectF(picture.rect()))
+                p.restore()
+        if pm is None and old is None:
             p.setFont(self._font_set()["note"])
             p.setPen(QColor(255, 255, 255, 235) if np.available else QColor(pal.text_dim))
             p.drawText(art, Qt.AlignCenter, "")
@@ -1447,12 +1519,15 @@ class GlassDock(QWidget):
     def _art_pixmap(self, art, px):
         if art is None or art.isNull():
             return None
-        if self._art is not None and self._art[0] == art.cacheKey() and self._art[1] == px:
-            return self._art[2]
+        key = (art.cacheKey(), px)
+        if key in self._art:
+            return self._art[key]
         side = min(art.width(), art.height())
         square = art.copy((art.width() - side) // 2, (art.height() - side) // 2, side, side)
         pm = QPixmap.fromImage(square.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
-        self._art = (art.cacheKey(), px, pm)
+        if len(self._art) > 4:
+            self._art.clear()           # only two are live at once, mid-fade
+        self._art[key] = pm
         return pm
 
     def _paint_bars(self, p):

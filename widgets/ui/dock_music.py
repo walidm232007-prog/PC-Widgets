@@ -1,9 +1,12 @@
 """The music menu: click the dock's music and it rises above it.
 
 The cover, the title, artist and player; how far through the track it is;
-previous, play or pause, and next; and the volume. It rises, glides and folds
-like the window previews, with the dock's neon round it when that is on (see
-dock_panel).
+then one row of previous, play or pause, next and the volume. It is the dock's
+own capsule - its squircle corners, shadow, glass or matte fill and neon,
+drawn by the dock's own code - see-through like the dock, so it fades in as it
+slides up, and out as it sinks (see dock_panel). The first version was an
+opaque panel with Windows' rounder, smaller corners, like the window previews,
+which need one; this needs nothing of the sort, so it matches the dock.
 
 The volume is Windows' own - the default output's, as the slider in quick
 settings sets it - not the player's, so it is the same number the dock's
@@ -26,10 +29,13 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainterPath, QPixmap
 
 from ..core import dock_shell as shell, media, typography
 from ..core.card import squircle
+from .dock import RADIUS, NeonRing, paint_material
 from .dock_panel import DockPanel
 
-WIDTH, PAD, ART = 304, 14, 76   # at 100% scaling
-PLAY, SKIP = 48, 40             # the round buttons' diameters
+# At 100% scaling. MARGIN is the clear room round the capsule for its shadow
+# and the neon's glow, as the dock keeps round its own.
+WIDTH, PAD, ART, MARGIN = 264, 12, 48, 16
+PLAY, SKIP, MUTE = 32, 28, 26   # the round buttons' diameters
 NOTE_GLYPH = ""           # Segoe Fluent Icons' MusicNote
 MUTE_GLYPH = ""
 VOLUME_GLYPHS = ("", "", "", "")   # none, low, medium, high
@@ -38,14 +44,16 @@ WHEEL_STEP = 0.02
 
 class MusicPanel(DockPanel):
     TITLE = "PC Widgets Glass Dock music"
+    TRANSLUCENT = True
 
     def __init__(self, dock):
         super().__init__(dock)
         self._anchor = (0, 0)
         self._hover = self._pressed = ""
         self._rects = {}              # control -> rect, in content coordinates
-        self._art_rect = self._bar = self._times = QRectF()
-        self._art = None              # (cacheKey, px, QPixmap)
+        self._capsule = self._art_rect = self._bar = self._times = QRectF()
+        self._neon = NeonRing()
+        self._art = {}                # (cacheKey, px) -> QPixmap: two at most, mid-fade
         self._speakers = None         # made on first use, on this thread
         self._volume = None           # (level, muted) as last read or set
         self._dragging = False
@@ -102,33 +110,40 @@ class MusicPanel(DockPanel):
         return np.playing
 
     def layout(self) -> QRect:
+        """The capsule, MARGIN in from the window's edges: the cover and the
+        track; the progress bar, when the player gives a length; then one row
+        of previous, play or pause, next, the speaker and the volume."""
         s = self.dock._s
         np, _ = self._track()
-        w = round(WIDTH * s)
-        self._art_rect = QRectF(round(PAD * s), round(PAD * s), round(ART * s), round(ART * s))
-        y = (PAD + ART + 16) * s
+        m, w = round(MARGIN * s), round(WIDTH * s)
+        left, right = m + round(PAD * s), m + w - round(PAD * s)
+        self._art_rect = QRectF(left, m + round(PAD * s), round(ART * s), round(ART * s))
+        y = self._art_rect.bottom() + 10 * s
         if np.available and np.duration:
-            self._bar = QRectF(round(PAD * s), round(y), w - round(2 * PAD * s), round(4 * s))
-            self._times = QRectF(self._bar.x(), round(y + 8 * s), self._bar.width(), round(14 * s))
-            y += 30 * s
+            self._bar = QRectF(left, round(y), right - left, round(3 * s))
+            self._times = QRectF(left, round(y + 6 * s), right - left, round(12 * s))
+            y += 24 * s
         else:
             self._bar = self._times = QRectF()
         cy = y + PLAY / 2 * s
-        self._rects = {
-            "prev": QRectF(w / 2 - 64 * s - SKIP / 2 * s, cy - SKIP / 2 * s, SKIP * s, SKIP * s),
-            "play": QRectF(w / 2 - PLAY / 2 * s, cy - PLAY / 2 * s, PLAY * s, PLAY * s),
-            "next": QRectF(w / 2 + 64 * s - SKIP / 2 * s, cy - SKIP / 2 * s, SKIP * s, SKIP * s),
-        }
-        vy = cy + (PLAY / 2 + 26) * s
-        self._rects["mute"] = QRectF(PAD * s, vy - 16 * s, 32 * s, 32 * s)
-        self._rects["volume"] = QRectF((PAD + 40) * s, vy - 2 * s, w - (2 * PAD + 84) * s, 4 * s)
-        self._rects["percent"] = QRectF(w - (PAD + 40) * s, vy - 8 * s, 40 * s, 16 * s)
-        h = round(vy + (16 + PAD) * s)
-        self._content = QSize(w, h)
+
+        def disc(cx, d):
+            return QRectF(round(cx - d / 2 * s), round(cy - d / 2 * s), round(d * s), round(d * s))
+        self._rects = {"prev": disc(left + 14 * s, SKIP), "play": disc(left + 50 * s, PLAY),
+                       "next": disc(left + 86 * s, SKIP), "mute": disc(left + 120 * s, MUTE)}
+        self._rects["percent"] = QRectF(right - 30 * s, cy - 7 * s, 30 * s, 14 * s)
+        track = left + 138 * s
+        self._rects["volume"] = QRectF(track, cy - 1.5 * s, right - 36 * s - track, 3 * s)
+        h = round(cy + (PLAY / 2 + PAD) * s) - m
+        self._capsule = QRectF(m, m, w, h)
+        self._content = QSize(w + 2 * m, h + 2 * m)
         cx, top = self._anchor
         g = self.screen_rect()
-        x = max(g.x() + round(8 * s), min(round(cx - w / 2), g.x() + g.width() - w - round(8 * s)))
-        return QRect(x, round(top - 8 * s - h), w, h)
+        x = max(g.x() + round(8 * s) - m,
+                min(round(cx - w / 2) - m, g.x() + g.width() - w - round(8 * s) - m))
+        # The capsule sits 8 px over the dock's, as the previews do; the
+        # margin round it is clear, and may overlap the dock's.
+        return QRect(x, round(top - 8 * s - h) - m, w + 2 * m, h + 2 * m)
 
     # -- the volume ------------------------------------------------------- #
     def _speaker(self):
@@ -166,6 +181,10 @@ class MusicPanel(DockPanel):
             pass
         self.update()
 
+    def capsule_on_screen(self) -> QRectF:
+        """The menu itself, without the clear margin round it."""
+        return self._capsule.translated(self.x() + self._offset.x(), self.y() + self._offset.y())
+
     def _volume_at(self, x):
         track = self._rects["volume"]
         return (x - track.left()) / max(1.0, track.width())
@@ -196,7 +215,8 @@ class MusicPanel(DockPanel):
         down = shell.buttons_down()
         if down and not self._was_down:
             x, y, _ = shell.cursor()
-            if not self.geometry().contains(x, y) and not self.dock.geometry().contains(x, y):
+            if not self.capsule_on_screen().contains(QPointF(x, y)) and \
+                    not self.dock.geometry().contains(x, y):
                 self.dock.close_music()     # the dock handles its own clicks
         self._was_down = down
 
@@ -205,9 +225,9 @@ class MusicPanel(DockPanel):
         if self._fonts is None:
             from .dock import _symbols
             s = self.dock._s
-            self._fonts = {"title": typography.font(11, QFont.DemiBold),
-                           "sub": typography.font(9), "small": typography.font(8),
-                           "glyph": _symbols(16 * s), "note": _symbols(28 * s)}
+            self._fonts = {"title": typography.font(10, QFont.DemiBold),
+                           "sub": typography.font(8.5), "small": typography.font(7.5),
+                           "glyph": _symbols(14 * s), "note": _symbols(20 * s)}
             for font in self._fonts.values():
                 # Greyscale, as the dock draws: ClearType put red and blue
                 # edges on the speaker symbol.
@@ -217,24 +237,33 @@ class MusicPanel(DockPanel):
     def paint_content(self, p, pal, s):
         np, position = self._track()
         playing = self._playing(np)
+        dock, state = self.dock, self.dock.board.state
+        tint = dock._palette()[1]
+        window = QRectF(-self._offset.x(), -self._offset.y(), self.width(), self.height())
+        paint_material(p, self._capsule, s, pal, dock.board, tint, window, self.x(), self.y())
+        if state.dock_neon:
+            p.drawImage(0, 0, self._neon.frame(
+                self._content, self._capsule, RADIUS * s, s, state.dock_neon_colors,
+                state.dock_neon_motion, state.dock_neon_strength, time.monotonic()))
         self._paint_art(p, pal, s, np)
-        x = self._art_rect.right() + 12 * s
-        room = self._content.width() - x - PAD * s
+        x = self._art_rect.right() + 10 * s
+        room = self._capsule.right() - PAD * s - x
         lines = [("title", pal.text, np.title if np.available else "Nothing playing"),
                  ("sub", pal.text_dim, (np.artist or "") if np.available
                   else "Play something in Spotify or Apple Music"),
                  ("small", pal.text_faint, " · ".join(v for v in (np.source, np.album) if v)
                   if np.available else "")]
-        y = self._art_rect.top() + 8 * s
-        for key, colour, text in lines:
+        # The three lines, centred against the cover.
+        heights = [QFontMetricsF(self._font(key)).height() for key, _, _ in lines]
+        y = self._art_rect.center().y() - (sum(heights) + 2 * s * (len(lines) - 1)) / 2
+        for (key, colour, text), height in zip(lines, heights):
             font = self._font(key)
-            fm = QFontMetricsF(font)
             if text:
                 p.setFont(font)
                 p.setPen(QColor(colour))
-                p.drawText(QRectF(x, y, room, fm.height()), Qt.AlignLeft | Qt.AlignVCenter,
-                           fm.elidedText(text, Qt.ElideRight, room))
-            y += fm.height() + 2 * s
+                p.drawText(QRectF(x, y, room, height), Qt.AlignLeft | Qt.AlignVCenter,
+                           QFontMetricsF(font).elidedText(text, Qt.ElideRight, room))
+            y += height + 2 * s
         if not self._bar.isEmpty():
             self._paint_bar(p, pal, s, self._bar, np.progress if position is None
                             else position / np.duration, QColor(pal.accent))
@@ -255,15 +284,15 @@ class MusicPanel(DockPanel):
                 p.setBrush(disc)
                 d = r.adjusted(2 * s, 2 * s, -2 * s, -2 * s) if self._pressed == "play" else r
                 p.drawEllipse(d)
-                bg = QColor(self.dock._palette()[1])
+                bg = QColor(tint)
                 bg.setAlpha(255)
-                _play_glyph(p, r.center(), 16 * s, playing, bg)
+                _play_glyph(p, r.center(), 12 * s, playing, bg)
                 continue
             if enabled and self._hover == name:
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(255, 255, 255, 26) if pal.dark else QColor(0, 0, 0, 14))
                 p.drawEllipse(r)
-            size = (12 if self._pressed == name else 14) * s
+            size = (9.5 if self._pressed == name else 11) * s
             _skip_glyph(p, r.center(), size, name == "next", ink)
         level, muted = self._volume if self._volume is not None else (0.0, False)
         mute = self._rects["mute"]
@@ -281,7 +310,7 @@ class MusicPanel(DockPanel):
         self._paint_bar(p, pal, s, track, level if self._volume is not None else 0.0, fill)
         if self._volume is not None:
             knob = QPointF(track.left() + track.width() * level, track.center().y())
-            r = (8 if self._dragging or self._hover == "volume" else 6) * s
+            r = (6.5 if self._dragging or self._hover == "volume" else 5) * s
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 60))
             p.drawEllipse(knob + QPointF(0, 1 * s), r, r)
@@ -293,26 +322,42 @@ class MusicPanel(DockPanel):
                    "" if self._volume is None else "Muted" if muted else f"{round(level * 100)}%")
 
     def _paint_art(self, p, pal, s, np):
+        """The cover, dissolving into the next as the dock's does - they share
+        the one fade, so the two change together."""
         r = self._art_rect
-        shape = squircle(r, 10 * s)
+        shape = squircle(r, 8 * s)
         px = round(r.width())
-        art = np.art if np.available else None
-        if art is not None and not art.isNull():
-            if self._art is None or self._art[0] != art.cacheKey() or self._art[1] != px:
-                side = min(art.width(), art.height())
-                square = art.copy((art.width() - side) // 2, (art.height() - side) // 2, side, side)
-                self._art = (art.cacheKey(), px, QPixmap.fromImage(
-                    square.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
-            p.save()
-            p.setClipPath(shape)
-            p.drawPixmap(r, self._art[2], QRectF(self._art[2].rect()))
-            p.restore()
-            return
-        p.fillPath(shape, QColor(*np.tint()) if np.available else
-                   QColor(255, 255, 255, 30) if pal.dark else QColor(0, 0, 0, 16))
-        p.setFont(self._font("note"))
-        p.setPen(QColor(255, 255, 255, 235) if np.available else QColor(pal.text_dim))
-        p.drawText(r, Qt.AlignCenter, NOTE_GLYPH)
+        cover, prev, t = self.dock.covers(np)
+        pm, old = self._cover(cover, px), self._cover(prev, px)
+        if pm is None or (old is None and t < 1.0):
+            # The track's colour: no cover, or what one fades in from and out to.
+            p.fillPath(shape, QColor(*np.tint()) if np.available else
+                       QColor(255, 255, 255, 30) if pal.dark else QColor(0, 0, 0, 16))
+        # As the dock's: the outgoing cover solid under the incoming one.
+        for picture, alpha in ((old, 1.0 if pm is not None else 1.0 - t), (pm, t)):
+            if picture is not None and alpha > 0.004:
+                p.save()
+                p.setClipPath(shape)
+                p.setOpacity(p.opacity() * alpha)
+                p.drawPixmap(r, picture, QRectF(picture.rect()))
+                p.restore()
+        if pm is None and old is None:
+            p.setFont(self._font("note"))
+            p.setPen(QColor(255, 255, 255, 235) if np.available else QColor(pal.text_dim))
+            p.drawText(r, Qt.AlignCenter, NOTE_GLYPH)
+
+    def _cover(self, art, px):
+        if art is None or art.isNull():
+            return None
+        key = (art.cacheKey(), px)
+        if key not in self._art:
+            side = min(art.width(), art.height())
+            square = art.copy((art.width() - side) // 2, (art.height() - side) // 2, side, side)
+            if len(self._art) > 4:
+                self._art.clear()       # only two are live at once, mid-fade
+            self._art[key] = QPixmap.fromImage(
+                square.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        return self._art[key]
 
     @staticmethod
     def _paint_bar(p, pal, s, rect, fraction, fill):
