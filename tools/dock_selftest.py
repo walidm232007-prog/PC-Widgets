@@ -487,6 +487,157 @@ def check_previews(app, out):
           "them")
 
 
+def check_music_menu(app, out):
+    """A click on the music opens its menu - cover, track, progress, previous,
+    play/pause, next, volume - rising like the previews; the buttons reach the
+    player, the slider and wheel set the volume, the speaker mutes, and a click
+    outside or on the music again closes it. The speakers and the player are
+    stand-ins: the real volume and music are never touched."""
+    from unittest.mock import patch
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    from widgets.ui import dock_panel as dpn
+    from widgets.ui.dock_music import MusicPanel
+
+    class Speakers:
+        def __init__(self):
+            self.level, self.muted, self.sets = 0.5, False, []
+
+        def read(self):
+            return self.level, self.muted
+
+        def set_level(self, level):
+            self.level = level
+            self.sets.append(level)
+            return True
+
+        def set_muted(self, muted):
+            self.muted = muted
+            return True
+
+        def close(self):
+            pass
+
+    speakers = Speakers()
+    calls = []
+    clicks = {"down": False, "at": (0, 0, True)}
+    art = QImage(300, 300, QImage.Format_ARGB32_Premultiplied)
+    art.fill(QColor("#d94f8a"))
+    playing = media.NowPlaying(title="A song with a long title that should elide cleanly",
+                               artist="The artist", album="The album", source="Spotify",
+                               playing=True, available=True, art=art, position=42.0,
+                               duration=215.0)
+    b = TestBoard()
+    b.state.dock_replace_taskbar = False
+    with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
+            patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
+            patch.object(winapi, "fullscreen_monitor", lambda: None), \
+            patch.object(shell, "maximised_on", lambda hwnds, monitor: False), \
+            patch.object(MusicPanel, "offscreen", True), \
+            patch.object(shell, "Speakers", lambda: speakers), \
+            patch.object(shell, "buttons_down", lambda: clicks["down"]), \
+            patch.object(shell, "cursor", lambda: clicks["at"]), \
+            patch.object(media, "play_pause", lambda: calls.append("play")), \
+            patch.object(media, "next_track", lambda: calls.append("next")), \
+            patch.object(media, "prev_track", lambda: calls.append("prev")):
+        dock = GlassDock(b)
+        dock.setAttribute(Qt.WA_DontShowOnScreen)
+        try:
+            b.set_dock("enabled", True)
+            dock._np, dock._live = playing, (playing, time.monotonic())
+            music = next(item for item in dock._items if item[0] == "music")
+            dock._click(*music)
+            panel = dock._music
+            assert panel is not None and panel.up, "the click did not open the menu"
+            assert calls == [], "the click still played or paused the track"
+            pump(app, dpn.SHOW_MS / 1000 * 0.4)
+            assert panel.geometry().height() < panel._target.height(), "the menu did not rise"
+            pump(app, dpn.SHOW_MS / 1000 + 0.1)
+            assert panel.geometry() == panel._target and panel._alpha == 1.0
+            assert panel.geometry().bottom() < dock.y() + dock._capsule.top(), "not above the dock"
+            assert abs(panel.geometry().center().x() - (dock.x() + music[1].center().x())) <= 2 or \
+                panel.x() <= 8, "not over the music"
+            content = QRectF(0, 0, panel._content.width(), panel._content.height())
+            rects = [panel._art_rect, panel._bar] + [panel._rects[k] for k in
+                                                     ("prev", "play", "next", "mute", "volume")]
+            for n, r in enumerate(rects):
+                assert content.contains(r), f"control {n} spills out of the menu"
+                assert all(not r.intersects(o) for o in rects[n + 1:]), f"control {n} overlaps"
+
+            def centre(name):
+                c = panel._rects[name].center()
+                return QPoint(round(c.x() + panel._offset.x()), round(c.y() + panel._offset.y()))
+            QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("play"))
+            assert calls == ["play"] and not panel._playing(playing), \
+                "play/pause did not reach the player, or the button did not flip at once"
+            QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("next"))
+            QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("prev"))
+            assert calls == ["play", "next", "prev"], calls
+            track = panel._rects["volume"]
+            y = round(track.center().y() + panel._offset.y())
+            QTest.mousePress(panel, Qt.LeftButton, Qt.NoModifier,
+                             QPoint(round(track.left() + track.width() * 0.2), y))
+            QTest.mouseMove(panel, QPoint(round(track.left() + track.width() * 0.8), y))
+            QTest.mouseRelease(panel, Qt.LeftButton, Qt.NoModifier,
+                               QPoint(round(track.left() + track.width() * 0.8), y))
+            assert abs(speakers.sets[0] - 0.2) < 0.03 and abs(speakers.level - 0.8) < 0.03, \
+                f"the slider did not set the volume ({speakers.sets})"
+            panel.set_volume(speakers.level + 0.02)
+            assert abs(speakers.level - 0.82) < 0.03
+            QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("mute"))
+            assert speakers.muted and panel._volume[1], "the speaker did not mute"
+            QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("mute"))
+            assert not speakers.muted
+
+            for theme in ("dark", "light"):
+                b.palette = palette.build(theme)
+                dock._pal = None
+                panel._override = None
+                for name, np in (("playing", playing),
+                                 ("paused", media.NowPlaying(title="Paused song", artist="Someone",
+                                                             source="Apple Music", available=True,
+                                                             position=10.0, duration=180.0)),
+                                 ("idle", media.NowPlaying())):
+                    dock._np, dock._live = np, (np, time.monotonic())
+                    panel.refresh()
+                    pump(app, dpn.MOVE_MS / 1000 + 0.1)
+                    panel.grab().save(str(out / f"music-{theme}-{name}.png"))
+            b.palette = palette.build("dark")
+            calls.clear()
+            QTest.mouseClick(panel, Qt.LeftButton, Qt.NoModifier, centre("play"))
+            assert calls == [], "the buttons acted with nothing playing"
+
+            b.state.dock_neon = True
+            panel._frame(panel.geometry(), 1.0)
+            assert panel.halo is not None and panel.halo.isVisible(), "no neon round the menu"
+            b.state.dock_neon = False
+            panel._frame(panel.geometry(), 1.0)
+
+            # A click elsewhere on the screen closes it; one inside does not.
+            g = panel.geometry()
+            clicks["at"], clicks["down"] = (g.center().x(), g.center().y(), True), True
+            pump(app, 0.1)
+            clicks["down"] = False
+            pump(app, 0.1)
+            assert panel.up, "a click inside closed the menu"
+            clicks["at"], clicks["down"] = (g.center().x(), g.top() - 200, True), True
+            pump(app, 0.1)
+            clicks["down"] = False
+            assert not panel.up, "a click outside did not close the menu"
+            pump(app, dpn.HIDE_MS / 1000 + 0.15)
+            assert not panel.isVisible()
+            dock._click(*music)
+            assert panel.up
+            pump(app, 0.05)
+            dock._click(*music)
+            assert not panel.up, "a second click on the music did not close it"
+        finally:
+            dock.close()
+    print("PASS: the music opens a menu that rises above it - cover, track, progress, previous, "
+          "play/pause (flipping at once), next, volume slider, wheel and mute - in both themes, "
+          "with neon when on; a click outside or on the music again closes it")
+
+
 def check_pictures():
     """The shell's pictures come out the right way up, with their transparency."""
     img = shell.shell_image(NOTEPAD, 32)
@@ -1000,6 +1151,7 @@ def main():
     check_fullscreen(app)
     check_rehide(app)
     check_previews(app, out)
+    check_music_menu(app, out)
     if args.windows:
         check_windows(app, board, out)
     if args.live:

@@ -113,8 +113,23 @@ app…**); the dock's pins are its own, and the taskbar's are not changed.
 
 The music section shows Spotify or Apple Music through the same backend as Now
 Playing: the cover, title and artist, and five bars from the music widget's
-analyser. Hover shows play or pause over the cover; click toggles it;
-right-click has previous and next.
+analyser. Click it for the music menu; right-click still has previous, play or
+pause, and next.
+
+The music menu rises above it like the window previews, and folds away the same
+way, with the neon round it when the outline is on. It shows the cover, the
+title, artist, player and album, and how far through the track it is - the
+player reports the position at most once a second, and between readings it is
+counted on locally so the bar moves smoothly. Below are previous, play or pause
+and next; play and pause show the new state at once, before the player
+confirms it. Then the volume: a slider, the mouse wheel anywhere over the menu,
+and the speaker to mute. It is Windows' own volume, the default output's, as
+quick settings sets it, so it is the same number the dock's speaker shows and
+the volume keys change; dragging up unmutes, as in quick settings. With
+nothing playing the buttons dim and the volume still works. The menu never
+takes the focus, so a game or a document keeps the keyboard; it learns of a
+click outside it by watching the mouse buttons while it is open, and a click
+outside, on the dock, or on the music again closes it.
 
 **Visualiser** (Settings → Glass Dock, or right-click the dock) is Default,
 the bars in the accent colour, or Neon: the bars take the neon outline's

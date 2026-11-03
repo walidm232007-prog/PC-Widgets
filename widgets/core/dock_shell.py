@@ -714,8 +714,8 @@ class Speakers:
         except OSError:
             self._enum = None
 
-    def read(self):
-        """(level 0..1, muted), or None with no speakers."""
+    def _endpoint(self, use):
+        """Calls use(IAudioEndpointVolume) on the default output; None without one."""
         if not self._enum:
             return None
         device, volume = C.c_void_p(), C.c_void_p()
@@ -727,15 +727,30 @@ class Speakers:
                        C.POINTER(C.c_void_p))(device, C.byref(IID_IAudioEndpointVolume), 0x17,
                                               None, C.byref(volume)) < 0:
                 return None
+            return use(volume)
+        finally:
+            _release(volume)
+            _release(device)
+
+    def read(self):
+        """(level 0..1, muted), or None with no speakers."""
+        def use(volume):
             level, muted = C.c_float(), W.BOOL()
             if _method(volume, 9, C.c_long, C.POINTER(C.c_float))(volume, C.byref(level)) < 0:
                 return None
             if _method(volume, 15, C.c_long, C.POINTER(W.BOOL))(volume, C.byref(muted)) < 0:
                 return None
             return max(0.0, min(1.0, level.value)), bool(muted.value)
-        finally:
-            _release(volume)
-            _release(device)
+        return self._endpoint(use)
+
+    def set_level(self, level: float) -> bool:
+        """The volume, 0..1, as the volume slider in quick settings sets it."""
+        return bool(self._endpoint(lambda v: _method(
+            v, 7, C.c_long, C.c_float, C.c_void_p)(v, max(0.0, min(1.0, level)), None) >= 0))
+
+    def set_muted(self, muted: bool) -> bool:
+        return bool(self._endpoint(lambda v: _method(
+            v, 14, C.c_long, W.BOOL, C.c_void_p)(v, bool(muted), None) >= 0))
 
     def close(self):
         _release(self._enum)
@@ -826,6 +841,16 @@ def round_corners(hwnd: int) -> None:
     with them, on a popup of ours. Earlier Windows ignores it."""
     value = C.c_int(2)                              # DWMWCP_ROUND
     dwm.DwmSetWindowAttribute(hwnd, 33, C.byref(value), C.sizeof(value))
+
+
+u.GetAsyncKeyState.argtypes = [C.c_int]
+u.GetAsyncKeyState.restype = C.c_short
+
+
+def buttons_down() -> bool:
+    """Any mouse button held, anywhere on the screen - how a menu that never
+    takes the focus learns of a click outside it."""
+    return any(u.GetAsyncKeyState(vk) & 0x8000 for vk in (0x01, 0x02, 0x04))
 
 
 def window_border(hwnd: int, shown: bool) -> None:
