@@ -77,6 +77,22 @@ window's own icon is used, then the program's. An app with no icon at all gets
 its initial on a colour of its own. The shell's bitmaps are converted by hand:
 `QImage.fromHBITMAP` dropped their transparency and turned them upside down.
 
+Hover an app with windows open and after a moment a panel rises above it with
+a live picture of each window, as on the taskbar: the app's icon and the
+window's title on top, and a close button on the card under the pointer.
+Click a picture to bring that window forward; close it from its button or with
+a middle-click. Moving along the row while the panel is up switches to the next
+app at once; moving away lets it go. The pictures are the compositor's own
+live thumbnails (`DwmRegisterThumbnail`), video and all - nothing is captured
+or copied. The compositor never draws one into a layered window, and Qt makes
+every see-through frameless window layered (it registers fine, then shows
+nothing), so the panel is opaque: the board's frosted wallpaper edge to edge,
+with Windows 11's own rounded corners, border and shadow. Apps with no window
+open keep their name as a tooltip. Checked on a live desktop: a window shows
+live, and a minimised one keeps its last picture; a window that has never been
+on any screen shows nothing, which is why the selftest checks registration
+and layout, not pixels.
+
 Click an app to bring it forward, or to minimise it when it is already in
 front; with several windows each click brings the next. Middle-click opens a
 new window. Right-click lists its windows, and offers New window, Pin/Unpin
@@ -184,6 +200,5 @@ to check real apps get buttons. `--live` shows the dock, hides and restores the
 real taskbar and checks the work area comes back. `py -3.13 main.py
 --selftest` exercises the widgets and the app window.
 
-The dock is for the main display on Windows 11. Taskbar thumbnails, drag to
-reorder, importing the taskbar's pins, a dock on each display and auto-hide
+The dock is for the main display on Windows 11. Drag to reorder, importing the taskbar's pins, a dock on each display and auto-hide
 are not part of it yet.

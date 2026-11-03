@@ -23,7 +23,7 @@ from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QObject, QPointF, 
                             Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
                            QPainter, QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QToolTip, QWidget
 
 from ..core import audio, dock_shell as shell, media, palette, typography, winapi
 from ..core.card import squircle
@@ -44,6 +44,7 @@ SEP = 17            # a hairline and the room either side of it
 MUSIC_WIDE, MUSIC_NARROW = 216, 80
 BARS = 5            # the visualiser's bands, 3 px wide and 2 px apart
 ROW_MS = 260        # an app opening into the row, or closing out of it
+PEEK_MS, UNPEEK_MS = 450, 350       # window previews: hover to show, away to hide
 ICON_FONT = "Segoe Fluent Icons"    # Windows 11's own symbols; MDL2 on Windows 10
 NETWORK_GLYPH = {"ethernet": "", "wifi": "", "cellular": "",
                  "offline": ""}
@@ -558,6 +559,15 @@ class GlassDock(QWidget):
         self._shown = []              # the row as drawn: [id, payload, from, to, presence]
         self._fading = {}             # id -> presence, for those opening or closing
         self._animate_rows = not preview
+        self._previews = None         # the live window previews, made on first hover
+        self._peek = QTimer(self)     # hover that long on an app before its previews rise
+        self._peek.setSingleShot(True)
+        self._peek.setInterval(PEEK_MS)
+        self._peek.timeout.connect(self._show_previews)
+        self._unpeek = QTimer(self)   # and away from it and them that long before they go
+        self._unpeek.setSingleShot(True)
+        self._unpeek.setInterval(UNPEEK_MS)
+        self._unpeek.timeout.connect(self.hide_previews)
         self._grow = QVariantAnimation(self)
         self._grow.setStartValue(0.0)
         self._grow.setEndValue(1.0)
@@ -684,6 +694,7 @@ class GlassDock(QWidget):
         self._slider.stop()
         self._grow.stop()
         self._row_key, self._fading = None, {}    # the next layout starts settled
+        self.hide_previews()
         self._auto, self._up = False, True
         self.hide()
         if self._workarea is not None:
@@ -709,6 +720,8 @@ class GlassDock(QWidget):
         self.shutdown()
         if self._reservation is not None:
             self._reservation.close()
+        if self._previews is not None:
+            self._previews.close()
         super().closeEvent(event)
 
     # -- what the worker threads hand over -------------------------------- #
@@ -757,6 +770,7 @@ class GlassDock(QWidget):
         if self.isVisible():
             self._place()
         self.invalidate()
+        self._refresh_previews()
 
     def _window_event(self, event, hwnd):
         if event == shell.EVENT_SHOW and hwnd == self.lease.hwnd:
@@ -848,6 +862,7 @@ class GlassDock(QWidget):
                                   (g.x(), g.y(), g.x() + g.width(), g.y() + g.height()))
 
     def _conceal(self):
+        self.hide_previews()
         self._slider.stop()
         self._up = True
         self.hide()
@@ -862,6 +877,8 @@ class GlassDock(QWidget):
             return
         rect = self._target(screen)
         below = screen.geometry().y() + screen.geometry().height()
+        if not up:
+            self.hide_previews()
         self._slider.stop()
         self._up = up
         if up and not self.isVisible():
@@ -908,7 +925,8 @@ class GlassDock(QWidget):
                 self._dwell = 0
                 self._slide(True)
             return
-        near = self.geometry().adjusted(-12, -24, 12, 0).contains(x, y)
+        near = self.geometry().adjusted(-12, -24, 12, 0).contains(x, y) or \
+            (self._previews_up() and self._previews.geometry().contains(x, y))
         if start or near or QApplication.activePopupWidget() is not None:
             self._away = 0
             return
@@ -1489,13 +1507,76 @@ class GlassDock(QWidget):
             self._hover = ident
             self.setToolTip(self._tip(hit))
             self.invalidate()
+            self._hover_previews(hit)
 
     def leaveEvent(self, event):
         if self._hover or self._pressed:
             self._hover = self._pressed = ""
             self.invalidate()
+        self._previews_left()
+
+    # -- window previews -------------------------------------------------- #
+    def _hover_previews(self, hit):
+        """An app with windows: its previews rise after a moment, or at once
+        when another app's are already up - moving along the row follows the
+        pointer, as on the taskbar. Anything else lets them go."""
+        if self.preview:
+            return
+        entry = hit[2] if hit and hit[0].startswith("app:") else None
+        if entry is not None and entry.windows:
+            self._unpeek.stop()
+            if self._previews_up():
+                self._show_previews()
+            else:
+                self._peek.start()
+        else:
+            self._peek.stop()
+            if self._previews_up():
+                self._unpeek.start()
+
+    def _previews_up(self):
+        return self._previews is not None and self._previews.isVisible()
+
+    def _show_previews(self):
+        hit = next(((i, r, e) for i, r, e in self._items if i == self._hover), None)
+        if hit is None or not hit[0].startswith("app:") or not hit[2].windows or \
+                not self.isVisible() or not self._up:
+            return
+        if self._previews is None:
+            from .dock_previews import WindowPreviews
+            self._previews = WindowPreviews(self)
+        QToolTip.hideText()
+        self._previews.show_for(hit[0], hit[2], self.x() + hit[1].center().x(),
+                                self.y() + self._capsule.top())
+
+    def _refresh_previews(self):
+        """The dock read its windows again: titles changed, or one closed."""
+        if not self._previews_up():
+            return
+        ident = self._previews.ident
+        hit = next(((i, r, e) for i, r, e in self._items if i == ident), None)
+        if hit is None or not hit[2].windows:
+            self.hide_previews()
+        else:
+            self._previews.show_for(ident, hit[2], self.x() + hit[1].center().x(),
+                                    self.y() + self._capsule.top())
+
+    def _keep_previews(self):
+        self._unpeek.stop()
+
+    def _previews_left(self):
+        self._peek.stop()
+        if self._previews_up():
+            self._unpeek.start()
+
+    def hide_previews(self):
+        self._peek.stop()
+        self._unpeek.stop()
+        if self._previews is not None:
+            self._previews.dismiss()
 
     def mousePressEvent(self, event):
+        self.hide_previews()                    # a click acts on the app; the taskbar's go too
         hit = self._hit(event.position())
         if event.button() in (Qt.LeftButton, Qt.MiddleButton) and hit:
             self._pressed = hit[0]
@@ -1607,6 +1688,8 @@ class GlassDock(QWidget):
         if ident == "more":
             return "More apps"
         if ident.startswith("app:"):
+            if payload.windows and not self.preview:
+                return ""                       # its previews show every window's title
             if len(payload.windows) == 1:
                 return payload.windows[0].title
             if payload.windows:
@@ -1616,6 +1699,7 @@ class GlassDock(QWidget):
 
     # -- menus ------------------------------------------------------------ #
     def contextMenuEvent(self, event):
+        self.hide_previews()
         hit = self._hit(QPointF(event.pos()))
         if hit and hit[0] == "start":
             shell.shortcut(0x58)                  # Win+X, as Start's own right-click

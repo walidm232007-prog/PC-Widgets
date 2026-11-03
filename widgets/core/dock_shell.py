@@ -771,6 +771,68 @@ def close(hwnd: int) -> None:
         u.PostMessageW(hwnd, 0x0010, 0, 0)          # WM_CLOSE
 
 
+class DWM_THUMBNAIL_PROPERTIES(C.Structure):
+    _fields_ = [("dwFlags", W.DWORD), ("rcDestination", W.RECT), ("rcSource", W.RECT),
+                ("opacity", C.c_ubyte), ("fVisible", W.BOOL), ("fSourceClientAreaOnly", W.BOOL)]
+
+
+dwm.DwmRegisterThumbnail.argtypes = [W.HWND, W.HWND, C.POINTER(W.HANDLE)]
+dwm.DwmRegisterThumbnail.restype = C.HRESULT
+dwm.DwmUnregisterThumbnail.argtypes = [W.HANDLE]
+dwm.DwmUnregisterThumbnail.restype = C.HRESULT
+dwm.DwmQueryThumbnailSourceSize.argtypes = [W.HANDLE, C.POINTER(SIZE)]
+dwm.DwmQueryThumbnailSourceSize.restype = C.HRESULT
+dwm.DwmUpdateThumbnailProperties.argtypes = [W.HANDLE, C.POINTER(DWM_THUMBNAIL_PROPERTIES)]
+dwm.DwmUpdateThumbnailProperties.restype = C.HRESULT
+dwm.DwmSetWindowAttribute.argtypes = [W.HWND, W.DWORD, C.c_void_p, W.DWORD]
+
+
+class Thumbnail:
+    """A live picture of another window, drawn by the compositor into one of
+    ours - what the taskbar's previews are. The destination window must not
+    be layered: Qt makes a see-through frameless window layered, and the
+    compositor never draws a thumbnail into one, though it registers."""
+
+    def __init__(self, dest: int, source: int):
+        self.handle = W.HANDLE()
+        hr = dwm.DwmRegisterThumbnail(dest, source, C.byref(self.handle))
+        if hr:
+            self.handle = None
+            raise OSError(f"DwmRegisterThumbnail failed ({hr & 0xFFFFFFFF:#x})")
+
+    def size(self) -> tuple[int, int]:
+        s = SIZE()
+        if not self.handle or dwm.DwmQueryThumbnailSourceSize(self.handle, C.byref(s)):
+            return 0, 0
+        return s.cx, s.cy
+
+    def place(self, left: int, top: int, right: int, bottom: int) -> None:
+        if self.handle:
+            props = DWM_THUMBNAIL_PROPERTIES()
+            props.dwFlags = 0x1 | 0x4 | 0x8 | 0x10    # destination, opacity, visible, whole window
+            props.rcDestination = W.RECT(left, top, right, bottom)
+            props.opacity, props.fVisible, props.fSourceClientAreaOnly = 255, True, False
+            dwm.DwmUpdateThumbnailProperties(self.handle, C.byref(props))
+
+    def close(self) -> None:
+        if self.handle:
+            dwm.DwmUnregisterThumbnail(self.handle)
+            self.handle = None
+
+
+def round_corners(hwnd: int) -> None:
+    """Windows 11's own rounded corners, and the border and shadow that go
+    with them, on a popup of ours. Earlier Windows ignores it."""
+    value = C.c_int(2)                              # DWMWCP_ROUND
+    dwm.DwmSetWindowAttribute(hwnd, 33, C.byref(value), C.sizeof(value))
+
+
+def window_title(hwnd: int) -> str:
+    buf = C.create_unicode_buffer(512)
+    u.GetWindowTextW(hwnd, buf, len(buf))
+    return buf.value
+
+
 def foreground() -> int:
     return u.GetForegroundWindow() or 0
 
