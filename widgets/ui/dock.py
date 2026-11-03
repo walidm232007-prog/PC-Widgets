@@ -43,6 +43,7 @@ LOGO = 23           # the Start logo: two 11 px tiles and a 1 px gap at 100%
 SEP = 17            # a hairline and the room either side of it
 MUSIC_WIDE, MUSIC_NARROW = 216, 80
 BARS = 5            # the visualiser's bands, 3 px wide and 2 px apart
+ROW_MS = 260        # an app opening into the row, or closing out of it
 ICON_FONT = "Segoe Fluent Icons"    # Windows 11's own symbols; MDL2 on Windows 10
 NETWORK_GLYPH = {"ethernet": "", "wifi": "", "cellular": "",
                  "offline": ""}
@@ -552,6 +553,18 @@ class GlassDock(QWidget):
         self._arrivals = itertools.count()
         self._items = []              # (id, plate, payload) from _relayout
         self._seps = []
+        self._limit = None            # the widest the row may be, from the last placement
+        self._row_key = None          # the row's ids as last laid out, to notice a change
+        self._shown = []              # the row as drawn: [id, payload, from, to, presence]
+        self._fading = {}             # id -> presence, for those opening or closing
+        self._animate_rows = not preview
+        self._grow = QVariantAnimation(self)
+        self._grow.setStartValue(0.0)
+        self._grow.setEndValue(1.0)
+        self._grow.setDuration(ROW_MS)
+        self._grow.setEasingCurve(QEasingCurve.OutCubic)
+        self._grow.valueChanged.connect(self._grow_step)
+        self._grow.finished.connect(self._grown)
         self._capsule = QRectF()
         self._bars = QRectF()
         self._music_wide = True
@@ -669,6 +682,8 @@ class GlassDock(QWidget):
         self._neon_timer.stop()
         self._edge_timer.stop()
         self._slider.stop()
+        self._grow.stop()
+        self._row_key, self._fading = None, {}    # the next layout starts settled
         self._auto, self._up = False, True
         self.hide()
         if self._workarea is not None:
@@ -962,7 +977,9 @@ class GlassDock(QWidget):
         return QRect(g.x() + (g.width() - width) // 2, bottom - height, width, height)
 
     def resizeEvent(self, event):
-        if self.preview:
+        # The row is centred in the window, which is wider than it while the
+        # row animates: lay it out again for the width the window now has.
+        if self.preview or self._limit:
             self._relayout()
         self.invalidate()
 
@@ -1032,12 +1049,15 @@ class GlassDock(QWidget):
         return [("tray", 28), ("quick", 12 + 22 * n), ("clock", round(clock) + 20)]
 
     def _relayout(self, limit=None):
-        """Place every button; returns the dock's natural width. Pixel edges are
+        """Place every button; returns the width the window needs - while the
+        row animates, room for it both before and after. Pixel edges are
         rounded from running totals, so nothing drifts at 125% or 150%."""
         s = self._s
+        if limit:
+            self._limit = limit
         system = self._system()
         fixed = 2 * SIDE + 2 * PAD + 2 * SEP + sum(w for _, w in system) + 2 * (len(system) - 1)
-        limit_u = (limit if limit else self.width() if self.preview else 1 << 20) / s
+        limit_u = (limit or (self.width() if self.preview else self._limit or 1 << 20)) / s
         entries = list(self._entries)
         music = MUSIC_WIDE
         if fixed + music + (1 + len(entries)) * PLATE > limit_u:
@@ -1046,9 +1066,11 @@ class GlassDock(QWidget):
         row = [("start", None)] + [("app:" + e.key, e) for e in entries]
         if len(row) > room:
             row = row[:room - 1] + [("more", [e for _, e in row[room - 1:]])]
+        shown = self._merge_row(row)
         natural = fixed + music + len(row) * PLATE
-        width = round(natural * s)
-        ox = max(0.0, (self.width() - width) / 2) if self.preview else 0.0
+        now = fixed + music + sum(presence for _, _, presence in shown) * PLATE
+        width = round(now * s)
+        ox = round(max(0.0, (self.width() - width) / 2))
         top = self._top()
         y, h = round((top + (BAR_H - PLATE) / 2) * s), round(PLATE * s)
         items, seps = [], []
@@ -1066,15 +1088,15 @@ class GlassDock(QWidget):
             cursor += SEP
 
         if self.board.state.dock_music_side == "right":
-            for ident, payload in row:
-                put(ident, PLATE, payload)
+            for ident, payload, presence in shown:
+                put(ident, PLATE * presence, payload)
             sep()
             put("music", music)
         else:
             put("music", music)
             sep()
-            for ident, payload in row:
-                put(ident, PLATE, payload)
+            for ident, payload, presence in shown:
+                put(ident, PLATE * presence, payload)
         sep()
         for i, (ident, w) in enumerate(system):
             cursor += 2 if i else 0
@@ -1085,7 +1107,67 @@ class GlassDock(QWidget):
         m = next(r for i, r, _ in items if i == "music")
         bw = round(3 * s) * BARS + round(2 * s) * (BARS - 1)
         self._bars = QRectF(m.right() - round(10 * s) - bw, m.center().y() - 11 * s, bw, 22 * s)
-        return width
+        return round(max(natural, now) * s)
+
+    def _merge_row(self, row):
+        """The row as drawn: (id, payload, presence) for each slot.
+
+        A new app's slot opens from nothing and a closed one's closes, where
+        it stood, while the others slide along - instead of the whole row
+        jumping in one frame. Payloads are refreshed every layout; a closing
+        slot keeps its last one to draw while it goes."""
+        ids = [i for i, _ in row]
+        if ids == self._row_key:
+            fresh = dict(row)
+            for slot in self._shown:
+                if slot[0] in fresh:
+                    slot[1] = fresh[slot[0]]
+        else:
+            moving = self._row_key is not None and self._animate_rows and self.isVisible() \
+                and self._up and self._slider.state() != QAbstractAnimation.Running
+            self._row_key = ids
+            if not moving:
+                self._grow.stop()
+                self._shown = [[i, payload, 1.0, 1.0, 1.0] for i, payload in row]
+            else:
+                current = {slot[0]: slot for slot in self._shown}
+                after, prev = {}, None      # closing slots, by the slot they followed
+                for slot in self._shown:
+                    if slot[0] in ids:
+                        prev = slot[0]
+                    elif slot[4] > 0.0:
+                        after.setdefault(prev, []).append(slot)
+                shown = list(after.get(None, []))
+                for ident, payload in row:
+                    was = current[ident][4] if ident in current else 0.0
+                    shown.append([ident, payload, was, 1.0, was])
+                    shown.extend(after.get(ident, []))
+                for slot in shown:
+                    if slot[0] not in ids:
+                        slot[2], slot[3] = slot[4], 0.0
+                self._shown = shown
+                self._grow.stop()
+                self._grow.start()
+        self._fading = {slot[0]: slot[4] for slot in self._shown if slot[4] < 1.0 or slot[3] < 1.0}
+        return [(slot[0], slot[1], slot[4]) for slot in self._shown]
+
+    def _grow_step(self, value):
+        for slot in self._shown:
+            slot[4] = slot[2] + (slot[3] - slot[2]) * value
+        if self._row_key is not None:
+            self._relayout()
+            self.invalidate()
+
+    def _grown(self):
+        """Settled: drop the closed slots and fit the window to the row again."""
+        self._shown = [slot for slot in self._shown if slot[3] > 0.0]
+        for slot in self._shown:
+            slot[2] = slot[4] = slot[3]
+        self._fading = {}
+        self._relayout()
+        self.invalidate()
+        if self._running and not self.preview:
+            self._place()
 
     # -- painting --------------------------------------------------------- #
     def _palette(self):
@@ -1132,7 +1214,21 @@ class GlassDock(QWidget):
         for x in self._seps:
             p.fillRect(QRectF(x, self._capsule.center().y() - 12 * self._s, 1, 24 * self._s), line)
         for ident, rect, payload in self._items:
-            self._paint_item(p, ident, rect, payload)
+            presence = self._fading.get(ident)
+            if presence is None:
+                self._paint_item(p, ident, rect, payload)
+            elif presence > 0.01:
+                # Opening or closing: drawn at full size, then scaled about
+                # the slot's centre and faded, so it never spills past it.
+                c = rect.center()
+                full = QRectF(c.x() - PLATE * self._s / 2, rect.y(), PLATE * self._s, rect.height())
+                p.save()
+                p.setOpacity(presence)
+                p.translate(c)
+                p.scale(presence, presence)
+                p.translate(-c)
+                self._paint_item(p, ident, full, payload)
+                p.restore()
         p.end()
         return QPixmap.fromImage(img)
 
@@ -1381,7 +1477,10 @@ class GlassDock(QWidget):
 
     # -- input ------------------------------------------------------------ #
     def _hit(self, pos):
-        return next((item for item in self._items if item[1].contains(pos)), None)
+        """The button under the pointer; one closing out of the row is gone."""
+        current = self._row_key or ()
+        return next((item for item in self._items if item[1].contains(pos) and
+                     (item[0] not in self._fading or item[0] in current)), None)
 
     def mouseMoveEvent(self, event):
         hit = self._hit(event.position())

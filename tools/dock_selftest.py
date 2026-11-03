@@ -260,6 +260,84 @@ def check_neon_bars(out, board):
           "and dims while paused")
 
 
+def check_row_animation(app, out, board):
+    """A new app opens into the row - its slot widening from nothing, the icon
+    growing in - and a closed one closes out where it stood, instead of the
+    row jumping in one frame. Offscreen; frames saved as a strip."""
+    from dataclasses import replace
+    board.palette = palette.build("dark")
+    board.state.dock_style = "glass"
+    dock = GlassDock(board, preview=True)
+    dock.setAttribute(Qt.WA_DontShowOnScreen)
+    snap = fake_snapshot()
+    dock._snap = snap
+    dock._np = media.NowPlaying()
+    dock.sync()
+    dock.resize(1100, 64)
+    dock.show()
+    dock._animate_rows = True
+    pump(app, 0.05)
+    key = "app:" + shell.app_key("", r"C:\Apps\new.exe")
+    rect = lambda ident: next((r for i, r, _ in dock._items if i == ident), None)
+    clock_before = rect("clock").x()
+    frames = []
+
+    def change(tasks):
+        dock._snap = replace(snap, tasks=tasks)
+        dock._rebuild()
+        dock._relayout()
+        dock.invalidate()
+
+    change(snap.tasks + [shell.Task(300, "New app", r"C:\Apps\new.exe")])
+    assert rect(key) is not None and rect(key).width() <= 1, "the new app arrived at full width"
+    frames.append(dock.grab())
+    widths = []
+    end = time.monotonic() + dockmod.ROW_MS / 1000 * 0.5
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.005)
+    widths.append(rect(key).width())
+    frames.append(dock.grab())
+    pump(app, dockmod.ROW_MS / 1000 + 0.2)
+    frames.append(dock.grab())
+    plate = round(dockmod.PLATE * dock._s)
+    assert 1 < widths[0] < plate, f"no in-between width halfway ({widths[0]})"
+    assert rect(key).width() == plate and not dock._fading, "did not settle at full width"
+    assert rect("clock").x() > clock_before, "the row did not make room"
+
+    t0 = time.perf_counter()
+    for _ in range(10):
+        dock._static = None
+        dock._render()
+    ms = (time.perf_counter() - t0) / 10 * 1000
+
+    change(snap.tasks)
+    end = time.monotonic() + dockmod.ROW_MS / 1000 * 0.5
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.005)
+    closing = rect(key)
+    assert closing is not None and 1 < closing.width() < plate, "the closed app vanished at once"
+    hit = dock._hit(closing.center())
+    assert hit is None or hit[0] != key, "a closing app could still be clicked"
+    frames.append(dock.grab())
+    pump(app, dockmod.ROW_MS / 1000 + 0.2)
+    assert rect(key) is None and not dock._fading, "the closed app's slot stayed"
+    assert abs(rect("clock").x() - clock_before) <= 1, "the row did not close up again"
+    frames.append(dock.grab())
+    dock.close()
+
+    strip = QImage(frames[0].width(), sum(f.height() for f in frames), QImage.Format_ARGB32)
+    strip.fill(QColor("#202024"))
+    p = QPainter(strip)
+    for n, f in enumerate(frames):
+        p.drawPixmap(0, n * f.height(), f)
+    p.end()
+    assert strip.save(str(out / "row-animation.png"))
+    print(f"PASS: a new app opens into the row and a closed one closes out, in between frames "
+          f"and settling exactly; closing ones can't be clicked ({ms:.1f} ms a frame)")
+
+
 def check_pictures():
     """The shell's pictures come out the right way up, with their transparency."""
     img = shell.shell_image(NOTEPAD, 32)
@@ -756,6 +834,7 @@ def main():
     check_renders(out, board)
     check_neon(out, board)
     check_neon_bars(out, board)
+    check_row_animation(app, out, board)
     check_rows(board)
     check_native()
     check_start_host()

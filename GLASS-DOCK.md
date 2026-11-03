@@ -61,6 +61,16 @@ from Start shows up in the dock too. Unpinning one from the dock only takes it
 off the dock - the taskbar is never changed - and **Show all taskbar pins**
 brings it back.
 
+An app that opens and isn't pinned slides in instead of appearing in one
+frame: its slot widens from nothing while the icon grows and fades in, the
+apps after it slide along, and the dock widens evenly about its centre. A
+closed app shrinks out where it stood, and can't be clicked while it goes. It
+takes a quarter of a second. Meanwhile the window stays wide enough for the row
+both before and after and the row is centred inside it, so the window itself
+is moved only at the start and the end, never every frame. A frame costs about
+2 ms, plus about 7 ms with the neon outline on, whose glow is rebuilt for each
+new width.
+
 Icons are the shell's own artwork for the app - what Start and the taskbar
 show, Store apps included - rendered at the size needed. Without an app ID the
 window's own icon is used, then the program's. An app with no icon at all gets
