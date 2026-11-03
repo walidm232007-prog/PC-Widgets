@@ -806,12 +806,13 @@ class Thumbnail:
             return 0, 0
         return s.cx, s.cy
 
-    def place(self, left: int, top: int, right: int, bottom: int) -> None:
+    def place(self, left: int, top: int, right: int, bottom: int, opacity: int = 255) -> None:
         if self.handle:
             props = DWM_THUMBNAIL_PROPERTIES()
             props.dwFlags = 0x1 | 0x4 | 0x8 | 0x10    # destination, opacity, visible, whole window
             props.rcDestination = W.RECT(left, top, right, bottom)
-            props.opacity, props.fVisible, props.fSourceClientAreaOnly = 255, True, False
+            props.opacity = max(0, min(255, opacity))
+            props.fVisible, props.fSourceClientAreaOnly = opacity > 0, False
             dwm.DwmUpdateThumbnailProperties(self.handle, C.byref(props))
 
     def close(self) -> None:
@@ -825,6 +826,13 @@ def round_corners(hwnd: int) -> None:
     with them, on a popup of ours. Earlier Windows ignores it."""
     value = C.c_int(2)                              # DWMWCP_ROUND
     dwm.DwmSetWindowAttribute(hwnd, 33, C.byref(value), C.sizeof(value))
+
+
+def window_border(hwnd: int, shown: bool) -> None:
+    """Windows 11's hairline border round a popup of ours, or none - a neon
+    tube takes its place."""
+    value = C.c_uint(0xFFFFFFFF if shown else 0xFFFFFFFE)   # DWMWA_COLOR_DEFAULT / _NONE
+    dwm.DwmSetWindowAttribute(hwnd, 34, C.byref(value), C.sizeof(value))
 
 
 def window_title(hwnd: int) -> str:

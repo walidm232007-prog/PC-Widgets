@@ -88,7 +88,17 @@ or copied. The compositor never draws one into a layered window, and Qt makes
 every see-through frameless window layered (it registers fine, then shows
 nothing), so the panel is opaque: the board's frosted wallpaper edge to edge,
 with Windows 11's own rounded corners, border and shadow. Apps with no window
-open keep their name as a tooltip. Checked on a live desktop: a window shows
+open keep their name as a tooltip.
+
+Being opaque, the panel can't fade as a whole, so it rises: it unfolds upward
+out of the dock with its bottom edge still, while the titles fade in and the
+pictures fade in through the compositor's own opacity. Moving to another app
+glides it across, the new cards fading in on the way; leaving folds it back
+down. With the neon outline on, the panel gets one too: a see-through window
+just behind it carries the dock's neon - same colours, motion and strength -
+round Windows 11's corner shape, with its glow shining outward where an opaque
+panel can't draw, and Windows' own hairline border is turned off so the tube
+takes its place. Checked on a live desktop: a window shows
 live, and a minimised one keeps its last picture; a window that has never been
 on any screen shows nothing, which is why the selftest checks registration
 and layout, not pixels.
