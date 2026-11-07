@@ -20,13 +20,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QObject, QPointF, QRect, QRectF,
-                            Qt, QTimer, QVariantAnimation, Signal)
+                            Qt, QTimer, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QToolTip, QWidget
 
 from ..core import audio, dock_shell as shell, media, palette, typography, winapi
 from ..core.card import Fader, squircle
+from ..core.frameclock import Ticker, Tween, clock
 from ..core.store import _log, report
 from .theme import paint_shadow
 
@@ -45,6 +46,7 @@ MUSIC_WIDE, MUSIC_NARROW = 216, 80
 BARS = 5            # the visualiser's bands, 3 px wide and 2 px apart
 ROW_MS = 260        # an app opening into the row, or closing out of it
 ART_FADE_MS = 420   # one cover dissolving into the next, as on the Now Playing widget
+NEON_FPS = 60       # the neon's cap; everything that moves runs at the display's rate
 PEEK_MS, UNPEEK_MS = 450, 350       # window previews: hover to show, away to hide
 ICON_FONT = "Segoe Fluent Icons"    # Windows 11's own symbols; MDL2 on Windows 10
 NETWORK_GLYPH = {"ethernet": "", "wifi": "", "cellular": "",
@@ -637,7 +639,9 @@ class GlassDock(QWidget):
         self._unpeek.setSingleShot(True)
         self._unpeek.setInterval(UNPEEK_MS)
         self._unpeek.timeout.connect(self.hide_previews)
-        self._grow = QVariantAnimation(self)
+        # Every animation here steps on the main display's refresh (see
+        # frameclock): Qt's own 16 ms animation timer hitched on a 200 Hz panel.
+        self._grow = Tween(self)
         self._grow.setStartValue(0.0)
         self._grow.setEndValue(1.0)
         self._grow.setDuration(ROW_MS)
@@ -653,7 +657,7 @@ class GlassDock(QWidget):
         # sleeve is kept until the ramp ends. The music menu shares it.
         self._art_id = None           # (track, has a cover): what counts as a new sleeve
         self._art_shown = self._art_prev = None
-        self._art_fade = Fader(_Repaint(self), fps=30)
+        self._art_fade = Fader(_Repaint(self), fps=None)
         self._art_fade.finish()       # nothing to fade into on the first paint
         self._static_fade = 1.0       # the fade's value the cached image was drawn at
         self._static = None           # everything but the bars, until something changes
@@ -673,15 +677,13 @@ class GlassDock(QWidget):
         self._edge_timer = QTimer(self)
         self._edge_timer.setInterval(100)
         self._edge_timer.timeout.connect(self._edge_tick)
-        self._slider = QVariantAnimation(self)
-        self._slider.valueChanged.connect(lambda v: self.move(self.x(), int(v)))
+        self._slider = Tween(self)
+        self._slider.valueChanged.connect(lambda v: self.move(self.x(), round(v)))
         self._slider.finished.connect(self._slid)
+        self._glass_at = None         # while sliding: where the glass is sampled, fixed
         self._neon = NeonRing()
         self._neon_img = None
-        self._neon_timer = QTimer(self)
-        self._neon_timer.setInterval(33)
-        self._neon_timer.setTimerType(Qt.PreciseTimer)
-        self._neon_timer.timeout.connect(self._neon_tick)
+        self._neon_timer = Ticker(self._neon_tick, max_fps=NEON_FPS)
         self._running = False
         self._listening = False
         self._stop = None
@@ -690,10 +692,7 @@ class GlassDock(QWidget):
         self._levels = (0.0,) * BARS
         self._s = 1.0
         self._minute = ""
-        self._frame = QTimer(self)
-        self._frame.setInterval(20)
-        self._frame.setTimerType(Qt.PreciseTimer)
-        self._frame.timeout.connect(self._animate)
+        self._frame = Ticker(self._animate)     # the bars: redrawn only when they change
         self._watch = QTimer(self)
         self._watch.setInterval(1000)
         self._watch.timeout.connect(self._refresh)
@@ -705,6 +704,7 @@ class GlassDock(QWidget):
         board.prefs_changed.connect(self.sync)
         board.glass_changed.connect(self.invalidate)
         board.displays_changed.connect(lambda: QTimer.singleShot(0, self._refresh))
+        board.displays_changed.connect(clock().displays_changed)   # a new main display or rate
         QApplication.instance().aboutToQuit.connect(self.shutdown)
         self.sync()
 
@@ -978,6 +978,7 @@ class GlassDock(QWidget):
         self.hide_previews()
         self.close_music()
         self._slider.stop()
+        self._glass_at = None
         self._up = True
         self.hide()
         self._frame.stop()
@@ -1005,6 +1006,14 @@ class GlassDock(QWidget):
         elif not up and not self.isVisible():
             return
         self.move(rect.x(), self.y())
+        # The dock is drawn once for the whole slide, its glass sampled where
+        # it rests up, and only the window moves. Re-rendering it for the
+        # wallpaper under every step cost 2 ms a frame - over a third of a
+        # 200 Hz frame - for glass that shifts a few pixels while it moves.
+        at = (rect.x(), rect.y())
+        if at != self._glass_at:
+            self._glass_at = at
+            self.invalidate()
         self._slider.setStartValue(self.y())
         self._slider.setEndValue(rect.y() if up else below)
         self._slider.setDuration(180 if up else 240)
@@ -1012,6 +1021,7 @@ class GlassDock(QWidget):
         self._slider.start()
 
     def _slid(self):
+        self._glass_at = None
         if not self._up:
             self.hide()
             self._frame.stop()
@@ -1117,7 +1127,8 @@ class GlassDock(QWidget):
         self.invalidate()
 
     def moveEvent(self, event):
-        self.invalidate()           # the glass behind it moved
+        if self._glass_at is None:
+            self.invalidate()       # the glass behind it moved
 
     # -- the row ---------------------------------------------------------- #
     def _pin_targets(self):
@@ -1370,8 +1381,9 @@ class GlassDock(QWidget):
         return QPixmap.fromImage(img)
 
     def _paint_material(self, p, tint):
+        x, y = self._glass_at or (self.x(), self.y())
         paint_material(p, self._capsule, self._s, self._pal, self.board, tint,
-                       QRectF(0, 0, self.width(), self.height()), self.x(), self.y())
+                       QRectF(0, 0, self.width(), self.height()), x, y)
 
     def _plate(self, p, ident, rect, active=False, radius=10):
         dark = self._pal.dark

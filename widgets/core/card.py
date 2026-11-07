@@ -99,12 +99,20 @@ class Fader:
     a cross-fade look like one thing becoming another.
     """
 
-    def __init__(self, widget: QWidget, fps: int = 30) -> None:
+    def __init__(self, widget: QWidget, fps: Optional[int] = 30) -> None:
         self._widget = widget
-        self._step_ms = max(16, int(round(1000.0 / max(1, fps))))
         self._value = 1.0
         self._duration = 1.0
         self._elapsed = 0.0
+        self._began = None
+        if fps is None:
+            # Every frame the main display shows, timed by its refresh (see
+            # frameclock) - the dock's choice, where everything else moves so.
+            from .frameclock import Ticker
+            self._step_ms = 0
+            self._timer = Ticker(self._step_display)
+            return
+        self._step_ms = max(16, int(round(1000.0 / max(1, fps))))
         self._timer = QTimer(widget)
         self._timer.setInterval(self._step_ms)
         self._timer.timeout.connect(self._step)
@@ -121,6 +129,7 @@ class Fader:
     def start(self, ms: float = 350.0) -> None:
         self._duration = max(1.0, float(ms))
         self._elapsed = 0.0
+        self._began = None
         self._value = 0.0
         if not self._timer.isActive():
             self._timer.start()
@@ -130,8 +139,19 @@ class Fader:
         self._timer.stop()
         self._value = 1.0
 
+    def _step_display(self) -> None:
+        from .frameclock import clock
+        c = clock()
+        if self._began is None:
+            self._began = c.frame_time - c.period
+        self._elapsed = (c.frame_time - self._began) * 1000.0
+        self._advance()
+
     def _step(self) -> None:
         self._elapsed += self._step_ms
+        self._advance()
+
+    def _advance(self) -> None:
         t = min(1.0, self._elapsed / self._duration)
         self._value = t * t * (3.0 - 2.0 * t)          # smoothstep
         self._widget.update()

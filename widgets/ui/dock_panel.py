@@ -27,13 +27,13 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, \
-    QVariantAnimation
+from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..core import dock_shell as shell
-from .dock import NeonRing
+from ..core.frameclock import Ticker, Tween     # the main display's refresh, as the dock
+from .dock import NEON_FPS, NeonRing
 
 CORNER = 8                      # Windows 11's rounding of a popup, at 100%
 HALO = 14                       # room round the panel for a neon glow, at 100%
@@ -69,10 +69,7 @@ class NeonHalo(QWidget):
             self.setAttribute(Qt.WA_DontShowOnScreen)
         self.ring = NeonRing()
         self.alpha = 1.0
-        self.timer = QTimer(self)
-        self.timer.setInterval(33)
-        self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.timeout.connect(self.update)
+        self.timer = Ticker(self.update, max_fps=NEON_FPS)
 
     def frame(self):
         dock = self.panel.dock
@@ -109,10 +106,7 @@ class DockPanel(QWidget):
             self.setAttribute(Qt.WA_DontShowOnScreen)
         self.setMouseTracking(True)
         self.halo = None
-        self._neon_timer = QTimer(self)   # a see-through panel's own moving neon
-        self._neon_timer.setInterval(33)
-        self._neon_timer.setTimerType(Qt.PreciseTimer)
-        self._neon_timer.timeout.connect(self.update)
+        self._neon_timer = Ticker(self.update, max_fps=NEON_FPS)  # a see-through panel's own neon
         self._rounded = False
         self._border = True           # Windows' hairline; off while neon draws the edge
         self._content = QSize()       # the size the content was laid out for
@@ -121,7 +115,7 @@ class DockPanel(QWidget):
         self._offset = QPointF()      # the content's origin in the window as it is now
         self._leaving = False
         self._from = self._to = None  # (geometry, alpha) the animation runs between
-        self._anim = QVariantAnimation(self)
+        self._anim = Tween(self)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
         self._anim.valueChanged.connect(self._step)

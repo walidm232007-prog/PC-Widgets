@@ -1097,6 +1097,83 @@ def check_fullscreen(app):
           "captured pointer never does, and it returns afterwards")
 
 
+def check_motion(app):
+    """The slide steps once per refresh of the main display, evenly and in
+    one direction, and draws the dock once for the whole way, not per step.
+    Unmapped, with the work area and taskbar left alone, as above."""
+    from unittest.mock import patch
+    from PySide6.QtCore import QAbstractAnimation, QEventLoop, QTimer
+    from widgets.core import frameclock
+
+    def run(seconds):
+        # A real event loop: pump()'s 10 ms naps would merge frames at 200 Hz.
+        loop = QEventLoop()
+        QTimer.singleShot(round(seconds * 1000), loop.quit)
+        loop.exec()
+
+    b = TestBoard()
+    b.state.dock_replace_taskbar = False
+    clock = frameclock.clock()
+    hz = frameclock.refresh_rate(frameclock.main_display())
+    maxed = [False]
+    with patch.object(GlassDock, "_poll"), patch.object(Watcher, "start"), \
+            patch.object(shell, "WindowEvents"), patch.object(shell.WorkArea, "reserve"), \
+            patch.object(winapi, "fullscreen_monitor", lambda: None), \
+            patch.object(shell, "maximised_on", lambda hwnds, monitor: maxed[0]), \
+            patch.object(shell, "cursor", lambda: (0, 0, False)), \
+            patch.object(shell, "is_start", lambda hwnd: False):
+        dock = GlassDock(b)
+        dock.setAttribute(Qt.WA_DontShowOnScreen)
+        try:
+            b.set_dock("enabled", True)
+            run(0.2)
+            renders, steps = [0], []
+            real = dock._render
+
+            def counted():
+                renders[0] += 1
+                return real()
+            dock._render = counted
+            dock._slider.valueChanged.connect(lambda v: steps.append((clock.frame_time, v)))
+            for up, ms in ((False, 240), (True, 180)):
+                renders[0], steps[:] = 0, []
+                if up:
+                    dock._slide(True)
+                else:
+                    maxed[0] = True
+                    dock._refresh()
+                run(ms / 1000 + 0.25)
+                assert dock._slider.state() != QAbstractAnimation.Running, "the slide never ended"
+                ys = [v for _, v in steps]
+                assert ys == sorted(ys, reverse=up), "the slide went back on itself"
+                # The first step is the start value, emitted before any tick.
+                gaps = [b2 - a for (a, _), (b2, _) in zip(steps[1:], steps[2:])]
+                want = ms * hz / 1000
+                assert len(steps) - 1 >= 0.8 * want, \
+                    f"{len(steps) - 1} steps in {ms} ms, want ~{want:.0f} at {hz} Hz"
+                assert max(gaps) < 2.5 / hz, f"a {max(gaps) * 1000:.1f} ms hitch mid-slide"
+                dock.repaint()
+                assert renders[0] <= 2, f"the dock was drawn {renders[0]} times on one slide"
+            maxed[0] = False
+            dock._refresh()
+        finally:
+            dock.close()
+        # The neon is capped to a whole number of frames near 60 fps.
+        stamps = []
+        neon = frameclock.Ticker(lambda: stamps.append(clock.frame_time), max_fps=dockmod.NEON_FPS)
+        neon.start()
+        run(0.6)
+        neon.stop()
+        every = max(1, round(hz / dockmod.NEON_FPS))
+        gaps = [b2 - a for a, b2 in zip(stamps, stamps[1:])]
+        rate = len(gaps) / (stamps[-1] - stamps[0])
+        assert abs(rate - hz / every) < 0.1 * hz / every, f"neon at {rate:.0f} fps, want {hz / every:.0f}"
+        assert max(gaps) < (every + 1.5) / hz, f"a {max(gaps) * 1000:.1f} ms neon hitch"
+    print(f"PASS: the dock slides on the main display's refresh ({hz} Hz, {clock.source}), "
+          f"one even step a frame, drawn once per slide; the neon every {every} frame(s), "
+          f"{rate:.0f} fps")
+
+
 def check_rehide(app):
     """Explorer re-shows a hidden auto-hiding taskbar when the pointer touches
     the bottom edge, the same move that brings the dock up over a maximised
@@ -1243,6 +1320,7 @@ def main():
     check_positions()
     check_listening()
     check_fullscreen(app)
+    check_motion(app)
     check_rehide(app)
     check_previews(app, out)
     check_music_menu(app, out)
