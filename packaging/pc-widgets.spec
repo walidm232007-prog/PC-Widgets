@@ -5,8 +5,12 @@
 # launch, which is slower to start, trips antivirus more often, and would give
 # the taskbar guard and the media helper a different path on every run.
 
+import glob
+import importlib.metadata
 import os
 import re
+import shutil
+import sys
 
 from PyInstaller.utils.win32.versioninfo import (
     FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
@@ -44,6 +48,67 @@ hiddenimports = [
     "asyncio", "array", "inspect", "keyword", "locale", "socket", "tempfile",
     "uuid", "typing", "numpy",
 ]
+
+
+# Notices. The folder passes on Qt, Python, numpy, PyInstaller's own run-time
+# code and the vendored packages, and each of their licences asks for its text
+# to travel with it. They go beside the exe, not in _internal, because that is
+# where a person looks for them; THIRD-PARTY.md, shipped with them, says which
+# file covers what. Gathered here, before the build, so a missing one stops it
+# straight away rather than after two minutes of analysis.
+def txt(name):
+    """Windows has nothing to open a file called LICENSE with."""
+    return name if os.path.splitext(name)[1] else name + ".txt"
+
+
+def installed_licences(package, folder):
+    """The licence files an installed package's dist-info carries, at their
+    paths inside its licenses/ folder. From the Python running this build, so
+    they are always those of the copy being bundled."""
+    dist = importlib.metadata.distribution(package)
+    found = {}
+    for f in dist.files or ():
+        if len(f.parts) > 2 and f.parts[0].endswith(".dist-info") and f.parts[1] == "licenses":
+            found[f"licenses/{folder}/" + txt("/".join(f.parts[2:]))] = str(dist.locate_file(f))
+    if not found:
+        raise SystemExit(f"{package} is installed without its licence files")
+    return found
+
+
+def vendored_licences(dist_info, folder):
+    """The licence files of a package in vendor/, whatever its version."""
+    found = {f"licenses/{folder}/" + txt(os.path.basename(path)): path
+             for path in glob.glob(os.path.join(ROOT, "vendor", dist_info, "licenses", "*"))}
+    if not found:
+        raise SystemExit(f"no licence files in vendor/{dist_info}/licenses")
+    return found
+
+
+NOTICES = {
+    # The app's own.
+    "LICENSE.txt": os.path.join(ROOT, "LICENSE"),
+    "THIRD-PARTY.md": os.path.join(ROOT, "THIRD-PARTY.md"),
+    # Qt, PySide6 and shiboken6: their wheels carry no licence text, so the
+    # LGPL v3 is kept in packaging/licenses/, with the GPL v3 it is written as
+    # additions to.
+    "licenses/Qt/LGPL-3.0.txt": os.path.join(ROOT, "packaging", "licenses", "LGPL-3.0.txt"),
+    "licenses/Qt/GPL-3.0.txt": os.path.join(ROOT, "packaging", "licenses", "GPL-3.0.txt"),
+    # The Windows build of Python appends what it ships with (OpenSSL,
+    # libffi, bzip2, the C runtime) to its own licence.
+    "licenses/Python/LICENSE.txt": os.path.join(sys.base_prefix, "LICENSE.txt"),
+    "licenses/winrt/LICENSE.txt": os.path.join(ROOT, "vendor", "LICENSE-winrt.txt"),
+    "licenses/Inter/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Inter.txt"),
+    "licenses/weather-photos/CREDITS.md": os.path.join(ROOT, "assets", "weather", "CREDITS.md"),
+}
+# numpy's covers the OpenBLAS, LAPACK and GCC runtime inside numpy.libs too;
+# PyInstaller's covers the run-time hooks it puts in the exe (Apache 2.0).
+NOTICES.update(installed_licences("numpy", "numpy"))
+NOTICES.update(installed_licences("pyinstaller", "PyInstaller"))
+NOTICES.update(vendored_licences("pyaudiowpatch-*.dist-info", "PyAudioWPatch"))
+NOTICES.update(vendored_licences("typing_extensions-*.dist-info", "typing_extensions"))
+missing = sorted(src for src in NOTICES.values() if not os.path.isfile(src))
+if missing:
+    raise SystemExit("refusing to build without these notices: " + ", ".join(missing))
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],
@@ -95,3 +160,11 @@ exe = EXE(
     upx=False,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="PC Widgets", upx=False)
+
+# COLLECT has assembled the folder by now (coll.name is its path). Data files
+# can only go inside _internal, so the notices are copied in beside the exe
+# afterwards; COLLECT empties the folder first on every build, so none linger.
+for dest, src in sorted(NOTICES.items()):
+    target = os.path.join(coll.name, *dest.split("/"))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    shutil.copyfile(src, target)

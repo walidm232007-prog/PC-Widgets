@@ -23,7 +23,9 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 
 This licence covers the source code in this repository only. Third-party
-material used, bundled or fetched by it - Qt/PySide6, the Inter typeface in
-fonts/ (SIL Open Font License 1.1, see fonts/LICENSE-Inter.txt), the weather
-photographs, and the weather and market data feeds - carries its own terms. See
-THIRD-PARTY.md.
+material used, bundled or fetched by it - Qt/PySide6, the packages in vendor/,
+the Inter typeface in fonts/ (SIL Open Font License 1.1, see
+fonts/LICENSE-Inter.txt), the weather photographs, the weather and market data
+feeds, and in the installer Python, numpy and PyInstaller's launcher - carries
+its own terms. See THIRD-PARTY.md; in the installed program folder the licence
+texts are in licenses\.

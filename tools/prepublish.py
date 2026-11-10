@@ -41,6 +41,20 @@ ALLOWED_FONTS = {
     "fonts/InterVariable-Italic.ttf": "fonts/LICENSE-Inter.txt",
 }
 
+# Third-party code this repository passes on, each with a licence text that has
+# to be published with it - the same rule as the fonts. The vendored packages
+# are redistributed by the repository itself; the spec puts Qt in the
+# installer, whose LGPL text the wheels don't carry, so it is kept here. A
+# pattern stands in for the version in a dist-info folder's name.
+REDISTRIBUTED = [
+    ("vendor/winrt/", "vendor/LICENSE-winrt.txt"),
+    ("vendor/pyaudiowpatch/", "vendor/pyaudiowpatch-*.dist-info/licenses/APACHE-2.0.txt"),
+    ("vendor/pyaudiowpatch/", "vendor/pyaudiowpatch-*.dist-info/licenses/PORTAUDIO-LICENSE.txt"),
+    ("vendor/typing_extensions.py", "vendor/typing_extensions-*.dist-info/licenses/LICENSE"),
+    ("packaging/pc-widgets.spec", "packaging/licenses/LGPL-3.0.txt"),
+    ("packaging/pc-widgets.spec", "packaging/licenses/GPL-3.0.txt"),
+]
+
 # Things that look like credentials. Each pattern is deliberately narrow enough
 # not to fire on ordinary prose.
 SECRETS = [
@@ -155,6 +169,17 @@ def check_font_licences(files: list) -> None:
                  "must travel with it")
 
 
+def check_redistributed(files: list) -> None:
+    """Vendored code, and the spec that bundles Qt, only with their licences."""
+    from fnmatch import fnmatch
+    for what, licence in REDISTRIBUTED:
+        if not any(rel == what or rel.startswith(what) for rel in files):
+            continue
+        if not any(fnmatch(rel, licence) for rel in files):
+            fail(f"{what} would be published without {licence} - its licence "
+                 "must travel with it")
+
+
 def check_secrets(files: list) -> None:
     for rel in files:
         if os.path.splitext(rel)[1].lower() not in TEXT_EXT:
@@ -241,6 +266,7 @@ def main() -> int:
         files = would_ship        # only scan what would actually be published
 
     check_font_licences(files)
+    check_redistributed(files)
     check_secrets(files)
     check_paths(files)
     check_licence()

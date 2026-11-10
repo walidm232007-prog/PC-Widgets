@@ -13,6 +13,10 @@ A working folder holds things that must not ship: a local SF Pro copy in
 fonts/, logs, a layout mirror, uncommitted edits. A clean export is also what
 the release workflow builds, so a local build and a released one match.
 
+The built folder must hold the licences the spec copies in beside the exe,
+each with the right text, and THIRD-PARTY.md must name the PySide6 and
+shiboken6 in the build; that check is quick and runs even with --no-test.
+
 Then three checks, each on the built exe rather than the source:
 
 - ``--selftest``, the whole board offscreen, with %LOCALAPPDATA% pointed into
@@ -34,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes as C
+import importlib.metadata
 import io
 import json
 import os
@@ -63,6 +68,51 @@ def forbidden(folder: str) -> list:
     machine."""
     return [os.path.join(base, n) for base, _, names in os.walk(folder)
             for n in names if n.lower().endswith(".otf")]
+
+
+# Each notice the spec copies in beside the exe, and a phrase that shows it is
+# the right text and not an empty or wrong file.
+NOTICES = {
+    "LICENSE.txt": "MIT License",
+    "THIRD-PARTY.md": "LGPL",
+    "licenses/Qt/LGPL-3.0.txt": "GNU LESSER GENERAL PUBLIC LICENSE",
+    "licenses/Qt/GPL-3.0.txt": "GNU GENERAL PUBLIC LICENSE",
+    "licenses/Python/LICENSE.txt": "PYTHON SOFTWARE FOUNDATION LICENSE",
+    "licenses/numpy/LICENSE.txt": "OpenBLAS",
+    "licenses/PyInstaller/COPYING.txt": "Bootloader Exception",
+    "licenses/PyAudioWPatch/APACHE-2.0.txt": "Apache License",
+    "licenses/PyAudioWPatch/PORTAUDIO-LICENSE.txt": "Ross Bencina",
+    "licenses/winrt/LICENSE.txt": "Microsoft Corporation",
+    "licenses/typing_extensions/LICENSE.txt": "PYTHON SOFTWARE FOUNDATION LICENSE",
+    "licenses/Inter/LICENSE.txt": "SIL OPEN FONT LICENSE",
+    "licenses/weather-photos/CREDITS.md": "Unsplash",
+}
+
+
+def check_notices(app: str) -> None:
+    """The licences are beside the exe, and THIRD-PARTY.md still describes
+    the Qt that is in the build: the version it names is the one whose source
+    it points to, and the DLLs it says can be swapped are separate files."""
+    for rel, phrase in NOTICES.items():
+        path = os.path.join(app, *rel.split("/"))
+        assert os.path.isfile(path), f"the build has no {rel}"
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            assert phrase in fh.read(), f"{rel} doesn't say {phrase!r}"
+    with open(os.path.join(app, "THIRD-PARTY.md"), encoding="utf-8") as fh:
+        third_party = fh.read()
+    for package in ("PySide6_Essentials", "shiboken6"):
+        ver = importlib.metadata.version(package)
+        assert f"{package} {ver}" in third_party, (
+            f"the build has {package} {ver}, which THIRD-PARTY.md doesn't name: "
+            "update its Qt section and the source links")
+    for dll in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
+        path = os.path.join(app, "_internal", "PySide6", dll)
+        assert os.path.isfile(path), (
+            f"no _internal\\PySide6\\{dll}: THIRD-PARTY.md says Qt can be "
+            "swapped there")
+    count = sum(len(names) for _, _, names in os.walk(os.path.join(app, "licenses")))
+    print(f"  ok    the licences are beside the exe ({count} in licenses\\), "
+          "and THIRD-PARTY.md names the Qt in the build")
 
 
 def size_mb(folder: str) -> float:
@@ -258,6 +308,7 @@ def main() -> int:
     bad = forbidden(app)
     assert not bad, f"the build contains {bad}"
     print(f"  built {exe}  ({size_mb(app):.0f} MB)")
+    check_notices(app)
 
     if not args.no_test:
         check_media_helper(exe)

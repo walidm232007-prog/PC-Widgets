@@ -58,8 +58,11 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 
 [InstallDelete]
 ; An update replaces the bundle whole: files a newer build no longer has must
-; not linger and be loaded instead of the new ones.
+; not linger and be loaded instead of the new ones. The same for the licence
+; texts beside the exe: a notice for something a newer build no longer ships
+; would claim a component that isn't there.
 Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\licenses"
 
 [UninstallDelete]
 ; Made after install, so the uninstaller has no record of it: the launcher that

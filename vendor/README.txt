@@ -5,7 +5,10 @@ winrt/  (and the winrt_*-3.2.1.dist-info folders)
 
     Python/WinRT - the Python projection of the Windows Runtime.
     https://github.com/pywinrt/pywinrt
-    Copyright (c) Microsoft Corporation. Licensed under the MIT License.
+    Copyright (c) Microsoft Corporation and (c) 2021-2025 David Lechner.
+    Licensed under the MIT License; the text is in LICENSE-winrt.txt, from
+    pywinrt's v3.2.1 tag. The upstream wheels carry no licence file, which is
+    why the dist-info folders here have none.
 
 typing_extensions.py  (and typing_extensions-4.16.0.dist-info)
 

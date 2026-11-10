@@ -691,8 +691,12 @@ preview isn't an empty card.
 MIT — see [LICENSE](LICENSE). Third-party terms are set out in
 [THIRD-PARTY.md](THIRD-PARTY.md); the short version:
 
-- **Qt/PySide6** is LGPL v3 and is *not* redistributed here — you `pip install`
-  it yourself. That changes if you ever freeze this into a single `.exe`.
+- **Qt/PySide6** is LGPL v3. A checkout doesn't redistribute it — you
+  `pip install` it yourself. The installer does, under the LGPL: the licence
+  texts are in its program folder's `licenses\` folder, the Qt DLLs stay
+  separate files you can replace, and THIRD-PARTY.md says how and where Qt's
+  source is. The installer also carries Python and numpy, their licences
+  beside Qt's.
 - **Weather data** from [Open-Meteo](https://open-meteo.com), published under
   CC BY 4.0.
 - **Sky photographs** from [Unsplash](https://unsplash.com), under the Unsplash
@@ -713,6 +717,7 @@ python tools/prepublish.py
 ```
 
 Refuses to pass if anything credential-shaped or a font file other than the
-bundled Inter would be committed, if Inter would go without its licence, if
-`LICENSE` still has a placeholder name, or if the notices are missing. Exit 0
-means it's safe to push.
+bundled Inter would be committed, if Inter or anything in `vendor/` would go
+without its licence, if the LGPL text the installer needs for Qt is missing,
+if `LICENSE` still has a placeholder name, or if the notices are missing. Exit
+0 means it's safe to push.
