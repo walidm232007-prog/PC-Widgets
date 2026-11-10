@@ -153,7 +153,10 @@ def file_details(path: str) -> dict:
 
 def check_details(path: str, meta: dict, what: str) -> None:
     """The publisher, copyright and version are the ones in widgets/version.py."""
-    got = file_details(path)
+    # Inno Setup pads every string in its installer's version resource with
+    # spaces to a fixed width ("Studio Hendrixx" plus 45 more). Explorer shows
+    # them trimmed, so compare them trimmed.
+    got = {k: v.strip() if isinstance(v, str) else v for k, v in file_details(path).items()}
     ok = (got.get("CompanyName") == meta["PUBLISHER"]
           and meta["COPYRIGHT"] in (got.get("LegalCopyright") or "")
           and got.get("ProductName") == "PC Widgets"
@@ -287,6 +290,9 @@ def main() -> int:
     ap.add_argument("--installer", action="store_true")
     args = ap.parse_args()
     out = os.path.abspath(args.out)
+    # Into a pipe, Python on Windows writes the ANSI code page, and the
+    # workflow's log - read as UTF-8 - turned the copyright's "©" into "�".
+    sys.stdout.reconfigure(encoding="utf-8")
 
     src = os.path.join(out, "src")
     commit = subprocess.run(["git", "rev-parse", "--short", args.ref], cwd=ROOT,
