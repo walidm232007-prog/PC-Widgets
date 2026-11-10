@@ -38,7 +38,10 @@ checks run even with `--no-test`. Then it checks the exe itself:
   copies of the media API and the audio capture are the ones that load. The
   exe has no console, so its report goes to `_selftest\selftest.log` and the
   exit code says whether it passed. `%LOCALAPPDATA%` is pointed into the build
-  folder for the test, so nothing lands in the profile.
+  folder for the test, so nothing lands in the profile;
+- **its properties** - what Explorer shows under Details - name the publisher,
+  copyright and version in `widgets/version.py`, read back the way Explorer
+  reads them.
 
 `--no-test` skips them.
 
@@ -71,10 +74,11 @@ That also compiles `packaging/pc-widgets.iss` with Inno Setup 6 (free;
   makes shortcuts with the same name. The layout stays in `%APPDATA%\PCWidgets`
   in case it is reinstalled.
 
-`--installer` checks it too: a silent install into `<out>\test-install` with no
-Startup or Desktop shortcut, the Start menu shortcut opening the installed exe,
-the installed exe's media helper, then a silent uninstall leaving nothing
-behind. The installed app is never opened. A developer's own "PC Widgets"
+`--installer` checks it too: the installer's own properties, then a silent
+install into `<out>\test-install` with no Startup or Desktop shortcut, the
+Start menu shortcut opening the installed exe, Settings → Apps naming the right
+publisher, the installed exe's media helper, then a silent uninstall leaving
+nothing behind. The installed app is never opened. A developer's own "PC Widgets"
 shortcuts are put back byte for byte afterwards, since the test install
 replaces the Start menu one.
 
@@ -126,8 +130,13 @@ change. If a test fails, the self test's log is attached to the run.
   from the copies installed in the build Python, and the rest from where they
   already sit in the repository. The spec stops before building if one is
   missing. THIRD-PARTY.md says what each one covers.
-- **The version** comes from `widgets/version.py` and is written into the exe's
-  properties.
+- **The version and the publisher** come from `widgets/version.py`: Studio
+  Hendrixx, a copyright line and the project's page, in the exe's properties,
+  the installer's, and Settings → Apps, where the publisher used to read
+  "PC Widgets" - the product, not who made it. `tools/build_exe.py` passes them
+  to Inno Setup on the command line, so the two can't disagree and the "©" never
+  depends on the `.iss` file's encoding. A code signature, when there is one,
+  is a separate name, carried by the certificate.
 
 `packaging/requirements.txt` pins the versions the build was tested with.
 Raising PySide6 there means updating the Qt section of `THIRD-PARTY.md` too -

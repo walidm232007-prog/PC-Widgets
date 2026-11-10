@@ -8,7 +8,7 @@
 import glob
 import importlib.metadata
 import os
-import re
+import runpy
 import shutil
 import sys
 
@@ -18,8 +18,9 @@ from PyInstaller.utils.win32.versioninfo import (
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 
-with open(os.path.join(ROOT, "widgets", "version.py"), encoding="utf-8") as fh:
-    VERSION = re.search(r'VERSION = "([\d.]+)"', fh.read()).group(1)
+# widgets/version.py is plain data: the version and the publisher.
+META = runpy.run_path(os.path.join(ROOT, "widgets", "version.py"))
+VERSION = META["VERSION"]
 NUMBERS = tuple(int(n) for n in (VERSION.split(".") + ["0"] * 4)[:4])
 
 
@@ -137,12 +138,13 @@ version = VSVersionInfo(
     ffi=FixedFileInfo(filevers=NUMBERS, prodvers=NUMBERS),
     kids=[
         StringFileInfo([StringTable("040904B0", [
+            StringStruct("CompanyName", META["PUBLISHER"]),
             StringStruct("ProductName", "PC Widgets"),
             StringStruct("FileDescription", "PC Widgets"),
             StringStruct("FileVersion", VERSION),
             StringStruct("ProductVersion", VERSION),
             StringStruct("OriginalFilename", "PC Widgets.exe"),
-            StringStruct("LegalCopyright", "Released under the MIT licence"),
+            StringStruct("LegalCopyright", f"{META['COPYRIGHT']}. Released under the MIT licence."),
         ])]),
         VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
     ],

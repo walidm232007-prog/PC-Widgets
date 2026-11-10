@@ -1,7 +1,12 @@
 ; Inno Setup script for PC-Widgets-Setup-<version>.exe. tools/build_exe.py
 ; --installer compiles it after building the exe; packaging/README.md explains.
 ;
-;   ISCC /DAppVersion=1.0.0 /DSourceDir=<dist\PC Widgets> /DOutputDir=<out> pc-widgets.iss
+;   ISCC /DAppVersion=1.0.0 /DAppPublisher=<name> /DAppCopyright=<line>
+;        /DAppURL=<repo> /DSourceDir=<dist\PC Widgets> /DOutputDir=<out> pc-widgets.iss
+;
+; The version and the publisher come from widgets/version.py, which
+; tools/build_exe.py reads and passes in, so the exe and the installer can't
+; disagree. As arguments they also keep the "©" out of this file's encoding.
 ;
 ; Per user, no admin: installs to %LOCALAPPDATA%\Programs\PC Widgets, and its
 ; shortcuts are the ones the app itself makes (widgets/core/startup.py), at the
@@ -10,6 +15,19 @@
 
 #ifndef AppVersion
   #error Pass /DAppVersion=<version>
+#endif
+#ifndef AppPublisher
+  #error Pass /DAppPublisher=<name> (tools/build_exe.py reads it from widgets/version.py)
+#endif
+#ifndef AppCopyright
+  #error Pass /DAppCopyright=<line>
+#endif
+#ifndef AppURL
+  #error Pass /DAppURL=<the project's page>
+#endif
+#ifndef AppVersionNumbers
+  ; The installer's own file version wants four numbers.
+  #define AppVersionNumbers AppVersion
 #endif
 #ifndef SourceDir
   #error Pass /DSourceDir=<the built "PC Widgets" folder>
@@ -27,7 +45,16 @@ AppId={{5B0C7E62-3A1D-4F7B-9C8E-2D6A4E1F9B30}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher={#AppName}
+; What Settings -> Apps shows as the publisher and its links, and what the
+; installer's own properties say.
+AppPublisher={#AppPublisher}
+AppPublisherURL={#AppURL}
+AppSupportURL={#AppURL}/issues
+AppUpdatesURL={#AppURL}/releases
+AppCopyright={#AppCopyright}
+VersionInfoVersion={#AppVersionNumbers}
+VersionInfoTextVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#AppName}
 DisableDirPage=yes

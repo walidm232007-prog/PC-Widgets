@@ -23,9 +23,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -55,7 +55,7 @@ jobs:
 
       - name: Self-test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: selftest-log
           path: build/test-localappdata/PCWidgets/_selftest/selftest.log
@@ -63,7 +63,7 @@ jobs:
 
       - name: Keep the installer
         if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: PC-Widgets-Setup-${{ steps.version.outputs.version }}
           path: build/PC-Widgets-Setup-${{ steps.version.outputs.version }}.exe
