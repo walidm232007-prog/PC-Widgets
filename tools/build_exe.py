@@ -13,19 +13,22 @@ A working folder holds things that must not ship: a local SF Pro copy in
 fonts/, logs, a layout mirror, uncommitted edits. A clean export is also what
 the release workflow builds, so a local build and a released one match.
 
-Then three checks, each on the built exe rather than the source:
+Then four checks, each on the built exe rather than the source:
 
 - ``--selftest``, the whole board offscreen, with %LOCALAPPDATA% pointed into
   the build folder so nothing lands in the profile;
 - the taskbar guard: a hidden window, parked off every monitor, comes back
   when the guard's pipe closes;
-- the media helper answers with JSON, the WinRT projection importable.
+- the media helper answers with JSON, the WinRT projection importable;
+- its properties name the publisher, copyright and version in
+  widgets/version.py, read back the way Explorer reads them.
 
 Output: ``<out>/dist/PC Widgets/``, the folder the installer packs.
 
-With ``--installer``: ``<out>/PC-Widgets-Setup-<version>.exe``, then installed
-silently into ``<out>/test-install``, its exe and Start menu shortcut checked,
-and uninstalled again. The Start menu, Startup and Desktop shortcuts called
+With ``--installer``: ``<out>/PC-Widgets-Setup-<version>.exe``, its own
+properties checked the same way, then installed silently into
+``<out>/test-install``, its exe, Start menu shortcut and the publisher Settings
+-> Apps shows checked, and uninstalled again. The Start menu, Startup and Desktop shortcuts called
 "PC Widgets" are put back as they were afterwards: on a developer's machine
 they are the checkout's own, and the test install replaces the Start menu one.
 """
@@ -37,6 +40,8 @@ import ctypes as C
 import io
 import json
 import os
+import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -134,6 +139,30 @@ def check_media_helper(exe: str) -> None:
     print(f"  ok    the media helper answers ({playing})")
 
 
+def file_details(path: str) -> dict:
+    """A file's properties as Explorer shows them: its version resource."""
+    script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+              "(Get-Item -LiteralPath $env:FILE).VersionInfo | "
+              "Select-Object CompanyName, LegalCopyright, ProductName, ProductVersion | "
+              "ConvertTo-Json -Compress")
+    res = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                         env=dict(os.environ, FILE=path), capture_output=True,
+                         encoding="utf-8", creationflags=NO_WINDOW)
+    return json.loads(res.stdout.strip() or "{}")
+
+
+def check_details(path: str, meta: dict, what: str) -> None:
+    """The publisher, copyright and version are the ones in widgets/version.py."""
+    got = file_details(path)
+    ok = (got.get("CompanyName") == meta["PUBLISHER"]
+          and meta["COPYRIGHT"] in (got.get("LegalCopyright") or "")
+          and got.get("ProductName") == "PC Widgets"
+          and got.get("ProductVersion") == meta["VERSION"])
+    assert ok, f"{what}'s properties say {got}"
+    print(f"  ok    {what}'s properties: {got['CompanyName']}, {got['LegalCopyright']}, "
+          f"version {got['ProductVersion']}")
+
+
 # --------------------------------------------------------------------------- #
 def iscc() -> str:
     """Inno Setup's compiler: $ISCC, PATH, or where its installer puts it."""
@@ -150,15 +179,19 @@ def iscc() -> str:
                      "JRSoftware.InnoSetup) or set ISCC to ISCC.exe")
 
 
-def version(src: str) -> str:
-    with open(os.path.join(src, "widgets", "version.py"), encoding="utf-8") as fh:
-        return fh.read().split('VERSION = "')[1].split('"')[0]
+def read_meta(src: str) -> dict:
+    """widgets/version.py: the version, and the publisher the exe and installer name."""
+    return runpy.run_path(os.path.join(src, "widgets", "version.py"))
 
 
-def build_installer(src: str, app: str, out: str) -> str:
-    ver = version(src)
-    subprocess.run([iscc(), "/Q", f"/DAppVersion={ver}", f"/DSourceDir={app}",
-                    f"/DOutputDir={out}",
+def build_installer(src: str, app: str, out: str, meta: dict) -> str:
+    ver = meta["VERSION"]
+    numbers = ".".join((ver.split(".") + ["0"] * 4)[:4])
+    # Passed on the command line, not written into the .iss, so the "©" in the
+    # copyright never depends on which encoding Inno Setup reads that file in.
+    subprocess.run([iscc(), "/Q", f"/DAppVersion={ver}", f"/DAppVersionNumbers={numbers}",
+                    f"/DAppPublisher={meta['PUBLISHER']}", f"/DAppCopyright={meta['COPYRIGHT']}",
+                    f"/DAppURL={meta['HOMEPAGE']}", f"/DSourceDir={app}", f"/DOutputDir={out}",
                     os.path.join(src, "packaging", "pc-widgets.iss")], check=True)
     setup = os.path.join(out, f"PC-Widgets-Setup-{ver}.exe")
     assert os.path.exists(setup), f"Inno Setup made no {setup}"
@@ -181,7 +214,20 @@ def link_target(path: str) -> str:
                           creationflags=NO_WINDOW).stdout.strip()
 
 
-def check_installer(setup: str, out: str) -> None:
+def uninstall_key(src: str) -> str:
+    """Where Settings -> Apps reads this app from, per the AppId in the .iss."""
+    with open(os.path.join(src, "packaging", "pc-widgets.iss"), encoding="utf-8") as fh:
+        app_id = re.search(r"^AppId=\{\{([0-9A-Fa-f-]+)\}", fh.read(), re.M).group(1)
+    return rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{{{app_id}}}_is1"
+
+
+def listed_publisher(key: str) -> str:
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+        return winreg.QueryValueEx(k, "Publisher")[0]
+
+
+def check_installer(setup: str, out: str, src: str, meta: dict) -> None:
     """Install silently, look, uninstall, and leave the shortcuts as they were.
 
     Silent, so nothing shows and the installed app is never opened (the
@@ -200,6 +246,9 @@ def check_installer(setup: str, out: str) -> None:
         menu = shortcuts()[0]
         assert os.path.normcase(link_target(menu)) == os.path.normcase(exe), (
             "the Start menu shortcut doesn't open the installed exe")
+        listed = listed_publisher(uninstall_key(src))
+        assert listed == meta["PUBLISHER"], f"Settings -> Apps would name {listed!r} as the publisher"
+        print(f"  ok    Settings -> Apps lists it as published by {listed}")
         check_media_helper(exe)
 
         uninstaller = os.path.join(target, "unins000.exe")
@@ -259,14 +308,17 @@ def main() -> int:
     assert not bad, f"the build contains {bad}"
     print(f"  built {exe}  ({size_mb(app):.0f} MB)")
 
+    meta = read_meta(src)
     if not args.no_test:
+        check_details(exe, meta, "the exe")
         check_media_helper(exe)
         check_guard(exe)
         check_selftest(exe, out)
     if args.installer:
-        setup = build_installer(src, app, out)
+        setup = build_installer(src, app, out, meta)
         if not args.no_test:
-            check_installer(setup, out)
+            check_details(setup, meta, "the installer")
+            check_installer(setup, out, src, meta)
     print("done.")
     return 0
 
