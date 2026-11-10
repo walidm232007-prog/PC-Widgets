@@ -1,10 +1,11 @@
 # Drop on Windows — the design
 
-How the Drop widget will do real AirDrop on a Windows PC: which program does
-what, how the board drives it, and what has to ship. Written on 2026-11-09 from
-reading the source of the helper it relies on. **Nothing here has run on a PC of
-ours yet, except the Bluetooth wake-up.** CLAUDE.md has the state of the work
-and the next step; this file is the reference for building it.
+How Drop will do real AirDrop on a Windows PC: which program does what, how the
+board drives it, what the user sees, and what has to ship. Written on
+2026-11-09 from reading the source of the helper it relies on. **Nothing here
+has run on a PC of ours yet, except the Bluetooth wake-up.** CLAUDE.md has the
+state of the work and the next step; this file is the reference for building
+it.
 
 ## The shape
 
@@ -14,7 +15,7 @@ iPhone  ~~ AWDL: Wi-Fi, 5 GHz, channel 149 ~~  USB Wi-Fi stick (MT7612U)
                                           the helper, howldrop-agent.exe
                                           radio driver + AWDL + TCP/IP + AirDrop
                                                     |  prints events; shares three folders
-                                          the board: the Drop tile
+                                          the board: the Drop island
                                           Accept / Decline, progress, drag to send
                                                     |  starts and stops
                                           the wake-up: a Bluetooth LE advertisement
@@ -209,39 +210,139 @@ short-lived process that advertises until its input closes. It needs PyWinRT's
 Bluetooth advertisement package vendored beside the ones already in `vendor/`,
 at the same 3.2.1.
 
-## What the tile shows
+## The island
 
-| state | what the user sees | how the board knows |
+Drop is not a tile on the board. It shows as an island at the top of the
+screen, like the iPhone's Dynamic Island, and only while something is
+happening: with nothing to report there is nothing on screen. That is the
+developer's call, and the look below was settled with them on a mockup on
+2026-11-09. Sizes are at 100% scale.
+
+```
+ ╭────────────────────────────────────────────╮
+ │ (↓)        IMG_4021.jpg            [photo] │   300 × 44
+ │  ring     from Sam’s iPhone        preview │
+ ╰────────────────────────────────────────────╯
+```
+
+- **Where:** top centre of the main display, 8 px below its top edge, above
+  other windows, never taking the focus.
+- **The pill:** black, with a 1 px edge of white at 18%, its ends fully round.
+  Text is white.
+- **Left, the ring:** a 26 px circle, 8 px in from the edge, drawn as a 3 px
+  line. Its track is white at 22%. Progress is blue (`#0A84FF`), starts at the
+  top, runs clockwise and has round ends. Inside it is a 12 px arrow in the
+  ring's own colour: down when receiving, up when sending.
+- **Middle, the name:** the file's name, 13 px, medium weight, on one line,
+  centred between the ring and the preview. Under it, 11 px at 60% white: who
+  it is from or to, and what is happening.
+- **Right, the preview:** 30 × 30 with corners of 7 px, 10 px in from the edge.
+
+The island grows into a card twice:
+
+- **When someone asks to send:** 340 × 122, corners of 26 px. The same row on
+  top, then two buttons side by side, 32 px high with fully round ends:
+  Decline (white at 16%) and Accept (blue). The ring is white here and empties
+  over the minute the sender waits, and its arrow is white. The second line
+  reads "Sam’s iPhone wants to send this · 3.2 MB".
+- **When a file has arrived:** 300 × 88, corners of 24 px, with Show in folder
+  and Open. It comes up about a second after the tick, and leaves after 6 s
+  unless the pointer is on it.
+
+In both cards the preview sits 4 px lower than in the pill, and the buttons'
+captions sit about 1.5 px above centre, which is where they look centred.
+
+**How a transfer ends.** There are no filled circles. Done is the completed
+ring, a blue outline, with a blue tick inside. Declined or failed is a red
+outline (`#FF453A`) with a red X. The change between them is the one Apple uses
+for its symbols: the arrow shrinks to 30% and fades out in 0.13 s, then the
+tick or the X fades in and bounces - up to 130%, back to 90%, to 106%, then
+still - in 0.55 s.
+
+**While it waits** - looking for the iPhone, or waiting for Accept on it - a
+quarter of the ring turns, once every 0.9 s.
+
+**Motion.** The island grows and shrinks in 0.34 s on a curve that overshoots a
+little. It arrives and leaves by scaling from 55% at the top edge while it
+fades, in 0.25 s. All of it steps on the display's own refresh, as the dock
+does (`widgets/core/frameclock.py`).
+
+| moment | the island | how the board knows |
 |---|---|---|
-| not set up | what Drop needs: the stick, and why | no supported USB ID present |
-| needs the driver switch | one button, and the two warnings above | `stick needs-winusb` |
-| starting | a quiet "starting" | helper running, no `up` yet |
-| ready | "Visible as NAME", a place to drop files | `up` |
-| someone is asking | who, how many, how big; Accept and Decline, and the time left | `ask` |
-| receiving | a progress bar | `incoming`, `receiving` |
-| received | the file, Open and Show in folder | `received` |
-| sending | the stage, then a progress bar | `sending` |
-| sent, declined or failed | one line saying which, and what to do | `sent` |
-| problem | the reason, and "unplug the stick and plug it back in" when that is the fix | `stopped`, or the helper gone |
+| nothing happening | not on screen | |
+| someone is asking | the ask card | `ask` |
+| receiving | the pill, the ring filling, "from Sam’s iPhone" | `incoming`, `receiving` |
+| received | the tick, "Received", the real preview, then the card with Open | `received` |
+| a receive broke off | the red X and the reason | `failed` |
+| a file is dragged to the top of the screen | the pill with a blue edge: "Drop to send", "to a nearby iPhone" | the drag reaches the island's place |
+| looking for the phone | the turning ring, "Looking for iPhone…" | `sending` |
+| waiting for Accept | the turning ring, "Waiting for Sam’s iPhone to accept" | `sending` |
+| sending | the ring filling round an up arrow, "Sending to Sam’s iPhone" | `sending`, with a percentage |
+| sent | the tick, "Sent"; gone after about 2.6 s | `sent`, with `sent` |
+| declined or failed | the red X and one line saying which; gone after about 3 s | `sent`, with `failed` |
+
+**The preview** is the file itself wherever that is possible: Windows' own
+thumbnail for it, which covers pictures, videos and whatever else Explorer can
+show, and the file type's icon otherwise. A text note is a small white page
+with its lines. Several files are a small stack, and the name reads "3 photos".
+
+When sending, the file is on the PC, so the real preview is there from the
+start. When receiving it is not. The helper doesn't pass on the preview the
+sender offers (and that one is JPEG 2000, which Qt can't read), so the ask card
+and the pill show an icon for the kind of file until it has arrived, and the
+real preview fades in with the tick. Passing the sender's preview on would be a
+small patch to the helper.
+
+**Sending** has no tile to drop a file on, so:
+
+- drag a file to the top of the screen, and the island appears to catch it.
+  How to notice the drag without keeping a window there that swallows clicks
+  has not been tried. It is the first thing M3 tests;
+- Explorer's Send to menu gets an entry.
+
+**Full-screen apps.** When one covers the main display
+(`winapi.fullscreen_monitor()`, which the board's quiet mode already uses), the
+island shows at the top of another display. With only one display it stays
+hidden: an ask goes unanswered, and the sender sees Declined after a minute.
+
+**Setting up, and trouble.** Turning Drop on, the name it shows, the inbox
+folder, the driver switch with its two warnings and "the stick isn't answering"
+belong in the app window's Settings and the tray menu, not on the island. The
+island speaks up about a problem only when it stops something just asked for,
+such as a send while the helper is down.
+
+**What is settled, and what isn't.** The developer's own: an island and not a
+tile; the ring, the name and the preview in that order; where the preview and
+the captions sit; the blue arrow; the outlined tick and X; the bounce. Seen on
+the mockup and left as they were: the black pill, its place and sizes, the two
+cards, the wording and the timings. Described to the developer, who did not
+object: the full-screen rule, and sending by drag and by Send to. Not yet put
+to them: where setup lives.
 
 While Drop is on, anybody nearby can see the PC on their share sheet and ask to
 send. With `--receive ask` nothing is written to disk until Accept, and no
-answer in a minute is a decline. Whether Drop is on whenever the tile is on the
-board, or only for a few minutes at a time like the iPhone's own setting, is
-the developer's call in M3.
+answer in a minute is a decline. Whether Drop is on whenever the board runs, or
+only for a few minutes at a time like the iPhone's own setting, is still the
+developer's call.
 
-Nothing received is ever opened by the board on its own.
+Nothing received is ever opened by the board on its own. Nothing can cancel a
+transfer once it has started: the helper has no way to be told.
 
 ## What the board adds
 
-M3 starts from `main`, which has moved on from this branch's base: the tiles
-are in `widgets/tiles/`, helper processes start through `widgets/core/paths.py`,
-and the installed app writes to its own data folder.
+M3 starts from `main`, which has moved on from this branch's base: helper
+processes start through `widgets/core/paths.py`, the installed app writes to its
+own data folder, and the Glass Dock's code is there to build on.
 
 - `widgets/core/drop.py` - the supervisor. Owns the helper process and a
   reader thread; turns lines into state and Qt signals; `send`, `look`,
   `answer`, `start`, `stop`; restarts with a growing pause.
-- `widgets/tiles/drop.py` - the tile: the states above, drag and drop.
+- `widgets/ui/drop_island.py` - the island: a frameless window that stays on
+  top and never takes the focus, built the way the dock's panels are
+  (`widgets/ui/dock_panel.py`), its motion on `frameclock`'s `Tween`. It is not
+  a tile, so nothing goes in `widgets/tiles/`.
+- Drop's rows in the app window's Settings: on and off, the name it shows, the
+  inbox folder, the driver switch.
 - a `--drop-wake` helper mode in `main.py`, beside `--guard` and
   `--winrt-read`.
 - the helper and its firmware in a folder of their own beside the app,
@@ -256,7 +357,7 @@ stops at once on them. So most of M3 has to be testable without it:
   it prints the same event lines and uses the same three folders - and plays
   scripted stories: an ask that is accepted, one that times out, a receive that
   breaks off, a send that is declined, a stick that needs the driver switch.
-  The supervisor and every state of the tile run against it in
+  The supervisor and every state of the island run against it in
   `main.py --selftest`, offscreen.
 - **Real output as fixtures:** once M2 has run, its event lines become parser
   tests - with the names in them replaced first, since they are personal data.
@@ -300,7 +401,7 @@ carries over to the WSL route unchanged.
   an elevated scheduled task. 0.21 dropped the task, and nothing in this design
   runs elevated except the one driver switch. The helper will still be an
   unsigned exe, as the app's installer already is.
-- **The name:** the tile is Drop. "AirDrop" is Apple's trademark and is used
+- **The name:** the feature is Drop. "AirDrop" is Apple's trademark and is used
   only to say what Drop works with.
 
 ## Known gaps and risks
@@ -324,6 +425,11 @@ carries over to the WSL route unchanged.
   about 5 s natively. The other direction was about 16 s under WSL and has not
   been measured natively.
 - **One file, one prompt** (above).
+- **Noticing a drag.** The island has to appear when a file is dragged to the
+  top of the screen, without a window sitting there the rest of the time and
+  swallowing clicks. Untried.
+- **No real preview until a file has arrived,** and no way to cancel a
+  transfer (both under "The island").
 - **The iPhone's limits are unchanged:** Everyone for 10 Minutes to be sent to,
   and no previews on its Accept prompt.
 
@@ -341,9 +447,9 @@ carries over to the WSL route unchanged.
 
 1. **M2, when the stick arrives:** the test in CLAUDE.md. It needs the helper
    built and the firmware fetched, both by hand this once.
-2. **M3, which can start before the stick:** move this work onto `main`; the
-   stand-in helper; the supervisor; the tile's states; the wake-up mode. Then
-   wire it to the real helper.
+2. **M3, which can start before the stick:** move this work onto `main`; try
+   noticing a drag at the top of the screen; the stand-in helper; the
+   supervisor; the island; the wake-up mode. Then wire it to the real helper.
 3. **M4:** the build in the release workflow, the firmware, the licences, the
    first-run text for the driver switch, and the README and THIRD-PARTY
    passages that still describe WSL2 and OWL.

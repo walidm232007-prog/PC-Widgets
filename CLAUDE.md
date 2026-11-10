@@ -22,16 +22,18 @@ the handoff.
 
 ## Current work: real AirDrop (branch `airdrop-core`)
 
-**The goal:** the Drop widget sends files to an iPhone, iPad or Mac and
-receives them, through **real AirDrop**, not a lookalike, with nothing installed
-on the Apple side. The developer asked for real AirDrop only: no LAN fallback.
+**The goal:** Drop sends files to an iPhone, iPad or Mac and receives them,
+through **real AirDrop**, not a lookalike, with nothing installed on the Apple
+side. The developer asked for real AirDrop only: no LAN fallback. Drop is not a
+tile on the board: it shows as an island at the top of the screen, like the
+iPhone's Dynamic Island, and only while something is happening.
 
 | milestone | state |
 |---|---|
 | M0 – does AirDrop still work with current iOS? | ✅ done on a Mac, with an iPhone 15 Pro on iOS 27 |
 | M1 – our own protocol core, `airdrop/` | ✅ done, commit `6d074d6`: sent 2 images, received 1 |
 | **M2 – the Windows radio (the kill risk)** | **next, on this PC - waiting on one USB Wi-Fi stick. The route changed on 2026-11-09: no WSL (see "Next: M2")** |
-| M3 – the Drop widget (drag to send, Accept/Decline, progress) | not started; most of it can be built before the stick arrives ([DROP.md](DROP.md)) |
+| M3 – the Drop island (drag to send, Accept/Decline, progress) | not started; its look is settled, and most of it can be built before the stick arrives ([DROP.md](DROP.md)) |
 | M4 – packaging (the helper, the stick's firmware, first-run checks) | not started |
 
 `airdrop/` is plain Python 3.9+ with no Qt. It needs `pip install -r
@@ -112,7 +114,9 @@ What follows from it:
 - **The board drives the helper** through what it prints (event lines) and
   three folders (outbox, asks, inbox). [DROP.md](DROP.md) has that contract as
   read from the source, the design for M3 and M4, the licences and the risks.
-  **DROP.md is a proposal: the developer has not approved it yet.**
+  **The island's look in DROP.md is settled: the developer worked it out on a
+  mockup on 2026-11-09. The rest of DROP.md is still a proposal, and nothing
+  is built until the developer says so.**
 - **It can ship inside this app:** MIT code, and firmware for the stick that
   may be redistributed as a binary. Neither OWL nor WSL is needed.
 
