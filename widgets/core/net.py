@@ -27,10 +27,18 @@ from __future__ import annotations
 
 import ssl
 import threading
-from typing import Optional
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Dict, Optional
 
 _lock = threading.Lock()
 _context: Optional[ssl.SSLContext] = None
+
+# The most any fetch reads. A forecast is a few KB, a day of quotes tens of KB,
+# a busy calendar well under a megabyte. Past this the reply is wrong or
+# hostile, and reading on would only fill memory.
+MAX_BYTES = 8 * 1024 * 1024
 
 
 def _from_root_store() -> ssl.SSLContext:
@@ -64,3 +72,41 @@ def tls_context() -> ssl.SSLContext:
                 # and the next call tries the store again.
                 return ssl.create_default_context()
         return _context
+
+
+class _StayOnHttps(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https:// address. urllib on its own
+    follows one to plain http:// too, which would send a private link - a
+    published calendar's address is as good as a password - and take the
+    answer back, in the clear."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise urllib.error.URLError(f"refused a {code} redirect off HTTPS")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def read_capped(response, limit: int = MAX_BYTES) -> bytes:
+    """At most ``limit`` bytes of a reply, or an error if there is more."""
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise OSError(f"the reply ran past {limit // (1024 * 1024)} MB")
+    return data
+
+
+def fetch(url: str, headers: Optional[Dict[str, str]] = None, timeout: float = 10,
+          limit: int = MAX_BYTES) -> bytes:
+    """GET an https:// address and return its body.
+
+    Every fetch on the board comes through here: HTTPS only (urlopen on its own
+    also opens http://, file://, ftp:// and data: addresses), Windows' trusted
+    roots with the usual hostname checks, redirects only to HTTPS, and at most
+    ``limit`` bytes read.
+    """
+    if urllib.parse.urlsplit(url).scheme.lower() != "https":
+        raise ValueError("only https:// addresses are fetched")
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=tls_context()), _StayOnHttps())
+    req = urllib.request.Request(url, headers=headers or {})
+    with opener.open(req, timeout=timeout) as r:
+        return read_capped(r, limit)

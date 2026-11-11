@@ -29,8 +29,7 @@ from PySide6.QtGui import (
 )
 
 from ..core.card import RADIUS, WidgetCard, squircle
-from ..core import winapi
-from ..core.net import tls_context
+from ..core import net, winapi
 from ..core.palette import _mix, button_fill
 
 API = "https://api.open-meteo.com/v1/forecast"
@@ -165,9 +164,8 @@ class Forecast:
 
 def _get(url: str, params: dict) -> dict:
     full = f"{url}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(full, headers={"User-Agent": "pc-widgets/1.0"})
-    with urllib.request.urlopen(req, timeout=10, context=tls_context()) as r:
-        return json.loads(r.read().decode("utf-8"))
+    return json.loads(net.fetch(full, headers={"User-Agent": "pc-widgets/1.0"}, timeout=10,
+                                limit=2 * 1024 * 1024).decode("utf-8"))
 
 
 @dataclass
