@@ -20,6 +20,17 @@ subscribed: between animations the clock costs nothing.
 
 If the blank can't be waited on (no display, a remote session), it falls back
 to sleeping one refresh period, which is still the monitor's rate.
+
+The driver is never trusted to do the waiting. Whatever the wait returns, the
+thread goes back into it at most twice per refresh: when a display is off or
+changing mode, some drivers return from the wait at once instead of blocking,
+and a loop that took every return as "try again" called into the graphics
+driver as fast as one core could go, for as long as the screen stayed off. Now
+a wait that keeps returning without a fresh blank is let go of: the clock ticks
+slowly (nothing is on screen to see) and tries the blank again a little later,
+then less and less often, until it blocks properly again. An error from the
+driver is treated the same way, so the clock recovers when the display does
+instead of staying on the fallback until the next display change.
 """
 from __future__ import annotations
 
@@ -80,6 +91,20 @@ _gdi32.D3DKMTCloseAdapter.argtypes = [ctypes.POINTER(_CLOSE_ADAPTER)]
 _user32.EnumDisplaySettingsW.argtypes = [wt.LPCWSTR, wt.DWORD, ctypes.POINTER(_DEVMODEW)]
 
 ENUM_CURRENT_SETTINGS = -1 & 0xFFFFFFFF
+
+# When the blank stops being a blank. Called straight after a blank, a working
+# wait blocks for most of a refresh; one that returns in under a quarter of a
+# refresh didn't wait at all. That happens once now and then (the same blank
+# reported twice); MISSES times in a row and the display is taken to be off or
+# changing mode, and the wait is let go of.
+MISSES = 3
+# Then the clock ticks at IDLE_HZ - the dock still moves, roughly, for anyone
+# looking, and costs next to nothing when the screen is off - and tries the
+# blank again after RETRY_FIRST seconds, doubling while it still doesn't block,
+# up to RETRY_MAX, so motion is smooth again within seconds of the screen waking.
+IDLE_HZ = 10
+RETRY_FIRST = 1.0
+RETRY_MAX = 5.0
 
 
 def main_display() -> str:
@@ -179,9 +204,15 @@ class FrameClock(QObject):
     def _run(self) -> None:
         vblank: Optional[_VBlank] = None
         last = 0.0
+        misses = 0              # waits in a row that weren't a fresh blank
+        idle = False            # the blank was let go of: tick at IDLE_HZ
+        retry_at = 0.0          # when to try the blank again, 0 for never
+        backoff = RETRY_FIRST
         while True:
             self._wake.wait()
-            if self._reopen:
+            if self._reopen or (vblank is None and retry_at and time.perf_counter() >= retry_at):
+                if self._reopen:            # a display change: a fresh start
+                    backoff = RETRY_FIRST
                 self._reopen = False
                 if vblank is not None:
                     vblank.close()
@@ -189,19 +220,56 @@ class FrameClock(QObject):
                 self.hz = refresh_rate(device)
                 self.period = 1.0 / self.hz
                 vblank = _VBlank(device) if device else None
-                self.source = "vblank" if vblank is not None and vblank.ok else "sleep"
-            if not (vblank is not None and vblank.wait()):
-                # No blank to wait on: sleep to the next period instead.
-                if vblank is not None:
-                    vblank.close()
-                    vblank, self.source = None, "sleep"
-                due = last + self.period
-                delay = due - time.perf_counter()
+                if vblank is not None and not vblank.ok:
+                    vblank = None
+                misses, retry_at = 0, 0.0
+                if vblank is None and idle:
+                    # Still nothing to wait on: keep ticking slowly, ask later.
+                    retry_at = time.perf_counter() + backoff
+                    backoff = min(backoff * 2, RETRY_MAX)
+                else:
+                    idle = False
+                self.source = "vblank" if vblank is not None else ("idle" if idle else "sleep")
+            began = time.perf_counter()
+            blank = vblank is not None and vblank.wait()
+            if vblank is not None and not blank:
+                # The driver refused the wait. Let it go and try again later.
+                vblank.close()
+                vblank, idle = None, True
+                retry_at = time.perf_counter() + backoff
+                backoff = min(backoff * 2, RETRY_MAX)
+                self.source = "idle"
+            if not blank:
+                # No blank to wait on: sleep to the next tick instead - one
+                # refresh period, or a slow tick while the blank is let go of.
+                period = 1.0 / IDLE_HZ if idle else self.period
+                delay = last + period - time.perf_counter()
                 if delay > 0:
                     time.sleep(delay)
             now = time.perf_counter()
-            if now - last < self.period * 0.5:
-                continue                # the same blank twice: wait for the next
+            if blank:
+                if now - began < self.period * 0.25:
+                    # It came back without waiting: the same blank twice, or a
+                    # driver that has stopped waiting because the display is off
+                    # or changing mode. A few in a row: let the blank go.
+                    misses += 1
+                    if misses >= MISSES:
+                        vblank.close()
+                        vblank, idle = None, True
+                        retry_at = now + backoff
+                        backoff = min(backoff * 2, RETRY_MAX)
+                        self.source = "idle"
+                else:
+                    misses, backoff = 0, RETRY_FIRST      # a real wait: all well
+                if now - last < self.period * 0.5:
+                    # Too soon for a new blank. Never go straight back into the
+                    # driver: pause until half a period has passed, so even a
+                    # wait that never blocks costs two calls a refresh, not a
+                    # core, until it is let go of.
+                    pause = last + self.period * 0.5 - now
+                    if pause > 0:
+                        time.sleep(pause)
+                    continue
             last = now
             if not self._pending:
                 self._pending = True

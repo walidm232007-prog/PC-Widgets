@@ -1174,6 +1174,87 @@ def check_motion(app):
           f"{rate:.0f} fps")
 
 
+def check_clock_never_spins(app):
+    """The frame clock never trusts the driver to do its waiting. A wait that
+    comes back at once - what some drivers do while the display is off or
+    changing mode - costs a few calls and slow ticks, not a core; a driver that
+    refuses the wait, the same; and a working one still gets a tick per
+    refresh, so the guard costs nothing when all is well. Before this, a wait
+    that never blocked was retried in a tight loop for as long as the screen
+    stayed off."""
+    from unittest.mock import patch
+    from PySide6.QtCore import QEventLoop, QTimer
+    from widgets.core import frameclock
+
+    def run(seconds):
+        loop = QEventLoop()
+        QTimer.singleShot(round(seconds * 1000), loop.quit)
+        loop.exec()
+
+    class Fake:
+        calls = 0
+
+        def __init__(self, device):
+            self.ok = True
+
+        def wait(self):
+            type(self).calls += 1
+            return self.behave()
+
+        def close(self):
+            pass
+
+    class NeverWaits(Fake):             # back at once, every time
+        def behave(self):
+            return True
+
+    class Refuses(Fake):                # an error from the driver
+        def behave(self):
+            return False
+
+    class Works(Fake):                  # a 100 Hz display, waiting properly
+        def behave(self):
+            time.sleep(0.01)
+            return True
+
+    class Listener:
+        def __init__(self):
+            self.ticks = 0
+
+        def _tick(self, now):
+            self.ticks += 1
+
+    results = {}
+    for name, fake, seconds in (("never waits", NeverWaits, 2.5),
+                                ("refuses", Refuses, 2.5),
+                                ("works", Works, 1.0)):
+        clock = frameclock.FrameClock()
+        listener = Listener()
+        with patch.object(frameclock, "_VBlank", fake), \
+                patch.object(frameclock, "main_display", lambda: r"\\.\DISPLAY1"), \
+                patch.object(frameclock, "refresh_rate", lambda device="": 100):
+            fake.calls = 0
+            clock.add(listener)
+            run(seconds)
+            clock.discard(listener)
+            run(0.05)
+            results[name] = (fake.calls, listener.ticks, clock.source)
+    calls, ticks, source = results["never waits"]
+    # A spinning loop makes hundreds of thousands of calls in 2.5 s.
+    assert calls <= 20, f"a driver that never waits was called {calls} times in 2.5 s"
+    assert source == "idle", f"the clock is on {source!r}, not the slow fallback"
+    assert ticks <= 2.5 * frameclock.IDLE_HZ * 2, f"{ticks} ticks in 2.5 s with the screen off"
+    calls_r, ticks_r, source_r = results["refuses"]
+    assert calls_r <= 10, f"a driver that refuses was called {calls_r} times in 2.5 s"
+    assert source_r == "idle", f"after errors the clock is on {source_r!r}"
+    calls_w, ticks_w, source_w = results["works"]
+    assert source_w == "vblank", f"a working driver left the clock on {source_w!r}"
+    assert ticks_w >= 80, f"a working 100 Hz driver gave {ticks_w} ticks in 1 s"
+    print(f"PASS: the frame clock never spins - a driver that stops waiting got {calls} "
+          f"calls and {ticks} slow ticks in 2.5 s, one that refuses {calls_r} calls; "
+          f"a working 100 Hz one still ticks {ticks_w} times a second")
+
+
 def check_rehide(app):
     """Explorer re-shows a hidden auto-hiding taskbar when the pointer touches
     the bottom edge, the same move that brings the dock up over a maximised
@@ -1321,6 +1402,7 @@ def main():
     check_listening()
     check_fullscreen(app)
     check_motion(app)
+    check_clock_never_spins(app)
     check_rehide(app)
     check_previews(app, out)
     check_music_menu(app, out)
