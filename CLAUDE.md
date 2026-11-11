@@ -19,6 +19,16 @@ the handoff.
   "Sam’s iPhone". `python tools/prepublish.py` must pass before a push.
 - The board needs only PySide6. `python main.py --selftest` renders every
   widget offscreen. Match the README's voice: explain *why*, with the evidence.
+- **Design reviews:** Claude Code's `apple-design` skill
+  (github.com/dickwu/apple-design-skill, commit `ff4ebdd`) is installed in
+  `.claude/skills/apple-design/`: ask for a design review, or `/apple-design`,
+  to check the board, the dock or the Drop island against Apple's Human
+  Interface Guidelines. Git ignores that folder and it must never be
+  committed: most of it is Apple's guideline text, copied word for word, and
+  the skill's repository has no licence, so it can be used here but not
+  republished in this public repo. On another machine, clone it into the same
+  folder and check out that commit; Claude reads it as instructions, so read
+  the diff before moving to a newer one.
 
 ## Current work: real AirDrop (branch `airdrop-core`)
 

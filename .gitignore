@@ -16,6 +16,16 @@ fonts/*.woff2
 !fonts/InterVariable-Italic.ttf
 
 # --------------------------------------------------------------------------- #
+#  Apple design skill - local only, like SF Pro
+# --------------------------------------------------------------------------- #
+# Claude Code's apple-design skill (github.com/dickwu/apple-design-skill) sits
+# in .claude/skills/apple-design/ for design reviews. Most of it is Apple's
+# Human Interface Guidelines copied word for word, and the skill's repository
+# has no licence, so it may be used locally but not republished in this
+# repository, for the same reason as SF Pro above. CLAUDE.md has the details.
+.claude/skills/apple-design/
+
+# --------------------------------------------------------------------------- #
 #  Local, generated, or machine-specific
 # --------------------------------------------------------------------------- #
 _selftest/
