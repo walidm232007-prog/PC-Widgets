@@ -568,6 +568,18 @@ Root X2 cross-certificate that expired in September 2025. Leaving the
 intermediate store out costs nothing: a server sends its own intermediates, and
 Python on Linux and macOS never had that store to lean on.
 
+**Every fetch is HTTPS only, stays on HTTPS, and stops at a size cap**
+(`net.fetch`). Python's `urlopen` on its own opens `http://`, `file://`,
+`ftp://` and `data:` addresses as readily as `https://`, and follows a redirect
+from HTTPS to plain HTTP. That mattered for the calendar: its address is one
+you paste in, and a published calendar's link works like a password - anyone
+holding it can read the calendar - so fetching it over plain HTTP would hand it
+to the network. The calendar now takes `https://` or `webcal://` (the form
+Outlook and Google hand out, the same link over HTTPS) and says so for anything
+else, and a redirect off HTTPS is refused. Replies are read to 8 MB at most (2 MB
+for a forecast or a quote, which are a few KB): past that the answer is wrong or
+hostile, and reading on would only fill memory.
+
 ## Notes on the build
 
 **It borrows your palette.** `widgets/core/palette.py` loads `tokens.py` out of

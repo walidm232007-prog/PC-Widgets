@@ -155,6 +155,7 @@ def selftest() -> int:
     _check_visualiser()
     _check_backend_recovery()
     _check_tls()
+    _check_fetch()
     _check_vendored_closure()
     _check_agent_bus()
     _check_appearance()
@@ -392,6 +393,49 @@ def _check_tls() -> None:
     note = ("the expired X2 cross-certificate Python's default trusts here is left out"
             if stale in default else "nothing from the intermediate store")
     print(f"  tls: {len(ours)} Windows root certificates trusted; {note}")
+
+
+def _check_fetch() -> None:
+    """Every fetch is HTTPS only, stays on HTTPS through redirects, and stops
+    reading at a cap - checked without the network. urlopen on its own opens
+    http://, file://, ftp:// and data: too, and follows a redirect to plain
+    http://; the calendar's address, which works like a password, was fetched
+    whatever it said."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    from widgets.core import calsource, net
+
+    for url in ("http://example.com/x", "file:///C:/Windows/win.ini", "data:,hello",
+                "ftp://example.com/x"):
+        try:
+            net.fetch(url)
+        except ValueError:
+            continue
+        raise AssertionError(f"net.fetch went to {url}")
+    handler = net._StayOnHttps()
+    req = urllib.request.Request("https://a.example/cal.ics")
+    try:
+        handler.redirect_request(req, None, 302, "Found", {}, "http://b.example/cal.ics")
+        raise AssertionError("a redirect off HTTPS was followed")
+    except urllib.error.URLError:
+        pass
+    assert handler.redirect_request(req, None, 302, "Found", {}, "https://b.example/cal.ics"), \
+        "an HTTPS redirect was refused"
+    assert net.read_capped(io.BytesIO(b"x" * 100), 100) == b"x" * 100, "a reply at the cap was cut"
+    try:
+        net.read_capped(io.BytesIO(b"x" * 101), 100)
+        raise AssertionError("a reply over the cap was read whole")
+    except OSError:
+        pass
+    assert calsource.https_link(" webcal://p.example/c.ics ") == "https://p.example/c.ics"
+    for bad in ("http://p.example/c.ics", "file:///C:/cal.ics", "C:\\cal.ics", ""):
+        assert calsource.https_link(bad) is None, f"{bad!r} would be fetched as a calendar"
+    agenda = calsource.from_ics("http://p.example/c.ics")
+    assert agenda.error and not agenda.events, "an http:// calendar was fetched"
+    print("  fetch: HTTPS only, redirects stay on HTTPS, replies capped "
+          f"({net.MAX_BYTES // (1024 * 1024)} MB); calendars from https:// or webcal:// only")
 
 
 def _check_backend_recovery() -> None:

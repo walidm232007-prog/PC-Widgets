@@ -25,11 +25,10 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .net import tls_context
+from . import net
 
 MAX_HORIZON_DAYS = 21
 FETCH_TIMEOUT = 12
@@ -243,12 +242,27 @@ def parse_ics(text: str, horizon_days: int = MAX_HORIZON_DAYS) -> List[Event]:
     return sorted(events, key=lambda e: e.start)
 
 
+def https_link(url: str) -> Optional[str]:
+    """The calendar address to fetch, or None when it isn't one to send out.
+
+    A published calendar's address is a password in all but name: anyone who
+    has it can read the calendar. So it only travels over HTTPS. webcal:// -
+    how Outlook and Google hand the same link out - is that address over
+    HTTPS; http://, file:// and anything else is refused rather than fetched.
+    """
+    url = (url or "").strip()
+    if url.lower().startswith("webcal://"):
+        url = "https://" + url[len("webcal://"):]
+    return url if url.lower().startswith("https://") else None
+
+
 def from_ics(url: str) -> Agenda:
     import time
-    req = urllib.request.Request(url, headers={"User-Agent": "pc-widgets/1.0"})
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT,
-                                context=tls_context()) as r:
-        raw = r.read().decode("utf-8", "replace")
+    link = https_link(url)
+    if link is None:
+        return Agenda(source="ics", error="a calendar link must start with https:// or webcal://")
+    raw = net.fetch(link, headers={"User-Agent": "pc-widgets/1.0"},
+                    timeout=FETCH_TIMEOUT).decode("utf-8", "replace")
     if "BEGIN:VCALENDAR" not in raw:
         return Agenda(source="ics", error="that URL isn't an ICS calendar")
     return Agenda(events=parse_ics(raw), source="ics", fetched=time.time())
