@@ -51,15 +51,33 @@ checks run even with `--no-test`. Then it checks the exe itself:
 C:\pcw-build\env\Scripts\python tools/build_exe.py --out C:\pcw-build\out --installer
 ```
 
-That also compiles `packaging/pc-widgets.iss` with Inno Setup 6 (free;
-`winget install JRSoftware.InnoSetup --scope user`) into
-`<out>\PC-Widgets-Setup-<version>.exe`, about 30 MB. What it does:
+That also compiles `packaging/pc-widgets.iss` with Inno Setup 6.7 or newer
+(free; `winget install JRSoftware.InnoSetup --scope user`) into
+`<out>\PC-Widgets-Setup-<version>.exe`, about 30 MB. An older Inno Setup stops
+with an error naming the version it needs. What the installer does:
 
 - **No admin.** It installs for the current user, to
   `%LOCALAPPDATA%\Programs\PC Widgets`, so there is no UAC prompt and nothing
   for other accounts on the PC.
-- **Three clicks.** Choose whether it starts with Windows (on) and whether it
-  gets a desktop shortcut (off), Install, then Finish, which opens it.
+- **Three choices, then Install.** The first page asks whether it starts when
+  you sign in (on), gets a desktop shortcut (off), and opens once it's
+  installed (on), and its button says Install. Then the progress page, then a
+  last page saying it's installed. Finish opens it if that third box was
+  ticked, so whatever the app shows first appears as Setup closes, not behind
+  it. Settings → Start with Windows and Desktop shortcut change the first two
+  later, as the page says.
+- **It looks like the app, and like Windows.** Inno Setup's Windows 11 style,
+  light or dark as Windows is set (read once, as Setup starts), on the app's
+  own background colours from `design_system/tokens.py`, with no divider lines.
+  The PC Widgets mark sits in the corner of each page and on a panel on the last
+  one, and the wording is plain ("PC Widgets is installed", not "Completing the
+  PC Widgets Setup Wizard"). In a high-contrast theme Inno turns its styling off
+  and Windows' colours win. The pictures are drawn by
+  `tools/make_installer_art.py`, at every size Inno picks from between 100% and
+  250% Windows scaling; run it again after changing the mark
+  (`widgets/core/mark.py`) or the publisher. Setup's own icon is the mark on a
+  dark tile, because the app's bare white mark disappears on a light title bar
+  and in a light Explorer window.
 - **The app's own shortcuts.** The Start menu and Startup shortcuts are at the
   paths the app uses itself, so Settings → Start with Windows and the
   installer's box are the same switch, and the app never makes a second one.
@@ -89,7 +107,10 @@ and needs a code-signing certificate or signing service.
 ## Releasing
 
 `.github/workflows/release.yml` does the build above on a clean GitHub Windows
-machine, so a release never depends on what one PC has installed.
+machine, so a release never depends on what one PC has installed. It uses the
+machine's Inno Setup when that is 6.7 or newer, and otherwise installs 6.7.3
+from Inno Setup's GitHub release, checked against the SHA-256 that winget's
+manifest lists for it.
 
 1. Raise `VERSION` in `widgets/version.py` and commit it to `main`.
 2. **Actions → Release → Run workflow** on `main`. That builds and tests

@@ -35,9 +35,28 @@ jobs:
       - name: Inno Setup
         shell: pwsh
         run: |
+          # The installer's look needs Inno Setup 6.7 or newer (pc-widgets.iss
+          # checks). The runner's own copy is used when it is new enough;
+          # otherwise 6.7.3 is installed from Inno Setup's GitHub release,
+          # checked against the SHA-256 in winget's manifest for that version.
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
-          if (-not (Test-Path $iscc)) { throw "Inno Setup did not install" }
+          $probe = Join-Path $env:RUNNER_TEMP "inno-version.iss"
+          Set-Content -Path $probe -Encoding ascii -Value @(
+            '#if Ver < EncodeVer(6, 7, 0)', '  #error Inno Setup is older than 6.7', '#endif',
+            '[Setup]', 'AppName=probe', 'AppVersion=1', 'DefaultDirName={tmp}', 'Output=no')
+          $ready = $false
+          if (Test-Path $iscc) { & $iscc /Q $probe | Out-Null; $ready = ($LASTEXITCODE -eq 0) }
+          if (-not $ready) {
+            $setup = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+            Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe" -OutFile $setup
+            $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+            if ($hash -ne "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732") {
+              throw "the Inno Setup 6.7.3 download has SHA-256 $hash"
+            }
+            Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/ALLUSERS" -Wait
+            & $iscc /Q $probe | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup 6.7 did not install" }
+          }
           "ISCC=$iscc" >> $env:GITHUB_ENV
 
       - name: Version
