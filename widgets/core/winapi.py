@@ -801,3 +801,32 @@ def temperature_unit() -> str:
     """"F" where the region measures the US way, otherwise "C" - the unit a new
     Weather card starts in. A card someone has already set keeps its own."""
     return "F" if uses_us_measurements() else "C"
+
+
+SPI_GETCLIENTAREAANIMATION = 0x1042
+
+
+def animations_enabled() -> bool:
+    """Windows' "Animation effects" (Settings > Accessibility > Visual
+    effects). Off means motion should go: fades and slides become cuts. True
+    when it can't be read, which is Windows' own default."""
+    try:
+        on = wt.BOOL(True)
+        if user32.SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(on), 0):
+            return bool(on.value)
+    except Exception:
+        pass
+    return True
+
+
+def transparency_enabled() -> bool:
+    """Windows' "Transparency effects" (Settings > Personalisation > Colours).
+    Off means see-through surfaces should turn solid. True when it can't be
+    read, which is Windows' own default."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PERSONALIZE_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, "EnableTransparency")
+        return bool(value)
+    except (OSError, ImportError):
+        return True

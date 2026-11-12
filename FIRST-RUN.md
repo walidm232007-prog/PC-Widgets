@@ -7,8 +7,8 @@ plan for building it. The look was settled on mockups with the developer on
 | milestone | state |
 |---|---|
 | M1 – groundwork: tell a fresh install apart, Windows' theme and units, the town search, Weather's Set your town button | done |
-| M2 – the welcome screen: every screen dims, Welcome, Start Setup | next |
-| M3 – the steps: location, the widget slideshow, the dock, the finish | not started |
+| M2 – the welcome screen: every screen dims, Welcome, Start Setup | done |
+| M3 – the steps: location, the widget slideshow, the dock, the finish | next |
 | M4 – finish: readable button colours everywhere, docs, installer build, a live try | not started |
 
 ## Why it needs one
@@ -81,3 +81,32 @@ Rules that hold throughout:
   4.5:1 (the blue accent gives 3.7:1, green 2.3:1). The new button uses it; M4
   moves every filled button onto it.
 - Selftest: `_check_first_run` and `_check_town_search`, with no network.
+
+## What M2 laid down
+
+- `widgets/ui/welcome.py`. One frameless window per screen, covering all of
+  it, taskbar included, each painting that screen's wallpaper - the blurred
+  copy the cards' glass already keeps, softened further - under a dark veil.
+  The veil starts at 65 % and darkens a bright wallpaper until white text keeps
+  7:1. The main screen's window carries Welcome, Start Setup and Skip Setup and
+  is the one in Alt+Tab and the taskbar, as "PC Widgets Setup".
+- The intro runs on the frame clock: the veil fades in over 0.3 s, Welcome
+  comes into focus from 0.45 to 1.25 s, the buttons appear by 1.8 s. A click or
+  Enter during it jumps to the end. The windows fade with their own opacity, so
+  a large screen isn't repainted every frame.
+- Keys: Esc is Skip Setup, Enter is Start Setup, Tab reaches the buttons.
+  Focus starts on the screen, not on Start Setup, so it opens as an outline.
+- It is topmost only while it has the focus; Alt+Tab puts it behind whatever
+  you switched to, with the taskbar back, and returning raises it again.
+- `tray.show_window()` opens the welcome instead of the app window while the
+  setup is pending, from wherever it is asked: Setup's Finish, the Start menu,
+  the tray, a second launch. It waits while a full-screen game has the
+  foreground and opens when it leaves. At startup `welcome_due()` empties the
+  board for an ordinary launch and gives a start at sign-in the starter widgets,
+  with no welcome until the window is opened.
+- Skip puts up the starter widgets, saves the setup as done and lifts the veil
+  over 0.45 s. Until M3 brings the steps, Start Setup ends it the same way.
+- Windows' animation effects off: no fades. Transparency effects off: a plain
+  dark screen instead of the wallpaper.
+- Selftest: `_check_welcome`, offscreen. A veil is never activated there: a
+  window the size of a screen in the foreground reads as a full-screen game.
