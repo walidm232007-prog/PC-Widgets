@@ -751,3 +751,53 @@ def uptime_seconds() -> float:
         return kernel32.GetTickCount64() / 1000.0
     except Exception:
         return 0.0
+
+
+# --------------------------------------------------------------------------- #
+#  The person's own Windows choices, for a first run
+# --------------------------------------------------------------------------- #
+PERSONALIZE_KEY = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+LOCALE_IMEASURE = 0x0000000D
+
+
+def apps_use_light_theme() -> Optional[bool]:
+    """Windows' app mode: Settings > Personalisation > Colours > "Choose your
+    app mode". None when it can't be read.
+
+    The installer already follows it, so a first run that opened in the other
+    theme would hand a light Setup over to a dark app. Read once, for a new
+    layout's starting theme; after that the theme is the person's own choice.
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PERSONALIZE_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return bool(value)
+    except (OSError, ImportError):
+        return None
+
+
+def uses_us_measurements() -> Optional[bool]:
+    """Whether the person's region measures the US way (the regional format's
+    measurement system), the closest thing Windows has to "use Fahrenheit".
+    None when it can't be read.
+
+    Asked of the user's own locale, so it follows Settings > Time & language >
+    Language & region rather than the language Windows was installed in.
+    """
+    try:
+        get = kernel32.GetLocaleInfoEx
+        get.argtypes = [wt.LPCWSTR, wt.DWORD, wt.LPWSTR, ctypes.c_int]
+        get.restype = ctypes.c_int
+        buf = ctypes.create_unicode_buffer(4)
+        if not get(None, LOCALE_IMEASURE, buf, len(buf)):    # None: the user's locale
+            return None
+        return buf.value == "1"                              # 0 metric, 1 US
+    except Exception:
+        return None
+
+
+def temperature_unit() -> str:
+    """"F" where the region measures the US way, otherwise "C" - the unit a new
+    Weather card starts in. A card someone has already set keeps its own."""
+    return "F" if uses_us_measurements() else "C"

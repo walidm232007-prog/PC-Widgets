@@ -537,7 +537,12 @@ class Board(QObject):
         d = d or displays.primary(self.screens)
         cw, ch = card_size(size)
         x, y = self._free_spot(cw, ch, d.work)
-        c = self._make(Placement(kind, size, x, y, dict(config or {}),
+        cls = REGISTRY.get(kind)
+        # The kind's own starting settings (a new Weather card's units come
+        # from the region), with what the caller picked - the face chosen in
+        # the gallery - on top.
+        c = self._make(Placement(kind, size, x, y,
+                                 {**(cls.new_config() if cls else {}), **(config or {})},
                                  display=d.key, area=list(d.work)))
         if c is None:
             return None

@@ -599,11 +599,16 @@ and nothing needs an account.
   It rejects obviously-scripted clients, so the request carries a browser
   `User-Agent`.
 - **Weather** — [Open-Meteo](https://open-meteo.com), no API key. Location is set
-  by you (right-click → Set location) rather than by IP geolocation: silently
-  looking up where someone lives is a poor default for a thing that just wants to
-  show the temperature. Fetching happens on a worker thread and hands the result
-  back through a Qt signal, because a blocked network call must never freeze the
-  board and a repaint must never be triggered off the GUI thread.
+  by you rather than by IP geolocation: silently looking up where someone lives
+  is a poor default for a thing that just wants to show the temperature. A card
+  without a town shows a **Set your town** button (or right-click → Change town),
+  and the town is picked from the places that match what you type, each with its
+  region - "Springfield" is a dozen places, and the old box quietly took the
+  first. Only the typed text is sent, to Open-Meteo's geocoding service. A new
+  card starts in °F where Windows' region measures the US way, °C elsewhere.
+  Fetching happens on a worker thread and hands the result back through a Qt
+  signal, because a blocked network call must never freeze the board and a
+  repaint must never be triggered off the GUI thread.
 
   **Faces.** Right-click → Face, or the dots under the preview in the gallery,
   picks how a weather card looks, separately for each size. Classic is the

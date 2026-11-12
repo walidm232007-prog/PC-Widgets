@@ -55,8 +55,11 @@ def weather_response() -> dict:
 
 
 def weather(card) -> None:
-    """Give the weather tile deterministic data for rendering."""
+    """Give the weather tile deterministic data for rendering. A sample has no
+    town of its own, so it is told not to ask for one: the gallery shows what
+    the card looks like, not its "Set your town" button."""
     from ..tiles.weather import parse
+    card.needs_town = False
     card.data = parse(weather_response(), "London, GB", "C")
 
 
