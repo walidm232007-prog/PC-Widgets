@@ -148,6 +148,8 @@ def selftest() -> int:
     _check_typeface()
     _check_placement(pal_mod.build("dark", "blue"))
     _check_persistence(pal_mod.build("dark", "blue"))
+    _check_first_run()
+    _check_town_search()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -1756,6 +1758,173 @@ def _check_placement(pal) -> None:
     print(f"  placement: free drop keeps {off_grid}; "
           f"snap mode moves it to {(card.x(), card.y())}")
     card.deleteLater()
+
+
+def _check_first_run() -> None:
+    """Only a fresh install is marked for the first-run setup, and it starts
+    from the person's own Windows choices.
+
+    The line that matters is between three cases that all used to end in the
+    same "starting from a default board": no layout anywhere (a new install,
+    which gets the setup), a layout from before the setup existed (an update,
+    which must not), and a layout that can't be read (a fault, which gets a
+    plain default board and a log line, not a welcome). Windows' readings are
+    stubbed, so the check is the same on every machine.
+    """
+    import json
+
+    from widgets.core import palette as pal_mod
+    from widgets.core import store, winapi
+    from widgets.core.board import REGISTRY
+
+    real = (winapi.apps_use_light_theme, winapi.uses_us_measurements)
+    area = (0, 0, 1920, 1040)
+
+    def write_both(text: str) -> None:
+        for path in store._both_paths():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    try:
+        winapi.apps_use_light_theme = lambda: True
+        winapi.uses_us_measurements = lambda: True
+        with _sandboxed_layout():
+            fresh = store.load(area)
+            assert fresh.setup == "pending", "a fresh install was not marked for the setup"
+            assert fresh.theme == "light", "a fresh install ignored Windows' light app mode"
+            kinds = [pl.kind for pl in fresh.placements]
+            assert kinds == ["clock", "weather", "system", "disk", "notes"], kinds
+            unit = next(pl.config.get("unit") for pl in fresh.placements if pl.kind == "weather")
+            assert unit == "F", f"the starter Weather card is in {unit}, not the region's F"
+            assert store.save(fresh) and store.load().setup == "pending", \
+                "the setup's state did not survive a save"
+
+            raw = json.loads(json.dumps(store.asdict(fresh)))
+            raw.pop("setup")
+            write_both(json.dumps(raw))
+            assert store.load(area).setup == "done", "an update was treated as a first run"
+
+            write_both("{not json")
+            broken = store.load(area)
+            assert broken.setup == "done" and broken.placements, \
+                "an unreadable layout was treated as a first run"
+
+        winapi.apps_use_light_theme = lambda: None      # can't be read: keep the default
+        winapi.uses_us_measurements = lambda: False
+        with _sandboxed_layout():
+            fresh = store.load(area)
+            unit = next(pl.config.get("unit") for pl in fresh.placements if pl.kind == "weather")
+            assert fresh.theme == "dark" and unit == "C", (fresh.theme, unit)
+
+        # A new card starts in the region's units; only Weather has any to give.
+        winapi.uses_us_measurements = lambda: True
+        assert REGISTRY["weather"].new_config() == {"unit": "F"}
+        winapi.uses_us_measurements = lambda: None
+        assert REGISTRY["weather"].new_config() == {"unit": "C"}
+        assert REGISTRY["clock"].new_config() == {}
+    finally:
+        winapi.apps_use_light_theme, winapi.uses_us_measurements = real
+
+    worst = min(pal_mod.contrast(pal_mod.button_fill(a), "#ffffff") for a in pal_mod.ACCENTS.values())
+    for accent in pal_mod.ACCENTS.values():
+        fill = pal_mod.button_fill(accent)
+        assert pal_mod.contrast(fill, "#ffffff") >= 4.5, f"white on {fill} fails 4.5:1"
+        assert pal_mod.luminance(fill) <= pal_mod.luminance(accent), f"{fill} is lighter than {accent}"
+    print("  first run: only a fresh install is marked (not an update, not an unreadable "
+          "layout); it starts in Windows' app mode and the region's units; "
+          f"button shades {worst:.2f}:1 or better with white on all {len(pal_mod.ACCENTS)} accents")
+
+
+def _check_town_search() -> None:
+    """Typing a town lists the matches with their regions, the two failures
+    say different things, and an empty Weather card is a button rather than a
+    hint to right-click. The searches are canned: no network. Renders go to
+    _selftest/_townsearch_*.png and _weather_settown_*.png."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtCore import Qt
+
+    from widgets.core import palette as pal_mod
+    from widgets.tiles import weather
+    from widgets.ui.townsearch import TownSearch
+
+    canned = {"results": [
+        {"name": "Chicago", "admin1": "Illinois", "country": "United States",
+         "country_code": "US", "latitude": 41.85, "longitude": -87.65},
+        {"name": "Chico", "admin1": "California", "country": "United States",
+         "country_code": "US", "latitude": 39.73, "longitude": -121.84},
+        {"name": "Chicopee", "admin1": "Massachusetts", "country": "United States",
+         "country_code": "US", "latitude": 42.15, "longitude": -72.61},
+        {"name": "No coordinates"},         # malformed: skipped, not fatal
+    ]}
+    asked = []
+    real_get = weather._get
+    weather._get = lambda url, params: (asked.append((url, dict(params))), canned)[1]
+    try:
+        towns = weather.find_towns("  Chic ")
+        assert [t.name for t in towns] == ["Chicago", "Chico", "Chicopee"], towns
+        assert towns[0].region == "Illinois, United States" and towns[0].label == "Chicago, US"
+        assert asked[0][0] == weather.GEO and asked[0][1]["name"] == "Chic"
+        assert weather.find_towns("C") == [] and len(asked) == 1, "a single letter was sent"
+    finally:
+        weather._get = real_get
+
+    def offline(_q):
+        raise OSError("no route to host")
+
+    out = os.path.join(_write_dir(), "_selftest")
+    for theme in ("light", "dark"):
+        pal = pal_mod.build(theme, "blue")
+        picked = []
+
+        box = TownSearch(pal, picked.append, finder=lambda q: towns, threaded=False)
+        box.field.setText("Chic")
+        box._typed("Chic")
+        box._debounce.stop()
+        box.search_now()
+        assert box.state == "results" and len(box.towns) == 3, box.state
+        box._landed(box._seq - 1, [])
+        assert box.state == "results", "an older, overtaken search replaced the list"
+        box.grab().save(os.path.join(out, f"_townsearch_{theme}.png"))
+        box.current = 1
+        box.pick(box.current)
+        assert picked == [towns[1]], picked
+
+        for finder, state in ((lambda q: [], "none"), (offline, "offline")):
+            other = TownSearch(pal, picked.append, finder=finder, threaded=False)
+            other.field.setText("Zzqx")
+            other._typed("Zzqx")
+            other._debounce.stop()
+            other.search_now()
+            assert other.state == state, (state, other.state)
+            if theme == "light":
+                other.grab().save(os.path.join(out, f"_townsearch_{state}.png"))
+            other.deleteLater()
+
+        card = weather.WeatherWidget(pal, "medium", {})
+        card._refresh()
+        assert card.needs_town, "a card with no town didn't ask for one"
+        img = QImage(card.width(), card.height(), QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        card.render(img)
+        img.save(os.path.join(out, f"_weather_settown_{theme}.png"))
+        btn = card._town_btn
+        assert btn is not None and card.town_button_at(btn.center())
+        assert not card.town_button_at(QPointF(4, 4)), "the whole card counts as the button"
+        got = img.pixelColor(int(btn.left() + 9), int(btn.center().y()))
+        want = QColor(pal_mod.button_fill(pal.accent))
+        assert max(abs(got.red() - want.red()), abs(got.green() - want.green()),
+                   abs(got.blue() - want.blue())) <= 8, (got.name(), want.name())
+        card._refresh = lambda: None        # picking a town must not reach the network here
+        card.set_town(towns[0])
+        assert not card.needs_town and card.config["place"] == "Chicago, US"
+        assert (card.config["lat"], card.config["lon"]) == (41.85, -87.65)
+        card.deleteLater()
+    print("  town search: every match with its region, a single letter not sent, "
+          "no match and no connection told apart, an older answer can't overwrite a "
+          "newer one; an empty Weather card shows Set your town in the accent's "
+          "button shade; renders in _selftest/_townsearch_*.png")
 
 
 def _check_persistence(pal) -> None:

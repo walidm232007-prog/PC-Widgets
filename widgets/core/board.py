@@ -527,7 +527,9 @@ class Board(QObject):
         d = d or displays.primary(self.screens)
         cw, ch = card_size(size)
         x, y = self._free_spot(cw, ch, d.work)
-        c = self._make(Placement(kind, size, x, y, display=d.key, area=list(d.work)))
+        cls = REGISTRY.get(kind)
+        c = self._make(Placement(kind, size, x, y, config=cls.new_config() if cls else {},
+                                 display=d.key, area=list(d.work)))
         if c is None:
             return None
         self._show(c)

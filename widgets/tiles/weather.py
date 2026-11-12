@@ -23,12 +23,13 @@ from typing import List, Optional
 
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
+    QAction, QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter,
+    QPainterPath, QPen,
 )
-from PySide6.QtWidgets import QInputDialog
 
 from ..core.card import RADIUS, WidgetCard, squircle
-from ..core import net
+from ..core import net, winapi
+from ..core.palette import _mix, button_fill
 
 API = "https://api.open-meteo.com/v1/forecast"
 GEO = "https://geocoding-api.open-meteo.com/v1/search"
@@ -120,16 +121,44 @@ def _get(url: str, params: dict) -> dict:
                                 limit=2 * 1024 * 1024).decode("utf-8"))
 
 
-def geocode(name: str):
-    data = _get(GEO, {"name": name, "count": 1, "language": "en", "format": "json"})
-    hits = data.get("results") or []
-    if not hits:
-        return None
-    h = hits[0]
-    label = h["name"]
-    if h.get("country_code"):
-        label = f"{label}, {h['country_code']}"
-    return (float(h["latitude"]), float(h["longitude"]), label)
+@dataclass
+class Town:
+    """One match for a typed place name."""
+
+    name: str
+    region: str            # "Illinois, United States": what tells two Springfields apart
+    country_code: str
+    lat: float
+    lon: float
+
+    @property
+    def label(self) -> str:
+        """What the card shows as its heading."""
+        return f"{self.name}, {self.country_code}" if self.country_code else self.name
+
+
+def find_towns(text: str, count: int = 6) -> List[Town]:
+    """Places matching what was typed, the likeliest first.
+
+    Several, not one: the old prompt took the first hit for "Springfield" and
+    never said which of the thirty it had picked. Open-Meteo matches from two
+    characters (exactly) and fuzzily from three. Only the typed text leaves the
+    machine. Network trouble is raised, not swallowed, so the caller can say the
+    service couldn't be reached rather than that nothing matched.
+    """
+    text = text.strip()
+    if len(text) < 2:
+        return []
+    data = _get(GEO, {"name": text, "count": count, "language": "en", "format": "json"})
+    towns: List[Town] = []
+    for h in data.get("results") or []:
+        try:
+            region = ", ".join(x for x in (h.get("admin1"), h.get("country")) if x)
+            towns.append(Town(str(h["name"]), region, str(h.get("country_code") or ""),
+                              float(h["latitude"]), float(h["longitude"])))
+        except (KeyError, TypeError, ValueError):
+            continue            # one malformed result is no reason to lose the rest
+    return towns
 
 
 def fetch(lat: float, lon: float, place: str, unit: str) -> Forecast:
@@ -181,6 +210,20 @@ class WeatherWidget(WidgetCard):
         # so scaling and fading it on every repaint would be pure waste.
         self._band_cache: dict = {}
         self.data_ready.connect(self.update)
+        # No town yet: the card shows a button instead of a forecast. The old
+        # empty state said "Right-click → Set location", which left a dead card
+        # on the desktop until someone thought to right-click it.
+        self.needs_town = self.config.get("lat") is None or self.config.get("lon") is None
+        self._town_btn: Optional[QRectF] = None
+        self._town_hover = False
+        self._town_pressed = False
+        self._search = None
+
+    @classmethod
+    def new_config(cls) -> dict:
+        # The units of the person's region; a card restored from a layout keeps
+        # whatever it had, which before this was always Celsius.
+        return {"unit": winapi.temperature_unit()}
 
     def on_start(self) -> None:
         self._refresh()
@@ -193,8 +236,9 @@ class WeatherWidget(WidgetCard):
         if self._busy:
             return
         lat, lon = self.config.get("lat"), self.config.get("lon")
-        if lat is None or lon is None:
-            self.data = Forecast(error="Right-click → Set location")
+        self.needs_town = lat is None or lon is None
+        if self.needs_town:
+            self.data = Forecast()
             return
         self._busy = True
         place = self.config.get("place", "")
@@ -211,8 +255,8 @@ class WeatherWidget(WidgetCard):
         threading.Thread(target=work, daemon=True).start()
 
     def context_actions(self, menu) -> None:
-        a = QAction("Set location…", menu)
-        a.triggered.connect(self._ask_location)
+        a = QAction("Set your town…" if self.needs_town else "Change town…", menu)
+        a.triggered.connect(self.ask_town)
         menu.addAction(a)
         u = QAction(f"Switch to °{'F' if self.unit == 'C' else 'C'}", menu)
         u.triggered.connect(self._toggle_unit)
@@ -227,24 +271,94 @@ class WeatherWidget(WidgetCard):
         photos.setEnabled(False)
         menu.addAction(photos)
 
-    def _ask_location(self) -> None:
-        text, ok = QInputDialog.getText(self, "Weather location",
-                                        "Town or city:",
-                                        text=self.config.get("place", ""))
-        if not ok or not text.strip():
-            return
-        try:
-            hit = geocode(text.strip())
-        except Exception:
-            hit = None
-        if not hit:
-            self.data = Forecast(error=f"Couldn't find “{text.strip()}”")
-            self.update()
-            return
-        lat, lon, label = hit
-        self.config.update({"lat": lat, "lon": lon, "place": label})
+    def ask_town(self) -> None:
+        """Open the town search beside the card: matches as you type, each with
+        its region, instead of a bare text box that silently took the first
+        hit. In the board's theme, not a colour the card has been given."""
+        from ..ui.townsearch import TownSearch
+        if self._search is not None:
+            self._search.close()
+        self._search = TownSearch(self._base_palette, self.set_town)
+        self._search.destroyed.connect(self._search_closed)
+        r = self.card_rect().translated(self.pos())
+        self._search.open_near(r.toAlignedRect())
+
+    def _search_closed(self, *_a) -> None:
+        self._search = None
+
+    def set_town(self, town: Town) -> None:
+        self.config.update({"lat": town.lat, "lon": town.lon, "place": town.label})
+        self.needs_town = False
+        self.data = Forecast(place=town.label)       # "loading…" until it lands
         self.changed.emit()
         self._refresh()
+        self.update()
+
+    # -- the "Set your town" button --------------------------------------- #
+    TOWN_TEXT = "Set your town"
+
+    def _paint_town_button(self, p, r: QRectF) -> None:
+        """A filled button in the accent's button shade, centred a little below
+        the middle so the heading keeps its corner. White on that shade is
+        4.5:1 or better for every accent; the plain accent would not be."""
+        f = self.font(10, QFont.DemiBold)
+        w = QFontMetricsF(f).horizontalAdvance(self.TOWN_TEXT) + 36.0
+        h = 32.0
+        box = QRectF(r.center().x() - w / 2.0, r.center().y() - h / 2.0 + 8.0, w, h)
+        self._town_btn = box
+        fill = button_fill(self._base_palette.accent)
+        if self._town_pressed:
+            fill = _mix(fill, "#000000", 0.16)
+        elif self._town_hover:
+            fill = _mix(fill, "#000000", 0.08)
+        path = QPainterPath()
+        path.addRoundedRect(box, h / 2.0, h / 2.0)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillPath(path, QColor(fill))
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(box, Qt.AlignCenter, self.TOWN_TEXT)
+        p.restore()
+
+    def town_button_at(self, pos) -> bool:
+        """Whether ``pos`` (card coordinates) is on the button, a little
+        generously: it is a small target on a floating card."""
+        box = self._town_btn
+        return bool(self.needs_town and box is not None
+                    and box.adjusted(-3, -3, 3, 3).contains(pos))
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton and self.town_button_at(ev.position()):
+            self._town_pressed = True       # a press on the button must not start a drag
+            self.update()
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:
+        hover = self._drag_from is None and self.town_button_at(ev.position())
+        if hover != self._town_hover:
+            self._town_hover = hover
+            self.setCursor(Qt.PointingHandCursor if hover else Qt.ArrowCursor)
+            self.update()
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self._town_pressed:
+            self._town_pressed = False
+            if self.town_button_at(ev.position()):
+                self.ask_town()
+            self.update()
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        if self._town_hover or self._town_pressed:
+            self._town_hover = self._town_pressed = False
+            self.unsetCursor()
+        super().leaveEvent(ev)
 
     def _toggle_unit(self) -> None:
         self.unit = "F" if self.unit == "C" else "C"
@@ -257,6 +371,11 @@ class WeatherWidget(WidgetCard):
         pal = self.palette_
         d = self.data
 
+        if self.needs_town:
+            self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Weather")
+            self._paint_town_button(p, r)
+            return
+        self._town_btn = None
         if d.error:
             self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Weather")
             self.text(p, r, d.error, 10, pal.text_dim, align=Qt.AlignCenter)

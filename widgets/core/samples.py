@@ -18,8 +18,11 @@ import time
 
 
 def weather(card) -> None:
-    """Give the weather tile deterministic data for rendering."""
+    """Give the weather tile deterministic data for rendering. A sample has no
+    town of its own, so it is told not to ask for one: the gallery shows what
+    the card looks like, not its "Set your town" button."""
     from ..tiles.weather import Day, Forecast
+    card.needs_town = False
     card.data = Forecast(
         place="London, GB", temp=21.0, feels=20.0, code=2,
         days=[Day("Wed", 2, 22, 14), Day("Thu", 61, 19, 13),

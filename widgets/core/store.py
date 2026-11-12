@@ -105,6 +105,11 @@ class BoardState:
     dock_neon_motion: str = "circulate"     # static | fade | circulate
     dock_neon_strength: int = 50    # 25 subtle, 50 medium, 75 bright, 100 intense
     dock_bars: str = "default"      # default (the accent) | neon (the outline's colours and motion)
+    # "pending" only on a fresh install - no layout anywhere yet - until the
+    # first-run setup finishes or is skipped. The default is "done" so a layout
+    # saved before this field existed loads as done: people updating the app
+    # never see the setup, only people installing it.
+    setup: str = "done"
     placements: List[Placement] = field(default_factory=list)
     # Every display a widget belongs to, connected or not: its name, bounds and
     # work area, by device path - how one that is unplugged is still named, and
@@ -127,6 +132,27 @@ def default_board(work_area) -> BoardState:
     ])
 
 
+def first_run_board(work_area) -> BoardState:
+    """The starter board for a fresh install, marked for the first-run setup.
+
+    It starts in the theme Windows uses for apps, so the app picks up where the
+    installer - which follows that setting - left off, and its Weather card in
+    the units of the person's region. Both are only starting points: the setup
+    and Settings change them.
+    """
+    from . import winapi
+    board = default_board(work_area)
+    board.setup = "pending"
+    light = winapi.apps_use_light_theme()
+    if light is not None:
+        board.theme = "light" if light else "dark"
+    unit = winapi.temperature_unit()
+    for pl in board.placements:
+        if pl.kind == "weather":
+            pl.config = dict(pl.config, unit=unit)
+    return board
+
+
 def load(work_area=None) -> BoardState:
     """Read the layout, from whichever copy is newest and readable.
 
@@ -134,6 +160,11 @@ def load(work_area=None) -> BoardState:
     happen on *any* exception from the single file - and a default board means
     every position, colour and background picture the user set is silently gone,
     which is indistinguishable from the app having forgotten them.
+
+    Two cases end there, and they are kept apart: no layout in either place is a
+    fresh install, which gets the first-run board; a layout that exists but
+    can't be read is a fault, which gets a plain default board and a line in the
+    log - not the welcome a new install gets.
     """
     best = None
     for src in _both_paths():
@@ -145,6 +176,7 @@ def load(work_area=None) -> BoardState:
             best = (mtime, src)
 
     tried = []
+    missing = 0
     order = [best[1]] if best else []
     order += [q for q in _both_paths() if q not in order]
     for src in order:
@@ -163,12 +195,17 @@ def load(work_area=None) -> BoardState:
                               presets=_presets(raw.get("presets")), **known)
         except FileNotFoundError:
             tried.append(src)
+            missing += 1
         except Exception as exc:
             tried.append(src)
             report(f"could not read {src}: {exc!r}")
 
+    area = work_area or (0, 0, 1920, 1080)
+    if missing == len(order):
+        report("no layout yet - a first run; starting from the starter board")
+        return first_run_board(area)
     report("no readable layout; starting from a default board")
-    return default_board(work_area or (0, 0, 1920, 1080))
+    return default_board(area)
 
 
 def _placement(raw: Dict[str, Any]) -> Placement:

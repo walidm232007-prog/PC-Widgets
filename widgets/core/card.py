@@ -333,6 +333,12 @@ class WidgetCard(QWidget):
     def context_actions(self, menu: QMenu) -> None:
         """Tiles may add their own entries to the right-click menu."""
 
+    @classmethod
+    def new_config(cls) -> dict:
+        """Settings a brand-new card of this kind starts with. A card restored
+        from a saved layout keeps exactly what it had."""
+        return {}
+
     def on_focus_click(self, ev) -> None:
         """A focusable card was clicked; hand focus to whatever it hosts."""
 

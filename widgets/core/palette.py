@@ -132,3 +132,41 @@ def build(theme: str = "dark", accent_name: str = "blue") -> Palette:
 def source() -> str:
     """Where the palette came from - surfaced in --selftest output."""
     return "design_system/tokens.py" if _tokens else "built-in fallback"
+
+
+# --------------------------------------------------------------------------- #
+#  Filled buttons
+# --------------------------------------------------------------------------- #
+def luminance(hex_colour: str) -> float:
+    """WCAG relative luminance, 0 (black) to 1 (white)."""
+    h = hex_colour.lstrip("#")[-6:]
+
+    def channel(v: int) -> float:
+        c = v / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(int(h[i:i + 2], 16)) for i in (0, 2, 4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a: str, b: str) -> float:
+    """WCAG contrast ratio between two opaque colours, 1 to 21."""
+    la, lb = sorted((luminance(a), luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def button_fill(accent: str, ink: str = "#ffffff", ratio: float = 4.5) -> str:
+    """The accent, deepened just enough for white text on it to pass 4.5:1.
+
+    The accents are bright on purpose - they mark a second hand, today's date, a
+    selection - and most are too light to carry a white label: blue gives
+    3.7:1, green 2.3:1. A filled button takes the same hue a few steps darker
+    instead, so it still reads as the accent and its label stays readable.
+    Steps of 4 % keep the result as close to the accent as the ratio allows.
+    """
+    fill = accent
+    for _ in range(25):
+        if contrast(fill, ink) >= ratio:
+            return fill
+        fill = _mix(fill, "#000000", 0.04)
+    return fill
