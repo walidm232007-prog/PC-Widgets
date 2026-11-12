@@ -69,6 +69,7 @@ class WidgetTray(QSystemTrayIcon):
         self._hk_filter: _HotkeyFilter | None = None
         self._hk_id = 0
         self._window = None
+        self._welcome = None             # the first-run welcome while it's open
         self._menu: QMenu | None = None
 
         self.setToolTip("PC Widgets — click to open · Ctrl+Alt+W to peek")
@@ -89,11 +90,30 @@ class WidgetTray(QSystemTrayIcon):
 
     def show_window(self, page: str | None = None) -> None:
         """Open the app window, building it the first time it is asked for -
-        a board started with Windows may never need it."""
+        a board started with Windows may never need it.
+
+        On a fresh install the first opening is the welcome instead, wherever
+        it is asked for from: Setup's Finish, the Start menu, the tray, or a
+        second launch knocking. A start at sign-in never asks, so it never
+        pops up on its own."""
+        if self.board.state.setup == "pending":
+            self.show_welcome()
+            return
         if self._window is None:
             from .ui.app import MainWindow
             self._window = MainWindow(self.board, self)
         self._window.bring_up(page)
+
+    def show_welcome(self) -> None:
+        if self._welcome is None:
+            from .ui.welcome import Welcome
+            self._welcome = Welcome(self.board)
+            self._welcome.finished.connect(self._welcome_done)
+        self._welcome.open()
+
+    def _welcome_done(self, _how: str) -> None:
+        self._welcome = None
+        self.rebuild_menu()
 
     # ------------------------------------------------------------------ #
     def rebuild_menu(self) -> None:

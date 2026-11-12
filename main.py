@@ -150,6 +150,7 @@ def selftest() -> int:
     _check_persistence(pal_mod.build("dark", "blue"))
     _check_first_run()
     _check_town_search()
+    _check_welcome()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -1927,6 +1928,112 @@ def _check_town_search() -> None:
           "button shade; renders in _selftest/_townsearch_*.png")
 
 
+def _check_welcome() -> None:
+    """The first-run welcome, offscreen: a veil over every screen with the
+    words and buttons on the main one; Start Setup an outline until the pointer
+    is over it; Esc is Skip, which leaves the five starter widgets and marks the
+    setup done; it waits while a full-screen game has the foreground; a start at
+    sign-in never shows it; and the veil darkens a bright wallpaper until white
+    text keeps 7:1. Renders to _selftest/_welcome.png and _welcome_hover.png."""
+    from PySide6.QtCore import QEvent, QRect, Qt
+    from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    from widgets.core import palette as pal_mod
+    from widgets.core import store, winapi
+    from widgets.core.board import Board
+    from widgets.core.card import WidgetCard
+    from widgets.ui import welcome as wmod
+
+    white = QImage(320, 180, QImage.Format_RGB32)
+    white.fill(QColor("#ffffff"))
+    dim = wmod.dim_for(white, white.rect())
+    k = round(255 * (1 - dim))
+    assert pal_mod.contrast("#ffffff", QColor(k, k, k).name()) >= wmod.WHITE_TEXT_RATIO, dim
+    navy = QImage(320, 180, QImage.Format_RGB32)
+    navy.fill(QColor("#1f2a44"))
+    assert wmod.dim_for(navy, navy.rect()) == wmod.DIM, "an ordinary wallpaper got an extra dim"
+    assert wmod.dim_for(None, QRect()) == 1.0
+
+    area = (0, 0, 1920, 1040)
+    st = store.first_run_board(area)
+    assert wmod.welcome_due(st, True) and st.placements == [], "the welcome opened over widgets"
+    st = store.first_run_board(area)
+    assert not wmod.welcome_due(st, False) and len(st.placements) == 5, \
+        "a start at sign-in should show the starter widgets and no welcome"
+    st.placements = []
+    assert not wmod.welcome_due(st, False) and len(st.placements) == 5, \
+        "an unfinished welcome left the desktop empty at the next sign-in"
+    assert not wmod.welcome_due(store.BoardState(), True), "an update was welcomed"
+
+    real_start, real_full = WidgetCard.start, winapi.foreground_is_fullscreen
+    WidgetCard.start = lambda self: None            # never put a card on screen
+    out = os.path.join(_write_dir(), "_selftest")
+    starter = ["clock", "weather", "system", "disk", "notes"]
+    try:
+        with _sandboxed_layout():
+            state = store.first_run_board(area)
+            wmod.welcome_due(state, True)
+            board = Board(state)
+            w = wmod.Welcome(board, offscreen=True, motion=False)
+            winapi.foreground_is_fullscreen = lambda: False
+            w.open()
+            assert w.state == "ready", w.state
+            screens = QGuiApplication.screens()
+            assert len(w.stages) == len(screens) and sum(s.main for s in w.stages) == 1
+            for stage, screen in zip(w.stages, screens):
+                assert stage.geometry() == screen.geometry(), "a veil doesn't cover its screen"
+            main = w.main
+            shot = main.grab().toImage()
+            shot.scaled(shot.width() // 2, shot.height() // 2, Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation).save(os.path.join(out, "_welcome.png"))
+            b = main.start_btn
+            spot = (b.x() + int(b.height() * 0.55), b.y() + b.height() // 2)
+            assert not b.filled(), "Start Setup opened filled"
+            outline = shot.pixelColor(*spot)
+            b.hover = True
+            lit = main.grab().toImage()
+            assert outline.lightness() < 140 and lit.pixelColor(*spot).lightness() > 240, \
+                (outline.name(), lit.pixelColor(*spot).name())
+            top = main.title.y() - 30
+            lit.copy(QRect(b.x() - 260, top, b.width() + 520,
+                           main.skip_btn.y() + main.skip_btn.height() + 30 - top)).save(
+                os.path.join(out, "_welcome_hover.png"))
+            b.hover = False
+            QApplication.sendEvent(main, QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+            assert w.state == "closed" and board.state.setup == "done", w.state
+            assert [c.kind for c in board.cards] == starter, [c.kind for c in board.cards]
+            saved = store.load(area)
+            assert saved.setup == "done" and len(saved.placements) == 5, "Skip wasn't saved"
+            for c in list(board.cards):
+                c.deleteLater()
+
+        with _sandboxed_layout():
+            state = store.first_run_board(area)
+            wmod.welcome_due(state, True)
+            board = Board(state)
+            w = wmod.Welcome(board, offscreen=True, motion=False, glass=False)
+            winapi.foreground_is_fullscreen = lambda: True
+            w.open()
+            assert w.state == "waiting" and not w.stages, "it opened over a full-screen game"
+            winapi.foreground_is_fullscreen = lambda: False
+            w._retry()
+            assert w.state == "ready" and all(s.backdrop is None for s in w.stages), \
+                "transparency effects off should give a plain dark screen"
+            w.start()
+            assert w.state == "closed" and board.state.setup == "done"
+            assert [c.kind for c in board.cards] == starter
+            for c in list(board.cards):
+                c.deleteLater()
+    finally:
+        WidgetCard.start, winapi.foreground_is_fullscreen = real_start, real_full
+    print(f"  welcome: a veil over each of {len(QGuiApplication.screens())} screen(s), "
+          "Start Setup an outline that fills under the pointer, Esc skips to the "
+          "starter widgets and saves the setup as done, waits out a full-screen game, "
+          f"never at sign-in; a white wallpaper is dimmed to {dim:.2f} for 7:1 text; "
+          "renders in _selftest/_welcome*.png")
+
+
 def _check_persistence(pal) -> None:
     """The layout has to actually reach the disk, and keep reaching it.
 
@@ -2032,6 +2139,11 @@ def run(open_window: bool = True) -> int:
 
     load_builtin_tiles()
     state = store.load(winapi.work_area())
+    # A fresh install opened the ordinary way starts with no widgets: the
+    # welcome ends by putting them up. Started at sign-in, it gets the starter
+    # widgets and the welcome waits for the window (widgets/ui/welcome.py).
+    from widgets.ui.welcome import welcome_due
+    welcome_due(state, open_window)
     board = Board(state)
     board.build()
 
