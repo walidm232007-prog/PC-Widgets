@@ -140,6 +140,7 @@ def selftest() -> int:
     _contact_sheet(out, made)
     _check_typeface()
     _check_weather_data(pal_mod.build("dark", "blue"))
+    _check_weather_faces(out)
     _check_placement(pal_mod.build("dark", "blue"))
     _check_persistence(pal_mod.build("dark", "blue"))
     _check_ticks(pal_mod.build("dark", "blue"))
@@ -1957,16 +1958,17 @@ def _check_weather_data(pal) -> None:
     # The face: remembered per size, a face that isn't built draws Classic,
     # and the choice is plain JSON in the card's config.
     card = w.WeatherWidget(pal, "small", {})
-    assert card.face == "classic" and card.available_faces() == [("classic", "Classic")]
-    card.set_face("conditions")                  # not built yet: ignored
+    assert card.face == "classic" and card.available_faces()[0] == ("classic", "Classic")
+    card.set_face("nope")                        # not a face: ignored
     assert "faces" not in card.config
-    card.config["faces"] = {"small": "conditions"}
+    card.config["faces"] = {"small": "nope"}
     assert card.face == "classic", "an unbuilt face was drawn"
     built = {"classic": card._paint_classic, "conditions": card._paint_classic,
              "hourly": card._paint_classic}
     card._face_painters = lambda: built
     saved = []
     card.changed.connect(lambda: saved.append(1))
+    card.config["faces"] = {"small": "conditions"}
     card.set_face("conditions")
     assert card.face == "conditions" and not saved, "re-choosing saved again"
     card.set_size_class("medium")
@@ -1982,6 +1984,84 @@ def _check_weather_data(pal) -> None:
           "place, sun on the place's clock, next hour 'Rain starting in 15 min', "
           "°F brings mph and inches, missing series leave the rest; faces kept "
           "per size, unbuilt ones draw Classic")
+
+
+def _check_weather_faces(out: str) -> None:
+    """Every weather face paints, in both themes, from good data and from the
+    awkward kind: no next-hour readings, no sunrise (the polar winter), no
+    daily forecast. Painted straight onto an image rather than through Qt's
+    paint event, which would print an exception and carry on."""
+    import copy
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from PySide6.QtWidgets import QMenu
+    from widgets.core import palette as pal_mod, samples
+    from widgets.core.card import PAD
+    from widgets.tiles import weather as w
+
+    fc = w.parse(samples.weather_response(), "London, GB")
+    assert w.precip_summary(fc) == "0.6 mm today", w.precip_summary(fc)
+    fc2 = copy.deepcopy(fc)
+    fc2.days[0].precip = 0
+    assert w.precip_summary(fc2) == "4.2 mm tomorrow"
+    for d in fc2.days:
+        d.precip = 0
+    assert w.precip_summary(fc2) == "None for 7d"
+    fc2.days[3].precip, fc2.rain_unit = 0.25, "in"
+    assert w.precip_summary(fc2) == "0.25 in Sat", w.precip_summary(fc2)
+    bars = w.rain_levels(fc, 15)
+    assert bars[0] == 0 and bars == sorted(bars) and 0 < bars[-1] < 1, bars
+    fc2.next_hour = [9, 9, 9, 9, 9]
+    assert max(w.rain_levels(fc2, 15)) == 1.0, "a downpour overflowed the chart"
+    assert w._deg(-0.3) == "0°" and w._clock_min(973) == "4:13 PM"
+
+    def broken(f):
+        f.next_hour, f.sunrise_min, f.sunset_min, f.days = [], None, None, []
+        f.hi = f.lo = f.wind = None
+
+    def night(f):
+        f.now_min, f.is_day = 22 * 60, False
+
+    wrote = 0
+    for theme in ("dark", "light"):
+        pal = pal_mod.build(theme, "blue")
+        for size in w.WeatherWidget.supported_sizes:
+            card = w.WeatherWidget(pal, size, {})
+            faces = card.available_faces()
+            if size == "small":
+                assert [k for k, _ in faces] == ["classic", "conditions",
+                                                 "forecast", "nexthour", "sun"]
+                menu = QMenu()
+                card.context_actions(menu)
+                # One call to menu(): a second wrapper for the same submenu
+                # can take the C++ object with it when the first is dropped.
+                face_action = next(a for a in menu.actions() if a.text() == "Face")
+                sub = face_action.menu()
+                assert [a.text() for a in sub.actions()][1:] == [
+                    "Conditions", "Forecast", "Next hour", "Sunrise and sunset"]
+                del sub, menu
+            for key, _name in faces:
+                card.config["faces"] = {size: key}
+                for tweak in (None, night, broken):
+                    samples.weather(card)
+                    if tweak:
+                        tweak(card.data)
+                    img = QImage(card.width(), card.height(),
+                                 QImage.Format_ARGB32_Premultiplied)
+                    img.fill(QColor("#2b3440" if theme == "dark" else "#c9d2dd"))
+                    p = QPainter(img)
+                    r = card.card_rect().adjusted(PAD, PAD, -PAD, -PAD)
+                    try:
+                        card._face_painters()[key](p, r)
+                    finally:
+                        p.end()
+                    if tweak is None and key != "classic":
+                        card.render(img)
+                        img.save(os.path.join(out, f"{theme}_weather_{size}_{key}.png"))
+                        wrote += 1
+            card.deleteLater()
+    print(f"  weather faces: every face paints in both themes, at night and with "
+          f"no next hour, sun or daily data; precipitation 'None for 7d', bars "
+          f"capped; {wrote} renders in _selftest/*_weather_*_<face>.png")
 
 
 def _check_persistence(pal) -> None:

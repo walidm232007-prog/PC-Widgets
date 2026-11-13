@@ -25,7 +25,7 @@ from typing import List, Optional
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QAction, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath,
-    QPainterPathStroker, QTransform,
+    QPainterPathStroker, QPen, QRadialGradient, QTransform,
 )
 from PySide6.QtWidgets import QInputDialog
 
@@ -37,6 +37,9 @@ GEO = "https://geocoding-api.open-meteo.com/v1/search"
 
 # WMO weather codes, collapsed into the handful of shapes worth drawing.
 CLEAR, CLOUD, PARTLY, RAIN, SNOW, STORM, FOG, OVERCAST, SLEET = range(9)
+# Not weather, but drawn with the same set: the sun on the horizon with an
+# arrow, for sunrise and sunset in the hourly row and the Sunrise face.
+SUNUP, SUNDOWN = 20, 21
 _CODES = {
     0: (CLEAR, "Clear"), 1: (PARTLY, "Mainly clear"), 2: (PARTLY, "Partly cloudy"),
     3: (OVERCAST, "Overcast"), 45: (FOG, "Fog"), 48: (FOG, "Rime fog"),
@@ -355,6 +358,77 @@ def next_hour_summary(fc: Forecast) -> str:
     return f"{word} starting in {(start - 1) * 15 or 15} min"
 
 
+def _deg(t: Optional[float]) -> str:
+    """'21°'. Rounded first, so -0.3 reads 0° and never '-0°'."""
+    return "—" if t is None else f"{int(round(t))}°"
+
+
+def _clock_min(m: int) -> str:
+    return _clock(f"0000-00-00T{m // 60:02d}:{m % 60:02d}")
+
+
+def _wind(fc: Forecast) -> str:
+    return "—" if fc.wind is None else f"{int(round(fc.wind))} {fc.wind_unit}"
+
+
+def _amount(v: float, unit: str) -> str:
+    if unit == "in":
+        return f"{v:.2f} in" if v < 1 else f"{v:.1f} in"
+    return f"{v:.1f} mm" if v < 10 else f"{v:.0f} mm"
+
+
+# A day with less than this is a dry day; Apple's "None" means much the same.
+_DRY_DAY = {"mm": 0.1, "in": 0.004}
+
+
+def precip_summary(fc: Forecast) -> str:
+    """The Conditions face's precipitation line: today's amount, else the next
+    wet day's, else how long it stays dry ('None for 7d')."""
+    dry = _DRY_DAY.get(fc.rain_unit, 0.1)
+    for i, day in enumerate(fc.days):
+        if day.precip >= dry:
+            when = "today" if i == 0 else ("tomorrow" if i == 1 else day.label[:3])
+            return f"{_amount(day.precip, fc.rain_unit)} {when}"
+    return f"None for {len(fc.days)}d" if fc.days else "—"
+
+
+def _rain_level(rate_mm_h: float) -> float:
+    """Bar height, 0..1, for a rate in mm an hour. Thirds for light (up to
+    2.5 mm/h), moderate (7.6) and heavy - the Met Office's bands, and the
+    dashed lines on the chart mark the two boundaries."""
+    if rate_mm_h < 0.2:
+        return 0.0
+    if rate_mm_h <= 2.5:
+        return 0.08 + (rate_mm_h - 0.2) / 2.3 * (1 / 3 - 0.08)
+    if rate_mm_h <= 7.6:
+        return 1 / 3 + (rate_mm_h - 2.5) / 5.1 / 3
+    return min(1.0, 2 / 3 + (rate_mm_h - 7.6) / 42.4 / 3)
+
+
+def rain_levels(fc: Forecast, n: int) -> List[float]:
+    """n bar heights across the next hour.
+
+    Open-Meteo gives four quarters, not minutes, so each quarter's rate sits at
+    its middle (7.5, 22.5, 37.5 and 52.5 minutes) and the bars between are
+    drawn on the straight line joining them: a smooth chart, honest about
+    where the readings are.
+    """
+    q = fc.next_hour[1:5]
+    if len(q) < 4:
+        return [0.0] * n
+    to_mm = 25.4 if fc.rain_unit == "in" else 1.0
+    rates = [v * 4 * to_mm for v in q]          # 15-minute amount -> per hour
+    out = []
+    for i in range(n):
+        m = (i + 0.5) * 60.0 / n
+        pos = min(3.0, max(0.0, (m - 7.5) / 15.0))
+        lo = int(pos)
+        hi = min(3, lo + 1)
+        rate = rates[lo] + (rates[hi] - rates[lo]) * (pos - lo)
+        out.append(_rain_level(rate))
+    return out
+
+
 class WeatherWidget(WidgetCard):
     kind = "weather"
     customizable = True
@@ -470,7 +544,12 @@ class WeatherWidget(WidgetCard):
     def _face_painters(self) -> dict:
         """The faces that are built, by key. A face listed in FACES but not
         here stays out of the menu, and a saved choice of it draws Classic."""
-        return {"classic": self._paint_classic}
+        return {"classic": self._paint_classic,
+                **({"conditions": self._paint_conditions,
+                    "forecast": self._paint_forecast,
+                    "nexthour": self._paint_nexthour,
+                    "sun": self._paint_sun}
+                   if self.size_class == "small" else {})}
 
     def available_faces(self):
         built = self._face_painters()
@@ -567,6 +646,234 @@ class WeatherWidget(WidgetCard):
                    d.days, compact=False)
 
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    #  Apple-style faces
+    # ------------------------------------------------------------------ #
+    # Sized from Apple's Mac widgets scaled to this card: a 170 pt widget with
+    # 13 pt titles and a 40 pt temperature is a 10 pt title and a 30 pt
+    # temperature on a 168 px card. The temperature is regular weight, not
+    # bold - Apple sets the big number light and lets size carry it.
+    def _fit(self, p, s: str, size: float, weight, width: float) -> str:
+        p.setFont(self.font(size, weight))
+        return p.fontMetrics().elidedText(s, Qt.ElideRight, int(width))
+
+    def _head(self, p, r: QRectF) -> None:
+        """Place name on the left, the condition's icon on the right."""
+        d, pal = self.data, self.palette_
+        place = (d.place or "Weather").split(",")[0]
+        self.text(p, QRectF(r.left(), r.top() - 2, r.width() - 26, 18),
+                  self._fit(p, place, 10.5, QFont.DemiBold, r.width() - 26),
+                  10.5, pal.text, QFont.DemiBold)
+        self._glyph(p, QRectF(r.right() - 20, r.top() - 3, 20, 20),
+                    describe(d.code)[0], not d.is_day)
+
+    def _temp_range(self, p, r: QRectF, top: float) -> None:
+        """The big temperature, today's high and low stacked at the right."""
+        d, pal = self.data, self.palette_
+        self.text(p, QRectF(r.left() - 1, top, r.width(), 42), _deg(d.temp),
+                  30, pal.text, QFont.Normal)
+        if d.hi is not None and d.lo is not None:
+            right = Qt.AlignRight | Qt.AlignVCenter
+            self.text(p, QRectF(r.left(), top + 5, r.width(), 16),
+                      f"↑{_deg(d.hi)}", 10, pal.text, QFont.DemiBold, right)
+            self.text(p, QRectF(r.left(), top + 22, r.width(), 16),
+                      f"↓{_deg(d.lo)}", 10, pal.text_dim, QFont.DemiBold, right)
+
+    def _paint_conditions(self, p, r: QRectF) -> None:
+        """Small: temperature and range, then precipitation and wind."""
+        d, pal = self.data, self.palette_
+        self._head(p, r)
+        self._temp_range(p, r, r.top() + 14)
+        rows = (("Precipitation", precip_summary(d)),
+                ("Wind", _wind(d)))
+        y = r.bottom() - 62
+        for title, value in rows:
+            self.text(p, QRectF(r.left(), y, r.width(), 15), title, 9.5,
+                      pal.text, QFont.DemiBold)
+            self.text(p, QRectF(r.left(), y + 15, r.width(), 15),
+                      self._fit(p, value, 9.5, QFont.DemiBold, r.width()),
+                      9.5, pal.text_dim, QFont.DemiBold)
+            y += 32
+
+    def _paint_forecast(self, p, r: QRectF) -> None:
+        """Small: temperature and range over the next four days."""
+        d, pal = self.data, self.palette_
+        self._head(p, r)
+        self._temp_range(p, r, r.top() + 14)
+        days = d.days[1:5]
+        if not days:
+            return
+        top = r.top() + 58
+        rh = (r.bottom() - top) / 4
+        right = Qt.AlignRight | Qt.AlignVCenter
+        for i, day in enumerate(days):
+            y = top + i * rh
+            self.text(p, QRectF(r.left(), y, 40, rh), day.label[:3], 10,
+                      pal.text, QFont.DemiBold)
+            icon = min(16.0, rh - 2)
+            self._glyph(p, QRectF(r.left() + r.width() * 0.40 - icon / 2,
+                                  y + (rh - icon) / 2, icon, icon),
+                        describe(day.code)[0])
+            self.text(p, QRectF(r.left(), y, r.width(), rh), _deg(day.hi), 10,
+                      pal.text, QFont.DemiBold, right)
+            self.text(p, QRectF(r.left(), y, r.width() - 34, rh),
+                      f"{round(day.lo):.0f}", 10, pal.text_dim, QFont.DemiBold,
+                      right)
+
+    def _paint_nexthour(self, p, r: QRectF) -> None:
+        """Small: what the next hour holds, in words and in bars."""
+        d, pal = self.data, self.palette_
+        self._head(p, r)
+        # Keep "15 min" together when the line wraps.
+        words = next_hour_summary(d).replace(" min", " min")
+        if not words:
+            self.text(p, QRectF(r.left(), r.top() + 20, r.width(), 60),
+                      "Next-hour precipitation isn't available here", 10,
+                      pal.text_dim, QFont.DemiBold,
+                      Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap)
+            return
+        self.text(p, QRectF(r.left(), r.top() + 18, r.width(), 36), words, 10.5,
+                  pal.text, QFont.DemiBold,
+                  Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap)
+        chart = QRectF(r.left(), r.top() + 62, r.width(), r.height() - 62 - 16)
+        self._rain_bars(p, chart, 15)
+        foot = QRectF(r.left(), r.bottom() - 14, r.width(), 14)
+        self.text(p, foot, "Now", 8.5, pal.text_dim, QFont.DemiBold)
+        self.text(p, foot, "60m", 8.5, pal.text_dim, QFont.DemiBold,
+                  Qt.AlignRight | Qt.AlignVCenter)
+
+    def _rain_bars(self, p, chart: QRectF, n: int) -> None:
+        """Bars standing on the chart's floor, one per slice of the hour, under
+        the dashed lines Apple draws at the light and heavy marks."""
+        pal = self.palette_
+        dark = pal.dark
+        guide = QColor(pal.text_faint)
+        p.save()
+        p.setPen(QPen(guide, 1.0, Qt.DashLine))
+        for frac in (1 / 3, 2 / 3):
+            y = round(chart.bottom() - chart.height() * frac) + 0.5
+            p.drawLine(QPointF(chart.left(), y), QPointF(chart.right(), y))
+        p.restore()
+
+        gap = 3.0
+        bw = (chart.width() - gap * (n - 1)) / n
+        grad = QLinearGradient(0, chart.top(), 0, chart.bottom())
+        grad.setColorAt(0.0, QColor("#a8e6ff" if dark else "#1c9ddb"))
+        grad.setColorAt(1.0, QColor("#5ac8fa" if dark else "#62c4f0"))
+        p.save()
+        p.setPen(Qt.NoPen)
+        for i, level in enumerate(rain_levels(self.data, n)):
+            x = chart.left() + i * (bw + gap)
+            if level <= 0:
+                p.setBrush(guide)
+                p.drawRoundedRect(QRectF(x, chart.bottom() - 2, bw, 2), 1, 1)
+                continue
+            h = max(3.0, chart.height() * level)
+            p.setBrush(grad)
+            p.drawRoundedRect(QRectF(x, chart.bottom() - h, bw, h),
+                              min(bw / 2, 2.5), min(bw / 2, 2.5))
+        p.restore()
+
+    def _paint_sun(self, p, r: QRectF) -> None:
+        """Small: the next sunrise or sunset, the sun on its day-long arc."""
+        d, pal = self.data, self.palette_
+        rise, sett, now = d.sunrise_min, d.sunset_min, d.now_min
+        if rise is None or sett is None or now is None or sett <= rise:
+            self._head(p, r)
+            self.text(p, QRectF(r.left(), r.top() + 20, r.width(), r.height() - 20),
+                      "No sunrise or sunset here today", 10, pal.text_dim,
+                      QFont.DemiBold, Qt.AlignCenter | Qt.TextWordWrap)
+            return
+        setting = rise <= now < sett
+        title = "SUNSET" if setting else "SUNRISE"
+        when = (d.sunset_next if setting else d.sunrise_next) or \
+            _clock_min(sett if setting else rise)
+        other = (f"Sunrise: {_clock_min(rise)}" if setting
+                 else f"Sunset: {_clock_min(sett)}")
+
+        self._glyph(p, QRectF(r.left() - 1, r.top() - 3, 18, 18),
+                    SUNDOWN if setting else SUNUP)
+        self.text(p, QRectF(r.left() + 21, r.top() - 2, r.width(), 16), title,
+                  10, pal.text, QFont.DemiBold)
+        hm, _, ampm = when.partition(" ")
+        p.setFont(self.font(24, QFont.Medium))
+        tw = p.fontMetrics().horizontalAdvance(hm)
+        self.text(p, QRectF(r.left() - 1, r.top() + 14, r.width(), 34), hm, 24,
+                  pal.text, QFont.Medium)
+        self.text(p, QRectF(r.left() + tw + 1, r.top() + 23, 40, 22), ampm, 12,
+                  pal.text, QFont.DemiBold)
+
+        self._sun_arc(p, rise, sett, now, horizon=r.top() + 94)
+        self.text(p, QRectF(r.left(), r.bottom() - 15, r.width(), 15), other,
+                  9.5, pal.text, QFont.DemiBold)
+
+    def _sun_arc(self, p, rise: int, sett: int, now: int, horizon: float) -> None:
+        """The sun's height through the whole day as a wave across the card,
+        the horizon where it crosses at sunrise and sunset. A cosine centred
+        on solar noon: the real path is close to one, and it is what Apple
+        draws."""
+        pal = self.palette_
+        card = self.card_rect()
+        noon = (rise + sett) / 2.0
+        c0 = math.cos(2 * math.pi * (rise - noon) / 1440.0)
+        k = min(30.0 / max(0.05, 1 - c0), 26.0 / max(0.05, 1 + c0))
+
+        def y_at(m: float) -> float:
+            return horizon - k * (math.cos(2 * math.pi * (m - noon) / 1440.0) - c0)
+
+        def x_at(m: float) -> float:
+            return card.left() + card.width() * m / 1440.0
+
+        wave = QPainterPath(QPointF(x_at(0), y_at(0)))
+        for i in range(1, 97):
+            m = 1440.0 * i / 96
+            wave.lineTo(x_at(m), y_at(m))
+
+        p.save()
+        p.setClipPath(squircle(card, RADIUS))
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 34 if pal.dark else 18))
+        p.drawRect(QRectF(card.left(), horizon, card.width(),
+                          card.bottom() - horizon))
+        line = QColor(pal.text)
+        line.setAlphaF(0.30)
+        p.setPen(QPen(line, 1.0))
+        p.drawLine(QPointF(card.left(), horizon + 0.5),
+                   QPointF(card.right(), horizon + 0.5))
+
+        sky = QColor(pal.text)
+        sky.setAlphaF(0.55)
+        under = QColor(pal.text)
+        under.setAlphaF(0.22)
+        for colour, clip in ((sky, QRectF(card.left(), card.top(), card.width(),
+                                          horizon - card.top())),
+                             (under, QRectF(card.left(), horizon, card.width(),
+                                            card.bottom() - horizon))):
+            p.save()
+            p.setClipRect(clip, Qt.IntersectClip)
+            p.setPen(QPen(colour, 2.4, Qt.SolidLine, Qt.RoundCap))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(wave)
+            p.restore()
+
+        sx, sy = x_at(now), y_at(now)
+        up = sy <= horizon
+        glow = QRadialGradient(QPointF(sx, sy), 13)
+        glow.setColorAt(0.0, QColor(255, 255, 255, 120 if up else 40))
+        glow.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(glow)
+        p.drawEllipse(QPointF(sx, sy), 13, 13)
+        dot = QColor("#ffffff") if pal.dark or up else QColor(pal.text_dim)
+        if not up:
+            dot.setAlphaF(0.6)
+        p.setBrush(dot)
+        if not pal.dark:
+            p.setPen(QPen(QColor(0, 0, 0, 60), 1.0))
+        p.drawEllipse(QPointF(sx, sy), 5, 5)
+        p.restore()
+
     # Fraction of the card's height the photo covers. Bounded by where the
     # forecast strip starts - +74 into the padded area on a medium card, +92 on a
     # large one, and the padding is 18 - so the photo has finished dissolving
@@ -886,6 +1193,33 @@ def icon_paths(shape: int, night: bool = False):
             lines.moveTo(50 - half, y)
             lines.lineTo(50 + half, y)
         return [("cloud", cloud), ("heavy", _stroke(lines, 4.0))]
+
+    if shape in (SUNUP, SUNDOWN):
+        line = QPainterPath()
+        line.moveTo(8, 80)
+        line.lineTo(92, 80)
+        half = QPainterPath()
+        half.addEllipse(QPointF(50, 80), 15, 15)
+        above = QPainterPath()
+        above.addRect(QRectF(0, 0, 100, 80))
+        rays = QPainterPath()
+        for deg in (-160, -125, -90, -55, -20):
+            a = math.radians(deg)
+            rays.moveTo(50 + math.cos(a) * 21, 80 + math.sin(a) * 21)
+            rays.lineTo(50 + math.cos(a) * 29, 80 + math.sin(a) * 29)
+        sun = half.intersected(above).united(_stroke(rays, 4.6))
+        arrow = QPainterPath()
+        tip, tail = (8, 38) if shape == SUNUP else (38, 8)
+        arrow.moveTo(50, tail)
+        arrow.lineTo(50, tip)
+        step = 9 if shape == SUNUP else -9
+        arrow.moveTo(50 - 9, tip + step)
+        arrow.lineTo(50, tip)
+        arrow.lineTo(50 + 9, tip + step)
+        # The ray straight up would run into the arrow's tail.
+        sun = sun.subtracted(_grow(_stroke(arrow, 4.6), _GAP))
+        return [("sun", sun), ("ink", _stroke(line, 4.6)),
+                ("ink", _stroke(arrow, 4.6))]
 
     return [("cloud", _cloud())]
 
