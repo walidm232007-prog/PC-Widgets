@@ -1,9 +1,10 @@
 """A panel that rises out of the dock: what the window previews and the music
 menu are built on.
 
-The panel is opaque: the board's frosted wallpaper painted edge to edge, like
-the dock's glass, with Windows 11's own rounded corners, border and shadow
-round it. The window previews have to be - the compositor never draws a
+The panel is opaque: the board's glass painted edge to edge, like the dock's -
+liquid, bent once for where the panel comes to rest, or frosted where it
+can't bend - with Windows 11's own rounded corners, border and shadow round
+it. The window previews have to be - the compositor never draws a
 thumbnail into a layered window, and Qt makes every see-through frameless
 window layered - and the music menu matches them.
 
@@ -141,6 +142,14 @@ class DockPanel(QWidget):
     def local(self, pos):
         """A point in the window as content coordinates."""
         return pos - self._offset
+
+    def rest(self) -> QRect:
+        """Where the panel stands still: where it's rising or gliding to, or,
+        folding away, where it was. Its liquid glass is bent for that spot,
+        once, rather than at every step of the way."""
+        if self._leaving and self._from is not None:
+            return self._from[0]
+        return self._target if self._target.isValid() else self.geometry()
 
     # -- showing ---------------------------------------------------------- #
     @property
@@ -287,14 +296,36 @@ class DockPanel(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         whole = QRectF(self.rect())
-        drew = state.dock_style == "glass" and \
-            dock.board.glass.paint_into(p, whole, self.x(), self.y())
+        drew = state.dock_style == "glass" and (
+            self._paint_liquid(p, s) or dock.board.glass.paint_into(p, whole, self.x(), self.y()))
         tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 255)
         p.fillRect(whole, tint)
         p.translate(self._offset)
         p.setOpacity(self._alpha)
         self.paint_content(p, pal, s)
         p.end()
+
+    def _paint_liquid(self, p, s) -> bool:
+        """An opaque panel's glass, liquid (see lens.py): the whole panel bent
+        as one pane with Windows' corners, for where it rests and drawn where
+        that lies in the window as it unfolds or glides - one bend per place,
+        not one per frame. No lit rim: Windows draws this window's edge. False
+        if the glass can't bend, for frosted glass instead."""
+        glass = self.dock.board.glass
+        if not getattr(glass, "ready", False):
+            return False
+        rest = self.rest()
+        radius = CORNER * s
+        key = (id(glass), glass.generation, rest.x(), rest.y(), rest.width(), rest.height(), radius)
+        kept = getattr(self, "_liquid", None)
+        if kept is None or kept[0] != key:
+            img = glass.bend(rest.x(), rest.y(), rest.width(), rest.height(), radius)
+            if img is None:
+                return False
+            kept = self._liquid = (key, img)
+        p.drawImage(QRectF(rest.x() - self.x(), rest.y() - self.y(), rest.width(), rest.height()),
+                    kept[1])
+        return True
 
     def closeEvent(self, event):
         self._anim.stop()
