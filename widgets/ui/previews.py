@@ -82,7 +82,7 @@ def gallery_image(kind: str, size: str, palette, glass, opacity: float,
                   glass_tint: int, w: int, h: int) -> QImage:
     """A sample tile, composed for the gallery. Cached until the look changes."""
     key = (kind, size, palette, glass is not None, opacity, glass_tint, w, h,
-           getattr(glass, "_signature", None))
+           getattr(glass, "_signature", None), getattr(glass, "ready", False))
     hit = _gallery.get(key)
     if hit is not None:
         return hit

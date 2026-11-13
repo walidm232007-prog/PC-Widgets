@@ -244,6 +244,39 @@ License (PSF-2.0)**, licence text kept in its `dist-info/licenses/`. Required by
 
 Everything else that talks to Windows goes through `ctypes` against the OS itself.
 
+## Liquid glass maths — Glisse — MIT
+
+<https://github.com/0kzh/glisse>, Kelvin Zhang's liquid glass for the web. None
+of its code ships here: `widgets/core/lens.py` is this project's own numpy
+version of its lens and rim, with its constants. That covers the band along the
+rim that bends by the slope of a shallow dome, the error-function falloff, the
+red, green and blue split, and the lit rim. The README's
+[Liquid glass](README.md#liquid-glass) section describes what was changed for
+widget-sized glass. Its notice travels with that, here and in the installer's
+copy of this file:
+
+> MIT License
+>
+> Copyright (c) 2026 Kelvin Zhang
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
 ## Visual design
 
 The look is modelled on Apple's iOS and macOS widgets. Copying a visual idiom is
