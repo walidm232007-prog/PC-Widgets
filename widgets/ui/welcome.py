@@ -33,7 +33,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPointF,
+                            QRect, QRectF, Qt, QTimer, Signal)
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton, QGraphicsBlurEffect, QWidget
 
@@ -51,6 +52,7 @@ VEIL_IN = (0.0, 0.30)
 TITLE_IN = (0.45, 1.25)
 BUTTONS_IN = (1.45, 1.80)
 LIFT_MS = 450
+FILL_MS = 180                   # a button easing between outline and fill
 GAME_POLL_MS = 2000
 
 
@@ -112,6 +114,55 @@ def _ease(t: float, span) -> float:
     return 1.0 - (1.0 - x) ** 3
 
 
+def _mix(a: QColor, b: QColor, t: float) -> QColor:
+    return QColor(round(a.red() + (b.red() - a.red()) * t),
+                  round(a.green() + (b.green() - a.green()) * t),
+                  round(a.blue() + (b.blue() - a.blue()) * t),
+                  round(a.alpha() + (b.alpha() - a.alpha()) * t))
+
+
+class _Fade:
+    """A 0..1 value eased towards a target, for a control's hover state.
+
+    Stepped on the frame clock (core/frameclock) rather than Qt's 60 Hz
+    animation timer, so on a fast monitor the fade is drawn at its refresh
+    rate - the same reason the dock moved onto it. A fade turned round half way
+    takes half as long, so a quick pass over a button doesn't lag behind the
+    pointer. With Windows' animation effects off it jumps.
+    """
+
+    def __init__(self, widget: QWidget, ms: int, motion: bool) -> None:
+        self.widget, self.ms, self.motion = widget, ms, motion
+        self.t = 0.0
+        self.target = 0.0
+        self._tween = None
+
+    def to(self, target: float) -> None:
+        target = float(target)
+        if target == self.target and (self._tween is None or self.t == target
+                                      or self._tween.state() == QAbstractAnimation.Running):
+            return
+        self.target = target
+        if not self.motion:
+            self.t = target
+            self.widget.update()
+            return
+        if self._tween is None:
+            from ..core.frameclock import Tween
+            self._tween = Tween(self.widget)
+            self._tween.setEasingCurve(QEasingCurve.OutCubic)
+            self._tween.valueChanged.connect(self._step)
+        self._tween.stop()
+        self._tween.setStartValue(self.t)
+        self._tween.setEndValue(target)
+        self._tween.setDuration(max(1.0, self.ms * abs(target - self.t)))
+        self._tween.start()
+
+    def _step(self, v: float) -> None:
+        self.t = float(v)
+        self.widget.update()
+
+
 # --------------------------------------------------------------------------- #
 #  The words and the buttons
 # --------------------------------------------------------------------------- #
@@ -155,9 +206,14 @@ class _Title(QWidget):
 
 class _StartButton(QAbstractButton):
     """An outline that fills white under the pointer, and with keyboard focus
-    so someone using Tab can see where they are."""
+    so someone using Tab can see where they are. The fill fades in and out
+    rather than switching (FILL_MS), and the label goes from white to dark
+    with it."""
 
-    def __init__(self, scale: float, parent=None) -> None:
+    INK_OUT = QColor("#ffffff")
+    INK_IN = QColor("#1d1d1f")
+
+    def __init__(self, scale: float, motion: bool = True, parent=None) -> None:
         super().__init__(parent)
         self.scale = scale
         self.setText("Start Setup")
@@ -167,45 +223,58 @@ class _StartButton(QAbstractButton):
         self.font_ = theme.font(12.75, QFont.DemiBold)
         self.hover = False
         self.alpha = 1.0
+        self.fill = _Fade(self, FILL_MS, motion)
         fm = QFontMetricsF(self.font_)
         self.setFixedSize(round(fm.horizontalAdvance(self.text()) + 68 * scale), round(52 * scale))
-
-    def enterEvent(self, _ev) -> None:
-        self.hover = True
-        self.update()
-
-    def leaveEvent(self, _ev) -> None:
-        self.hover = False
-        self.update()
 
     def filled(self) -> bool:
         return self.hover or self.hasFocus() or self.isDown()
 
+    def _settle(self) -> None:
+        self.fill.to(1.0 if self.filled() else 0.0)
+
+    def set_hover(self, on: bool) -> None:
+        self.hover = on
+        self._settle()
+
+    def enterEvent(self, _ev) -> None:
+        self.set_hover(True)
+
+    def leaveEvent(self, _ev) -> None:
+        self.set_hover(False)
+
+    def focusInEvent(self, ev) -> None:
+        super().focusInEvent(ev)
+        self._settle()
+
+    def focusOutEvent(self, ev) -> None:
+        super().focusOutEvent(ev)
+        self._settle()
+
     def paintEvent(self, _ev) -> None:
         if self.alpha <= 0.001:
             return
+        f = self.fill.t
         p = theme.hints(QPainter(self))
         p.setOpacity(self.alpha)
         line = 2.0 * self.scale
         r = QRectF(self.rect()).adjusted(line / 2, line / 2, -line / 2, -line / 2)
         path = theme.rounded(r, r.height() / 2)
-        if self.filled():
-            p.fillPath(path, QColor("#ffffff"))
-            ink = QColor("#1d1d1f")
-        else:
-            p.setPen(QPen(QColor(255, 255, 255, 230), line))
-            p.drawPath(path)
-            ink = QColor("#ffffff")
-        p.setPen(ink)
+        if f > 0.001:
+            p.fillPath(path, QColor(255, 255, 255, round(255 * f)))
+        p.setPen(QPen(_mix(QColor(255, 255, 255, 230), QColor(255, 255, 255, 255), f), line))
+        p.drawPath(path)
+        p.setPen(_mix(self.INK_OUT, self.INK_IN, f))
         p.setFont(self.font_)
         p.drawText(r, Qt.AlignCenter, self.text())
         p.end()
 
 
 class _SkipButton(QAbstractButton):
-    """Quiet text; brighter under the pointer, underlined with focus."""
+    """Quiet text that brightens under the pointer, with the same fade as
+    Start Setup, and is underlined while it has keyboard focus."""
 
-    def __init__(self, scale: float, parent=None) -> None:
+    def __init__(self, scale: float, motion: bool = True, parent=None) -> None:
         super().__init__(parent)
         self.scale = scale
         self.setText("Skip Setup")
@@ -215,16 +284,30 @@ class _SkipButton(QAbstractButton):
         self.font_ = theme.font(11.25, QFont.Medium)
         self.hover = False
         self.alpha = 1.0
+        self.lit = _Fade(self, FILL_MS, motion)
         fm = QFontMetricsF(self.font_)
         self.setFixedSize(round(fm.horizontalAdvance(self.text()) + 32 * scale), round(36 * scale))
 
+    def _settle(self) -> None:
+        self.lit.to(1.0 if (self.hover or self.hasFocus()) else 0.0)
+
+    def set_hover(self, on: bool) -> None:
+        self.hover = on
+        self._settle()
+
     def enterEvent(self, _ev) -> None:
-        self.hover = True
-        self.update()
+        self.set_hover(True)
 
     def leaveEvent(self, _ev) -> None:
-        self.hover = False
-        self.update()
+        self.set_hover(False)
+
+    def focusInEvent(self, ev) -> None:
+        super().focusInEvent(ev)
+        self._settle()
+
+    def focusOutEvent(self, ev) -> None:
+        super().focusOutEvent(ev)
+        self._settle()
 
     def paintEvent(self, _ev) -> None:
         if self.alpha <= 0.001:
@@ -232,7 +315,7 @@ class _SkipButton(QAbstractButton):
         p = theme.hints(QPainter(self))
         p.setOpacity(self.alpha)
         p.setFont(self.font_)
-        ink = QColor(255, 255, 255, 255 if (self.hover or self.hasFocus()) else 204)
+        ink = QColor(255, 255, 255, round(204 + 51 * self.lit.t))
         p.setPen(ink)
         p.drawText(QRectF(self.rect()), Qt.AlignCenter, self.text())
         if self.hasFocus():
@@ -271,8 +354,8 @@ class Stage(QWidget):
         if main:
             self.setAccessibleName("Welcome to PC Widgets")
             self.title = _Title(self.scale, self)
-            self.start_btn = _StartButton(self.scale, self)
-            self.skip_btn = _SkipButton(self.scale, self)
+            self.start_btn = _StartButton(self.scale, welcome.motion, self)
+            self.skip_btn = _SkipButton(self.scale, welcome.motion, self)
             self.start_btn.clicked.connect(welcome.start)
             self.skip_btn.clicked.connect(welcome.skip)
             # Keyboard focus starts on the screen, not the button: a focused
