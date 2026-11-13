@@ -462,10 +462,10 @@ The cards are drawn to sit next to Apple's rather than Windows':
 
 The cards are genuinely see-through: a blurred copy of the desktop shows through
 each one, tinted, clipped to the squircle. **Frosted glass** and **Glass
-strength** (Clearer / Balanced / Frostier) are in the tray menu. The cards
-themselves are now [liquid glass](#liquid-glass), built on the same copy of the
-desktop. Frosted glass is what the Glass Dock and the app window's sidebar use,
-and what a card falls back to.
+strength** (Clearer / Balanced / Frostier) are in the tray menu. The cards and
+the Glass Dock are now [liquid glass](#liquid-glass), built on the same copy of
+the desktop. Frosted glass is what the app window's sidebar uses, and what a
+card or the dock falls back to.
 
 Windows offers two materials for this — Mica and Acrylic — and neither works
 here. Both are applied by DWM to the whole *window*, and the window is
@@ -552,8 +552,10 @@ The clear copy is built on a thread after each wallpaper change, taking about
 0.4 s here, and until it lands a card shows frosted glass. A card also stays
 frosted without numpy (a checkout with only PySide6).
 
-**Not liquid yet:** the Glass Dock, its menus and the app window's sidebar are
-still frosted.
+The Glass Dock, its music menu and its window previews are liquid glass too.
+Each is bent once for where it comes to rest, and its slide, rise or neon
+redraws that without bending it again. GLASS-DOCK.md has how. **Not liquid
+yet:** the app window's sidebar is still frosted.
 
 ## Layers
 

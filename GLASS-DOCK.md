@@ -11,10 +11,26 @@ is in it. App icons are 32 px - the size Windows draws them, so they come out
 sharp rather than resampled. The first version drew them at about 23 px through
 a scaled painter with no smoothing, which is why they looked jagged.
 
-Frosted glass is the board's blurred wallpaper under a tint, with a sheen on
-its upper half and a hairline lit along the top edge. Solid colour is matte:
-one flat colour and an even hairline. It kept the sheen and the lit edge at
-first, and still read as glass.
+Glass is liquid glass, the same as the cards' (see the README's Liquid glass
+section): the wallpaper clear under a tint, bent along the rim, with a thin
+rim lit from the top left. Where it can't bend, before the board's clear copy
+of the desktop is built or without numpy, it is frosted: the blurred
+wallpaper under a tint, with a sheen on its upper half and a hairline lit
+along the top edge. Solid colour is matte: one flat colour and an even
+hairline. It kept the sheen and the lit edge at first, and still read as glass.
+
+The dock bends its glass once for where it rests and keeps it, so a hover, a
+cover fade or the neon redraws it without bending it again (1.5 ms for the
+bend, on a Ryzen 5 5600G). Sliding down below a maximised window and back up,
+it uses the bend from where it rests up, as the frosted glass was sampled
+there for the whole slide: the window moves, and nothing is redrawn. While a
+new app's slot opens, the capsule is a new width every frame. Then it is bent
+the way a card is while being dragged: on a 4 px grid, at its width rounded up
+to 16 px and drawn into it, about 0.5 ms a frame over a handful of widths.
+Its rim is built from the two ends of a short capsule's rim with one column
+stretched between them, which is exact, since a straight edge is lit the
+same all along. Working out a rim for every frame's width cost 5 ms, a whole
+200 Hz frame. Once the row settles, the dock is bent in full again.
 
 ## Neon outline
 
@@ -86,9 +102,12 @@ app at once; moving away lets it go. The pictures are the compositor's own
 live thumbnails (`DwmRegisterThumbnail`), video and all - nothing is captured
 or copied. The compositor never draws one into a layered window, and Qt makes
 every see-through frameless window layered (it registers fine, then shows
-nothing), so the panel is opaque: the board's frosted wallpaper edge to edge,
-with Windows 11's own rounded corners, border and shadow. Apps with no window
-open keep their name as a tooltip.
+nothing), so the panel is opaque: the board's glass edge to edge, with Windows
+11's own rounded corners, border and shadow. The glass is liquid, the whole
+panel bent as one pane with Windows' corners for where it comes to rest, and
+drawn there as the panel unfolds or glides, so it is bent once per place, not
+once per frame. It has no lit rim: Windows draws this window's edge. Apps with
+no window open keep their name as a tooltip.
 
 Being opaque, the panel can't fade as a whole, so it rises: it unfolds upward
 out of the dock with its bottom edge still, while the titles fade in and the
@@ -127,9 +146,10 @@ covers, already dimmed behind its glass, hide but the dock's would not. The
 music menu shares the dock's fade, so the two change together.
 
 The music menu is the dock's own capsule: the same squircle corners, shadow,
-frosted glass or matte fill, sheen and hairline, and the same neon when the
-outline is on, all drawn by the dock's code. It is see-through like the dock,
-so it fades in as it slides up above the music, and out as it sinks. The first
+liquid glass and lit rim or matte fill, and the same neon when the outline is
+on, all drawn by the dock's code. It is see-through like the dock, so it fades
+in as it slides up above the music, and out as it sinks. Its glass is bent once
+for where it comes to rest, as the dock's is, not at every step of the rise. The first
 version was an opaque panel like the window previews, with Windows' smaller,
 rounder corners, and it didn't match; only the previews need to be opaque. It
 is compact - 264 by about 140 px at 100% - with a 48 px cover, the title,

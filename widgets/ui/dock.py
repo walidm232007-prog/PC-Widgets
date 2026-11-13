@@ -318,10 +318,58 @@ def neon_bars(colours, motion, t, n=BARS):
     return out
 
 
-def paint_material(p, cap, s, pal, board, tint, area, x, y):
-    """The dock's capsule - its shadow, frosted glass or matte fill, sheen and
-    hairline - in a window whose whole rect is area, at x, y on the screen.
-    The music menu draws itself with this too, so the two match exactly."""
+def _paint_liquid(p, cap, radius, glass, area, x, y, owner, coarse):
+    """The capsule's slice of desktop through liquid glass (lens.py), bent for
+    where it stands and kept on ``owner`` until that, its size or the wallpaper
+    changes - so a hover, a cover fade or a slide just draws it again. Coarse:
+    on the grid a card uses while it's dragged, for a capsule changing size at
+    every frame. False if it can't bend: frosted glass instead."""
+    if owner is None or not getattr(glass, "ready", False):
+        return False
+    from ..core.card import DRAG_STEP
+    left, top = round(cap.x()), round(cap.y())
+    w, h = round(cap.width()), round(cap.height())
+    sx, sy = round(x - area.left()) + left, round(y - area.top()) + top
+    # Growing, it's bent for its width rounded up to 16 px and drawn squeezed
+    # into the capsule, under 2% narrower: a handful of sizes per animation,
+    # each worked out once, instead of a new one at every frame.
+    bw = -(-w // 16) * 16 if coarse else w
+    key = (id(glass), glass.generation, sx, sy, bw, h, radius, coarse)
+    kept = getattr(owner, "_liquid", None)
+    if kept is None or kept[0] != key:
+        img = glass.bend(sx, sy, bw, h, radius, step=DRAG_STEP if coarse else None)
+        if img is None:
+            return False
+        kept = owner._liquid = (key, img)
+    p.drawImage(QRectF(left, top, w, h), kept[1])
+    return True
+
+
+def _paint_rim(p, cap, radius, dark, glass, sliced):
+    """The lit rim round the capsule. Sliced, while it changes width: its two
+    ends from the rim of a short capsule, the straight run between stretched
+    from one column of it - exact, since a straight edge is lit the same all
+    along, and it saves working out a rim for every frame's width."""
+    left, top = round(cap.x()), round(cap.y())
+    w, h = round(cap.width()), round(cap.height())
+    end = math.ceil(min(radius * 1.5286, h / 2)) + 4      # past each corner's curve
+    if not sliced or w <= 2 * end + 2:
+        p.drawImage(QPointF(left, top), glass.rim(w, h, radius, dark))
+        return
+    base = glass.rim(2 * end + 2, h, radius, dark)
+    p.drawImage(QRectF(left, top, end, h), base, QRectF(0, 0, end, h))
+    p.drawImage(QRectF(left + end, top, w - 2 * end, h), base, QRectF(end, 0, 1, h))
+    p.drawImage(QRectF(left + w - end, top, end, h), base, QRectF(end + 2, 0, end, h))
+
+
+def paint_material(p, cap, s, pal, board, tint, area, x, y, owner=None, coarse=False):
+    """The dock's capsule - its shadow, glass or matte fill, and its light - in
+    a window whose whole rect is area, at x, y on the screen. The music menu
+    draws itself with this too, so the two match exactly.
+
+    The glass is liquid (see lens.py), kept on ``owner``, when the board's
+    glass can bend: a lit rim, like the cards'. Otherwise frosted, with a sheen
+    and a hairline. ``coarse`` while the capsule changes size every frame."""
     state = board.state
     radius = RADIUS * s
     paint_shadow(p, cap, radius, blur=round(14 * s), alpha=80 if pal.dark else 50, dy=3 * s)
@@ -329,11 +377,13 @@ def paint_material(p, cap, s, pal, board, tint, area, x, y):
     p.save()
     p.setClipPath(path)
     glass = state.dock_style == "glass"
+    liquid = False
     if glass:
-        drew = board.glass.paint_into(p, area, x, y)
+        liquid = _paint_liquid(p, cap, radius, board.glass, area, x, y, owner, coarse)
+        drew = liquid or board.glass.paint_into(p, area, x, y)
         tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 235)
     p.fillPath(path, tint)
-    if glass:
+    if glass and not liquid:
         # Light from above: a sheen on the upper half of the glass.
         sheen = QLinearGradient(0, cap.top(), 0, cap.center().y())
         sheen.setColorAt(0.0, QColor(255, 255, 255, 22 if pal.dark else 90))
@@ -341,6 +391,10 @@ def paint_material(p, cap, s, pal, board, tint, area, x, y):
         p.fillPath(path, sheen)
     p.restore()
     p.setBrush(Qt.NoBrush)
+    if liquid:
+        # The edge catching a light from the top left, as on the cards.
+        _paint_rim(p, cap, radius, pal.dark, board.glass, sliced=coarse)
+        return
     if glass:
         # A hairline that catches that light along the top edge.
         edge = QLinearGradient(0, cap.top(), 0, cap.bottom())
@@ -1382,8 +1436,12 @@ class GlassDock(QWidget):
 
     def _paint_material(self, p, tint):
         x, y = self._glass_at or (self.x(), self.y())
+        # While the row grows or shrinks the capsule is a new width every frame,
+        # so its glass is bent on the coarse grid until it settles (_grown).
+        growing = self._grow.state() == QAbstractAnimation.Running
         paint_material(p, self._capsule, self._s, self._pal, self.board, tint,
-                       QRectF(0, 0, self.width(), self.height()), x, y)
+                       QRectF(0, 0, self.width(), self.height()), x, y,
+                       owner=self, coarse=growing)
 
     def _plate(self, p, ident, rect, active=False, radius=10):
         dark = self._pal.dark

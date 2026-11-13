@@ -240,7 +240,11 @@ class MusicPanel(DockPanel):
         dock, state = self.dock, self.dock.board.state
         tint = dock._palette()[1]
         window = QRectF(-self._offset.x(), -self._offset.y(), self.width(), self.height())
-        paint_material(p, self._capsule, s, pal, dock.board, tint, window, self.x(), self.y())
+        # Its glass from where it rests, not from each step of its rise, as the
+        # dock's comes from where it rests up: bent once, not every frame.
+        rest = self.rest()
+        paint_material(p, self._capsule, s, pal, dock.board, tint, window, rest.x(), rest.y(),
+                       owner=self)
         if state.dock_neon:
             p.drawImage(0, 0, self._neon.frame(
                 self._content, self._capsule, RADIUS * s, s, state.dock_neon_colors,

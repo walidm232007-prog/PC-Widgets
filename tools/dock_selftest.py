@@ -46,6 +46,9 @@ class TestBoard(QObject):
         self.palette = palette.build()
         self.glass = GlassBackdrop()
         self.glass.refresh()
+        # Liquid glass, as the board shows once its clear copy lands - waited
+        # for, so every check draws the same glass rather than whichever won.
+        self.glass.wait_clear()
         self.dock = None
 
     def set_dock(self, key, value):
@@ -338,6 +341,100 @@ def check_row_animation(app, out, board):
           f"and settling exactly; closing ones can't be clicked ({ms:.1f} ms a frame)")
 
 
+def count_bends(glass):
+    """Wraps the glass's bend to record each one: (width, height, step)."""
+    bends, real = [], glass.bend
+
+    def counted(sx, sy, w, h, radius, step=None):
+        bends.append((w, h, step))
+        return real(sx, sy, w, h, radius, step)
+    glass.bend = counted
+    return bends
+
+
+def check_liquid(app, out):
+    """The dock's glass is liquid, as the cards' is: bent once for where it
+    rests and drawn again from that - a hover, a redraw - with its lit rim.
+    While the row grows it's bent on the coarse grid, a handful of widths
+    rounded up, and in full once it settles. Offscreen; renders saved."""
+    from dataclasses import replace
+    b = TestBoard()
+    if not b.glass.ready:
+        print("PASS: liquid glass skipped - no clear copy of the desktop (no numpy?)")
+        return
+    from widgets.core import lens
+    b.palette = palette.build("dark")
+    b.state.dock_style = "glass"
+    bends = count_bends(b.glass)
+    dock = GlassDock(b, preview=True)
+    dock.setAttribute(Qt.WA_DontShowOnScreen)
+    snap = fake_snapshot()
+    dock._snap = snap
+    dock._np = media.NowPlaying()
+    dock.sync()
+    dock.resize(1100, 64)
+    dock.move(420, 700)
+    bends.clear()
+    dock.show()
+    pump(app, 0.05)
+    for theme in ("dark", "light"):
+        b.palette = palette.build(theme)
+        dock.invalidate()
+        assert dock.grab().save(str(out / f"liquid-{theme}.png"))
+    assert dock._liquid is not None and dock._liquid[0][1] == b.glass.generation, \
+        "the dock's glass isn't liquid"
+    cap = dock._capsule
+    assert len(bends) == 1 and bends[0] == (round(cap.width()), round(cap.height()), None), \
+        f"two looks at the same spot bent it {len(bends)} times: {bends}"
+    for _ in range(3):
+        dock._hover = "start"
+        dock.invalidate()
+        dock.grab()
+        dock._hover = ""
+    assert len(bends) == 1, f"a hover bent the glass again ({len(bends)} bends)"
+
+    # The row grows: coarse and rounded up while it moves, in full when it stops.
+    dock._animate_rows = True
+    bends.clear()
+    dock._snap = replace(snap, tasks=snap.tasks + [shell.Task(300, "New app", r"C:\Apps\new.exe")])
+    dock._rebuild()
+    dock._relayout()
+    dock.invalidate()
+    end = time.monotonic() + dockmod.ROW_MS / 1000 + 0.25
+    while time.monotonic() < end:
+        app.processEvents()
+        dock.grab()
+        time.sleep(0.005)
+    growing = [bd for bd in bends[:-1]]
+    cap = dock._capsule
+    assert growing and all(step for _w, _h, step in growing), \
+        f"the growing capsule was bent in full: {growing}"
+    # It stays centred as it grows, so it moves every frame and is bent again -
+    # cheaply, on the coarse grid - but for only a few widths, each of whose
+    # field is worked out once.
+    widths = {w for w, _h, _s in growing}
+    assert all(w % 16 == 0 for w in widths), "a growing width wasn't rounded up"
+    assert len(widths) <= 6, f"{len(widths)} widths worked out while the row grew"
+    assert bends[-1] == (round(cap.width()), round(cap.height()), None), \
+        f"it wasn't bent in full when it settled: {bends[-1]}"
+    dock.close()
+    from widgets.core.card import DRAG_STEP
+
+    def best(step):
+        ms = []
+        for _ in range(7):
+            t0 = time.perf_counter()
+            lens.bend(b.glass.clear, 2, b.glass.clear_origin, 420, 700, round(cap.width()),
+                      round(cap.height()), dockmod.RADIUS, step)
+            ms.append((time.perf_counter() - t0) * 1000)
+        return min(ms)
+    full, coarse = best(lens.STEP), best(DRAG_STEP)
+    assert coarse < 3.0, f"a coarse bend of the dock takes {coarse:.1f} ms, too long for 200 Hz"
+    print(f"PASS: the dock's glass is liquid with its lit rim, bent once where it rests "
+          f"({full:.1f} ms) and not again for a hover; while the row grew, {len(growing)} coarse "
+          f"bends ({coarse:.1f} ms each) over {len(widths)} widths, then one in full")
+
+
 def check_previews(app, out):
     """Hovering an app with windows raises live previews of them after a
     moment, one card each, laid out without overlap above its button; moving
@@ -380,6 +477,7 @@ def check_previews(app, out):
             assert dock._tip(pin_hit), "a pinned app with no windows lost its tooltip"
 
             dock._hover = app_hit[0]
+            bends = count_bends(b.glass)
             dock._hover_previews(app_hit)
             pump(app, dockmod.PEEK_MS / 1000 * 0.5)
             assert not dock._previews_up(), "previews rose before the hover delay"
@@ -397,6 +495,14 @@ def check_previews(app, out):
                 and 0.0 < mid_alpha < 1.0, f"no rise: {mid} -> {final}, alpha {mid_alpha:.2f}"
             pump(app, dp.SHOW_MS / 1000 + 0.1)
             assert panel.geometry() == final and panel._alpha == 1.0, "did not settle"
+            if b.glass.ready:
+                # Liquid, the whole panel bent once for where it ends up and
+                # drawn there as it unfolds - not once per frame of growing.
+                mine = [bd for bd in bends if bd[:2] == (final.width(), final.height())]
+                others = [bd for bd in bends if bd[:2] != (final.width(), final.height())
+                          and bd[1] == final.height()]
+                assert panel._liquid is not None and len(mine) == 1 and not others, \
+                    f"the previews' glass was bent {len(mine)} times as it rose: {bends}"
             ex = shell.u.GetWindowLongPtrW(int(panel.winId()), -20)
             assert not ex & 0x80000, "the panel is layered: the compositor draws no thumbnails there"
             assert len(panel.cards) == 2 and all(c.picture is not None for c in panel.cards), \
@@ -545,6 +651,7 @@ def check_music_menu(app, out):
             b.set_dock("enabled", True)
             dock._np, dock._live = playing, (playing, time.monotonic())
             music = next(item for item in dock._items if item[0] == "music")
+            bends = count_bends(b.glass)
             dock._click(*music)
             panel = dock._music
             assert panel is not None and panel.up, "the click did not open the menu"
@@ -559,6 +666,13 @@ def check_music_menu(app, out):
                 "the menu did not slide up fading in"
             pump(app, dpn.SHOW_MS / 1000 + 0.1)
             assert panel.geometry() == panel._target and panel._alpha == 1.0
+            if b.glass.ready:
+                # Liquid like the dock, its glass bent once for where it rests,
+                # not at every step of the rise.
+                size = (round(panel._capsule.width()), round(panel._capsule.height()))
+                mine = [bd for bd in bends if bd[:2] == size]
+                assert panel._liquid is not None and len(mine) == 1, \
+                    f"the menu's glass was bent {len(mine)} times as it rose"
             cap = panel.capsule_on_screen()
             assert cap.bottom() < dock.y() + dock._capsule.top(), "not above the dock"
             assert abs(cap.center().x() - (dock.x() + music[1].center().x())) <= 2 or \
@@ -1304,6 +1418,7 @@ def main():
     check_neon(out, board)
     check_neon_bars(out, board)
     check_row_animation(app, out, board)
+    check_liquid(app, out)
     check_cover_fade(app, out, board)
     check_rows(board)
     check_native()
