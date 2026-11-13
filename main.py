@@ -139,6 +139,7 @@ def selftest() -> int:
 
     _contact_sheet(out, made)
     _check_typeface()
+    _check_weather_data(pal_mod.build("dark", "blue"))
     _check_placement(pal_mod.build("dark", "blue"))
     _check_persistence(pal_mod.build("dark", "blue"))
     _check_ticks(pal_mod.build("dark", "blue"))
@@ -1893,6 +1894,94 @@ def _check_placement(pal) -> None:
     print(f"  placement: free drop keeps {off_grid}; "
           f"snap mode moves it to {(card.x(), card.y())}")
     card.deleteLater()
+
+
+def _check_weather_data(pal) -> None:
+    """What the weather faces are drawn from, read from a canned response.
+
+    The hourly row, the sun and the next hour are all worked out on the
+    forecast place's own clock, so these are checked as strings and minutes
+    rather than against the PC's time; and one missing series must not cost
+    the card its whole forecast.
+    """
+    import copy
+    import json
+    from widgets.core import samples
+    from widgets.tiles import weather as w
+
+    raw = samples.weather_response()
+    fc = w.parse(raw, "London, GB", "C")
+    labels = [h.label for h in fc.hours]
+    assert labels[:3] == ["3 PM", "4 PM", "4:13 PM"], labels[:4]
+    assert fc.hours[2].event == w.SUNSET and not fc.hours[2].is_day
+    rise = [h for h in fc.hours if h.event == w.SUNRISE]
+    assert [h.label for h in rise] == ["7:13 AM"], rise
+    # 24 hours, the sunset today and tomorrow's sunrise; tomorrow's sunset
+    # falls after the last hour and stays out.
+    assert len(fc.hours) == 26 and sum(1 for h in fc.hours if not h.event) == 24
+    assert (fc.now_min, fc.sunrise_min, fc.sunset_min) == (930, 432, 973)
+    assert (fc.sunrise_next, fc.sunset_next) == ("7:13 AM", "4:13 PM")
+    assert (fc.hi, fc.lo, fc.wind, fc.wind_unit) == (22, 14, 14.0, "km/h")
+    assert fc.days[1].precip == 4.2 and fc.days[1].pop == 90
+    assert fc.next_hour == [0, 0, 0.1, 0.3, 0.4], fc.next_hour
+
+    def said(vals, code=2, unit="mm"):
+        f = w.Forecast(code=code, next_hour=vals, rain_unit=unit)
+        return w.next_hour_summary(f)
+
+    assert said(fc.next_hour) == "Rain starting in 15 min"
+    assert said([0, 0, 0, 0, 0.3]) == "Rain starting in 45 min"
+    assert said([0.2, 0.3, 0.3, 0.2, 0.1]) == "Rain for the next hour"
+    assert said([0.2, 0.3, 0, 0, 0]) == "Rain stopping in 15 min"
+    assert said([0.2, 0.3, 0.2, 0.01, 0]) == "Rain stopping in 30 min"
+    assert said([0, 0.01, 0.02, 0, 0]) == "No rain for the next hour"
+    assert said([0.2] * 5, code=73) == "Snow for the next hour"
+    assert said([0, 0.004, 0.004, 0.004, 0.004], unit="in") == "Rain for the next hour"
+    assert said([]) == ""
+
+    q = w.query(1, 2, "F")
+    assert (q["temperature_unit"], q["wind_speed_unit"],
+            q["precipitation_unit"]) == ("fahrenheit", "mph", "inch")
+    assert w.parse(raw, "", "F").wind_unit == "mph"
+
+    # A series missing, or no current time at all, leaves the rest standing.
+    thin = copy.deepcopy(raw)
+    del thin["hourly"]["weather_code"], thin["minutely_15"], thin["daily"]["sunset"]
+    got = w.parse(thin, "x")
+    assert len(got.hours) == 25 and got.next_hour == [] and got.sunset_min is None
+    assert len(got.days) == 7 and got.temp == 21.0
+    del thin["current"]["time"]
+    got = w.parse(thin, "x")
+    assert got.hours == [] and got.temp == 21.0 and len(got.days) == 7
+
+    # The face: remembered per size, a face that isn't built draws Classic,
+    # and the choice is plain JSON in the card's config.
+    card = w.WeatherWidget(pal, "small", {})
+    assert card.face == "classic" and card.available_faces() == [("classic", "Classic")]
+    card.set_face("conditions")                  # not built yet: ignored
+    assert "faces" not in card.config
+    card.config["faces"] = {"small": "conditions"}
+    assert card.face == "classic", "an unbuilt face was drawn"
+    built = {"classic": card._paint_classic, "conditions": card._paint_classic,
+             "hourly": card._paint_classic}
+    card._face_painters = lambda: built
+    saved = []
+    card.changed.connect(lambda: saved.append(1))
+    card.set_face("conditions")
+    assert card.face == "conditions" and not saved, "re-choosing saved again"
+    card.set_size_class("medium")
+    assert card.face == "classic"
+    card.set_face("hourly")
+    assert card.config["faces"] == {"small": "conditions", "medium": "hourly"}
+    assert saved, "choosing a face did not save"
+    card.set_size_class("small")
+    assert card.face == "conditions", "the small face was forgotten"
+    json.dumps(card.config)
+    card.deleteLater()
+    print("  weather data: hourly row with sunset 4:13 PM and sunrise 7:13 AM in "
+          "place, sun on the place's clock, next hour 'Rain starting in 15 min', "
+          "°F brings mph and inches, missing series leave the rest; faces kept "
+          "per size, unbuilt ones draw Classic")
 
 
 def _check_persistence(pal) -> None:

@@ -22,9 +22,10 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
+    QAction, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath,
+    QPainterPathStroker, QTransform,
 )
 from PySide6.QtWidgets import QInputDialog
 
@@ -35,13 +36,14 @@ API = "https://api.open-meteo.com/v1/forecast"
 GEO = "https://geocoding-api.open-meteo.com/v1/search"
 
 # WMO weather codes, collapsed into the handful of shapes worth drawing.
-CLEAR, CLOUD, PARTLY, RAIN, SNOW, STORM, FOG = range(7)
+CLEAR, CLOUD, PARTLY, RAIN, SNOW, STORM, FOG, OVERCAST, SLEET = range(9)
 _CODES = {
     0: (CLEAR, "Clear"), 1: (PARTLY, "Mainly clear"), 2: (PARTLY, "Partly cloudy"),
-    3: (CLOUD, "Overcast"), 45: (FOG, "Fog"), 48: (FOG, "Rime fog"),
+    3: (OVERCAST, "Overcast"), 45: (FOG, "Fog"), 48: (FOG, "Rime fog"),
     51: (RAIN, "Light drizzle"), 53: (RAIN, "Drizzle"), 55: (RAIN, "Heavy drizzle"),
+    56: (SLEET, "Freezing drizzle"), 57: (SLEET, "Freezing drizzle"),
     61: (RAIN, "Light rain"), 63: (RAIN, "Rain"), 65: (RAIN, "Heavy rain"),
-    66: (RAIN, "Freezing rain"), 67: (RAIN, "Freezing rain"),
+    66: (SLEET, "Freezing rain"), 67: (SLEET, "Freezing rain"),
     71: (SNOW, "Light snow"), 73: (SNOW, "Snow"), 75: (SNOW, "Heavy snow"),
     77: (SNOW, "Snow grains"), 80: (RAIN, "Showers"), 81: (RAIN, "Showers"),
     82: (RAIN, "Violent showers"), 85: (SNOW, "Snow showers"),
@@ -66,7 +68,7 @@ def describe(code: int):
 # would be paying that over and over for a picture that never changes.
 SHAPE_FILES = {
     CLEAR: "clear", PARTLY: "partly", CLOUD: "cloud", RAIN: "rain",
-    SNOW: "snow", STORM: "storm", FOG: "fog",
+    SNOW: "snow", STORM: "storm", FOG: "fog", OVERCAST: "cloud", SLEET: "rain",
 }
 BACKDROP_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -102,6 +104,27 @@ class Day:
     code: int
     hi: float
     lo: float
+    precip: float = 0.0         # the day's total, in the forecast's rain unit
+    pop: int = 0                # highest chance of precipitation, percent
+
+
+SUNRISE, SUNSET = "sunrise", "sunset"
+
+
+@dataclass
+class Hour:
+    """One slot of the hourly row: an hour, or a sunrise or sunset between two.
+
+    Apple's widgets put the sun event in the row at its own time ("8:14 PM",
+    with the sunset symbol) and drop the last hour to keep the count, so the
+    timeline carries events as slots of their own rather than as a side list.
+    """
+    label: str                  # "10 AM", or "8:14 PM" for a sun event
+    code: int
+    temp: float
+    is_day: bool = True
+    pop: int = 0
+    event: str = ""             # "", SUNRISE or SUNSET
 
 
 @dataclass
@@ -110,9 +133,30 @@ class Forecast:
     temp: Optional[float] = None
     feels: Optional[float] = None
     code: int = 3
+    is_day: bool = True
     days: List[Day] = field(default_factory=list)
     error: str = ""
     fetched: float = 0.0
+    # Today's range, for "H:48° L:39°".
+    hi: Optional[float] = None
+    lo: Optional[float] = None
+    wind: Optional[float] = None
+    wind_unit: str = "km/h"
+    rain_unit: str = "mm"
+    # The next 24 hours from the current one, sun events included.
+    hours: List[Hour] = field(default_factory=list)
+    # Precipitation over the next hour in 15-minute steps: five readings, at
+    # now, +15, +30, +45 and +60 minutes, each the amount that fell in the 15
+    # minutes before it. Empty when the service sent none.
+    next_hour: List[float] = field(default_factory=list)
+    # Today's sun, as minutes after local midnight at the forecast's place,
+    # with "now" on the same clock, so a face can place the sun on its arc
+    # without knowing the place's time zone.
+    now_min: Optional[int] = None
+    sunrise_min: Optional[int] = None
+    sunset_min: Optional[int] = None
+    sunrise_next: str = ""      # next sunrise from now, "6:29 AM"
+    sunset_next: str = ""       # next sunset from now, "7:54 PM"
 
 
 def _get(url: str, params: dict) -> dict:
@@ -134,32 +178,181 @@ def geocode(name: str):
     return (float(h["latitude"]), float(h["longitude"]), label)
 
 
-def fetch(lat: float, lon: float, place: str, unit: str) -> Forecast:
-    data = _get(API, {
+def query(lat: float, lon: float, unit: str) -> dict:
+    """The Open-Meteo request, apart from the network call, so it can be read
+    and tested. Imperial temperatures bring imperial wind and rain with them:
+    nobody who wants °F wants km/h."""
+    imperial = unit == "F"
+    return {
         "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,apparent_temperature,weather_code",
-        "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+        "current": "temperature_2m,apparent_temperature,weather_code,is_day,"
+                   "wind_speed_10m",
+        "hourly": "temperature_2m,weather_code,is_day,precipitation_probability",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,sunrise,"
+                 "sunset,precipitation_sum,precipitation_probability_max",
+        "minutely_15": "precipitation",
         "timezone": "auto", "forecast_days": 7,
-        "temperature_unit": "fahrenheit" if unit == "F" else "celsius",
-    })
+        # Today's 15-minute steps up to an hour from now; past ones are
+        # skipped by index, so a few spare cover a fetch late in the quarter.
+        "past_minutely_15": 1, "forecast_minutely_15": 6,
+        "forecast_hours": 26,
+        "temperature_unit": "fahrenheit" if imperial else "celsius",
+        "wind_speed_unit": "mph" if imperial else "kmh",
+        "precipitation_unit": "inch" if imperial else "mm",
+    }
+
+
+def fetch(lat: float, lon: float, place: str, unit: str) -> Forecast:
+    return parse(_get(API, query(lat, lon, unit)), place, unit)
+
+
+def _clock(iso: str) -> str:
+    """'2026-11-13T20:14' -> '8:14 PM'; on the hour, '8 PM'."""
+    h, m = int(iso[11:13]), int(iso[14:16])
+    ampm = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    return f"{h12} {ampm}" if m == 0 else f"{h12}:{m:02d} {ampm}"
+
+
+def _minutes(iso: str) -> int:
+    return int(iso[11:13]) * 60 + int(iso[14:16])
+
+
+def _list(block: dict, key: str, n: int, default=0):
+    """block[key] padded to n with default, so one missing series can't take
+    the whole forecast down with an IndexError."""
+    got = list(block.get(key) or [])
+    return [default if v is None else v for v in got[:n]] + [default] * (n - len(got))
+
+
+def parse(data: dict, place: str, unit: str = "C") -> Forecast:
+    """An Open-Meteo response as a Forecast.
+
+    All times in the response are local to the forecast's place (timezone
+    "auto"), and so is the "current" block's time, so everything here is
+    worked out on that one clock and never touches the PC's time zone - the
+    widget can show a town eight hours away without the sun setting at the
+    wrong hour.
+    """
     cur = data.get("current", {})
     daily = data.get("daily", {})
+    now = cur.get("time") or ""
+    nd = len(daily.get("time") or [])
+
+    codes = _list(daily, "weather_code", nd, 3)
+    highs = _list(daily, "temperature_2m_max", nd, 0.0)
+    lows = _list(daily, "temperature_2m_min", nd, 0.0)
+    sums = _list(daily, "precipitation_sum", nd, 0.0)
+    pops = _list(daily, "precipitation_probability_max", nd, 0)
     days: List[Day] = []
-    for i, iso in enumerate(daily.get("time", [])[:7]):
+    for i, iso in enumerate((daily.get("time") or [])[:7]):
         # Seven columns is too narrow for "Today"/"Tomorrow", and truncating
         # them gives "Tod". Weekday abbreviations read fine in a row, and the
         # first column is today by definition.
         label = time.strftime("%a", time.strptime(iso, "%Y-%m-%d"))
-        days.append(Day(label, daily["weather_code"][i],
-                        daily["temperature_2m_max"][i],
-                        daily["temperature_2m_min"][i]))
-    return Forecast(
+        days.append(Day(label, codes[i], highs[i], lows[i],
+                        float(sums[i]), int(pops[i])))
+
+    imperial = unit == "F"
+    fc = Forecast(
         place=place,
         temp=cur.get("temperature_2m"),
         feels=cur.get("apparent_temperature"),
         code=cur.get("weather_code", 3),
+        is_day=bool(cur.get("is_day", 1)),
         days=days, fetched=time.time(),
+        hi=days[0].hi if days else None,
+        lo=days[0].lo if days else None,
+        wind=cur.get("wind_speed_10m"),
+        wind_unit="mph" if imperial else "km/h",
+        rain_unit="in" if imperial else "mm",
     )
+    if not now:
+        return fc
+
+    rises = [t for t in (daily.get("sunrise") or []) if t]
+    sets = [t for t in (daily.get("sunset") or []) if t]
+    fc.now_min = _minutes(now)
+    if rises and rises[0][:10] == now[:10]:
+        fc.sunrise_min = _minutes(rises[0])
+    if sets and sets[0][:10] == now[:10]:
+        fc.sunset_min = _minutes(sets[0])
+    # ISO strings in one zone compare correctly as text.
+    fc.sunrise_next = next((_clock(t) for t in rises if t > now), "")
+    fc.sunset_next = next((_clock(t) for t in sets if t > now), "")
+
+    fc.hours = _timeline(data.get("hourly", {}), now, rises + sets, set(sets))
+    fc.next_hour = _next_hour(data.get("minutely_15", {}), now)
+    return fc
+
+
+def _timeline(hourly: dict, now: str, events, sunsets, span: int = 24) -> List[Hour]:
+    times = list(hourly.get("time") or [])
+    n = len(times)
+    temps = _list(hourly, "temperature_2m", n, 0.0)
+    codes = _list(hourly, "weather_code", n, 3)
+    days = _list(hourly, "is_day", n, 1)
+    pops = _list(hourly, "precipitation_probability", n, 0)
+
+    start = now[:13] + ":00"                    # the current hour
+    first = next((i for i, t in enumerate(times) if t >= start), None)
+    if first is None:
+        return []
+    picked = list(range(first, min(n, first + span)))
+    if not picked:
+        return []
+    end = times[picked[-1]]
+
+    out: List[Hour] = []
+    for i in picked:
+        t = times[i]
+        out.append(Hour(_clock(t), int(codes[i]), float(temps[i]),
+                        bool(days[i]), int(pops[i])))
+        nxt = times[i + 1] if i + 1 < n else None
+        # A sun event after this hour starts and before the next one does,
+        # carrying this hour's temperature: Apple shows the reading there too.
+        for e in sorted(events):
+            if t < e and (nxt is None or e < nxt) and e <= end and e > now:
+                kind = SUNSET if e in sunsets else SUNRISE
+                out.append(Hour(_clock(e), int(codes[i]), float(temps[i]),
+                                kind == SUNRISE, int(pops[i]), kind))
+    return out
+
+
+def _next_hour(block: dict, now: str) -> List[float]:
+    times = list(block.get("time") or [])
+    vals = _list(block, "precipitation", len(times), 0.0)
+    first = next((i for i, t in enumerate(times) if t >= now), None)
+    if first is None or first + 5 > len(times):
+        return []
+    return [float(v) for v in vals[first:first + 5]]
+
+
+# A 15-minute amount at or under this is a trace - rounding noise in the model,
+# not rain anyone would notice. 0.1 mm in 15 minutes is light drizzle.
+_TRACE = {"mm": 0.05, "in": 0.002}
+
+
+def next_hour_summary(fc: Forecast) -> str:
+    """What the next hour holds, in Apple's words: 'Rain for the next hour',
+    'Rain stopping in 30 min', 'Rain starting in 15 min', or none at all."""
+    vals = fc.next_hour
+    if not vals:
+        return ""
+    trace = _TRACE.get(fc.rain_unit, 0.05)
+    wet = [v > trace for v in vals]
+    shape = describe(fc.code)[0]
+    word = "Snow" if shape == SNOW else "Rain"
+    if all(wet[1:]):
+        return f"{word} for the next hour"
+    if not any(wet):
+        return "No rain for the next hour"
+    # Reading i covers the quarter from (i-1)*15 to i*15 minutes from now.
+    if wet[0] or wet[1]:
+        stop = next(i for i in range(1, 5) if not wet[i])
+        return f"{word} stopping in {max(15, (stop - 1) * 15)} min"
+    start = next(i for i in range(1, 5) if wet[i])
+    return f"{word} starting in {(start - 1) * 15 or 15} min"
 
 
 class WeatherWidget(WidgetCard):
@@ -219,6 +412,14 @@ class WeatherWidget(WidgetCard):
         u = QAction(f"Switch to °{'F' if self.unit == 'C' else 'C'}", menu)
         u.triggered.connect(self._toggle_unit)
         menu.addAction(u)
+        faces = self.available_faces()
+        if len(faces) > 1:
+            sub = menu.addMenu("Face")
+            for key, name in faces:
+                f = QAction(name, sub, checkable=True)
+                f.setChecked(key == self.face)
+                f.triggered.connect(lambda _c, k=key: self.set_face(k))
+                sub.addAction(f)
         menu.addSeparator()
         # Open-Meteo publish their data under CC BY 4.0, so the credit is a
         # condition of using it, not a courtesy. Shown where the data is.
@@ -248,6 +449,49 @@ class WeatherWidget(WidgetCard):
         self.changed.emit()
         self._refresh()
 
+    # ------------------------------------------------------------------ #
+    #  Faces
+    # ------------------------------------------------------------------ #
+    # Each size has its own set, modelled on Apple's Weather widgets for the
+    # Mac, and the card remembers a choice per size: going medium and back to
+    # small brings back the small face you had. "classic" is the original
+    # design and the default everywhere, so a saved layout looks the same
+    # until someone picks something else.
+    FACES = {
+        "small": (("classic", "Classic"), ("conditions", "Conditions"),
+                  ("forecast", "Forecast"), ("nexthour", "Next hour"),
+                  ("sun", "Sunrise and sunset")),
+        "medium": (("classic", "Classic"), ("hourly", "Hourly"),
+                   ("nexthour", "Next hour")),
+        "large": (("classic", "Classic"), ("daily", "Hourly and daily"),
+                  ("nexthour", "Next hour")),
+    }
+
+    def _face_painters(self) -> dict:
+        """The faces that are built, by key. A face listed in FACES but not
+        here stays out of the menu, and a saved choice of it draws Classic."""
+        return {"classic": self._paint_classic}
+
+    def available_faces(self):
+        built = self._face_painters()
+        return [f for f in self.FACES.get(self.size_class, ()) if f[0] in built]
+
+    @property
+    def face(self) -> str:
+        chosen = (self.config.get("faces") or {}).get(self.size_class, "classic")
+        return chosen if chosen in self._face_painters() else "classic"
+
+    def set_face(self, key: str) -> None:
+        if key not in dict(self.available_faces()):
+            return
+        faces = dict(self.config.get("faces") or {})
+        if faces.get(self.size_class) == key:
+            return
+        faces[self.size_class] = key
+        self.config["faces"] = faces
+        self.changed.emit()
+        self.update()
+
     def _toggle_unit(self) -> None:
         self.unit = "F" if self.unit == "C" else "C"
         self.config["unit"] = self.unit
@@ -267,7 +511,11 @@ class WeatherWidget(WidgetCard):
             self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Weather")
             self.text(p, r, "loading…", 10, pal.text_faint, align=Qt.AlignCenter)
             return
+        self._face_painters()[self.face](p, r)
 
+    def _paint_classic(self, p, r: QRectF) -> None:
+        pal = self.palette_
+        d = self.data
         shape, words = describe(d.code)
         photo = self._backdrop(p, shape)
 
@@ -287,15 +535,17 @@ class WeatherWidget(WidgetCard):
             self.label(p, QRectF(r.left(), r.top(), r.width(), 12),
                        d.place or "Weather")
 
+        night = not d.is_day
         if self.size_class == "small":
-            self._glyph(p, QRectF(r.right() - 34, r.top() + 14, 30, 30), shape)
+            self._glyph(p, QRectF(r.right() - 34, r.top() + 14, 30, 30), shape,
+                        night, photo)
             self.text(p, QRectF(r.left(), r.top() + 24, r.width(), 44),
                       f"{d.temp:.0f}°", 38, c_temp, QFont.DemiBold)
             self.text(p, QRectF(r.left(), r.bottom() - 18, r.width(), 18),
                       words, 9, c_words)
             return
 
-        self._glyph(p, QRectF(r.left(), r.top() + 16, 40, 40), shape)
+        self._glyph(p, QRectF(r.left(), r.top() + 16, 40, 40), shape, night, photo)
         self.text(p, QRectF(r.left() + 48, r.top() + 12, r.width() - 48, 44),
                   f"{d.temp:.0f}°", 32, c_temp, QFont.DemiBold)
         p.setFont(self.font(32, QFont.DemiBold))
@@ -444,78 +694,215 @@ class WeatherWidget(WidgetCard):
                       f"{day.lo:.0f}°", 10, pal.text_faint,
                       align=Qt.AlignHCenter | Qt.AlignVCenter)
 
+
     # ------------------------------------------------------------------ #
-    def _glyph(self, p, box: QRectF, shape: int) -> None:
-        """Weather icons drawn as paths - no icon font, no image assets."""
-        pal = self.palette_
-        sun = QColor("#f6c445")
-        cloud = QColor(pal.text if pal.dark else "#93a3b5")
-        cloud.setAlpha(210)
-        wet = QColor(pal.accent)
+    def _glyph(self, p, box: QRectF, shape: int, night: bool = False,
+               on_photo: bool = False) -> None:
+        # Over a photograph the header is always light text on a dark scrim,
+        # so its icon takes the dark-theme colours whatever the theme.
+        draw_icon(p, box, shape, night=night,
+                  dark=self.palette_.dark or on_photo)
 
-        cx, cy, s = box.center().x(), box.center().y(), box.width()
 
-        def draw_cloud(off_x=0.0, off_y=0.0, scale=1.0):
-            path = QPainterPath()
-            w, h = s * 0.78 * scale, s * 0.42 * scale
-            x, y = cx - w / 2 + off_x, cy - h / 2 + off_y
-            path.addEllipse(QRectF(x, y + h * 0.22, w * 0.46, h * 0.78))
-            path.addEllipse(QRectF(x + w * 0.20, y, w * 0.52, h * 0.92))
-            path.addEllipse(QRectF(x + w * 0.50, y + h * 0.26, w * 0.50, h * 0.74))
-            path.addRect(QRectF(x + w * 0.16, y + h * 0.52, w * 0.70, h * 0.46))
-            # The puffs overlap, and simplified() keeps what the fill rule fills:
-            # under the default odd-even rule every overlap came out as a hole.
-            path.setFillRule(Qt.WindingFill)
-            p.setPen(Qt.NoPen)
-            p.setBrush(cloud)
-            p.drawPath(path.simplified())
+# --------------------------------------------------------------------------- #
+#  Icons
+# --------------------------------------------------------------------------- #
+# Flat, filled shapes in the manner of Apple's Weather symbols: a solid yellow
+# sun with square-cut rays, flat-bottomed clouds, a crescent moon with
+# sparkles, blue rain dashes. Where one shape overlaps another (the sun behind
+# a cloud, a bolt through one) the back shape is cut away around the front one
+# with a thin gap rather than drawn underneath it, which is what keeps them
+# readable at 20 px.
+#
+# Everything is drawn on a 100-unit square and scaled to the box, as paths -
+# no icon font and no image files, so they stay sharp at any size and DPI.
+_ICON_DARK = {
+    "sun": "#ffd60a", "cloud": "#d3d6dc", "heavy": "#8e939e",
+    "ink": "#ffffff", "wet": "#4cb8f5", "white": "#ffffff",
+}
+# On a light card pale grey would barely show, so the set moves a step darker.
+# Lightning and snow stay white in both themes; on a light card they get a
+# thin grey outline instead, or a white flake would vanish into white glass.
+_ICON_LIGHT = {
+    "sun": "#f5bf00", "cloud": "#adb4bf", "heavy": "#717885",
+    "ink": "#475063", "wet": "#1e9be6", "white": "#ffffff",
+}
+_GAP = 4.0          # units cut between overlapping shapes
 
-        if shape in (CLEAR, PARTLY):
-            r0 = s * (0.26 if shape == CLEAR else 0.20)
-            ox = 0 if shape == CLEAR else -s * 0.16
-            oy = 0 if shape == CLEAR else -s * 0.14
-            p.setPen(Qt.NoPen)
-            p.setBrush(sun)
-            p.drawEllipse(QRectF(cx + ox - r0, cy + oy - r0, r0 * 2, r0 * 2))
-            if shape == CLEAR:
-                p.setPen(QPen(sun, 2.0, Qt.SolidLine, Qt.RoundCap))
-                for i in range(8):
-                    a = math.radians(i * 45)
-                    p.drawLine(
-                        cx + math.cos(a) * r0 * 1.35, cy + math.sin(a) * r0 * 1.35,
-                        cx + math.cos(a) * r0 * 1.70, cy + math.sin(a) * r0 * 1.70)
-            else:
-                draw_cloud(s * 0.06, s * 0.10, 0.92)
-            return
 
-        draw_cloud(0, -s * 0.06 if shape in (RAIN, SNOW, STORM) else 0)
+def _stroke(path: QPainterPath, width: float) -> QPainterPath:
+    s = QPainterPathStroker()
+    s.setWidth(width)
+    s.setCapStyle(Qt.FlatCap)
+    s.setJoinStyle(Qt.MiterJoin)
+    return s.createStroke(path)
 
-        if shape == RAIN:
-            p.setPen(QPen(wet, 2.2, Qt.SolidLine, Qt.RoundCap))
-            for i in (-1, 0, 1):
-                x = cx + i * s * 0.18
-                p.drawLine(x, cy + s * 0.16, x - s * 0.05, cy + s * 0.34)
-        elif shape == SNOW:
-            p.setPen(QPen(QColor("#cfe8ff"), 2.0, Qt.SolidLine, Qt.RoundCap))
-            for i in (-1, 0, 1):
-                x = cx + i * s * 0.18
-                p.drawPoint(int(x), int(cy + s * 0.26))
-                p.drawLine(x - 3, cy + s * 0.26, x + 3, cy + s * 0.26)
-                p.drawLine(x, cy + s * 0.26 - 3, x, cy + s * 0.26 + 3)
-        elif shape == STORM:
-            bolt = QPainterPath()
-            bolt.moveTo(cx + s * 0.04, cy + s * 0.10)
-            bolt.lineTo(cx - s * 0.10, cy + s * 0.34)
-            bolt.lineTo(cx + s * 0.01, cy + s * 0.33)
-            bolt.lineTo(cx - s * 0.06, cy + s * 0.50)
-            bolt.lineTo(cx + s * 0.14, cy + s * 0.26)
-            bolt.lineTo(cx + s * 0.03, cy + s * 0.27)
-            bolt.closeSubpath()
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#f6c445"))
-            p.drawPath(bolt)
-        elif shape == FOG:
-            p.setPen(QPen(cloud, 2.2, Qt.SolidLine, Qt.RoundCap))
-            for i in range(3):
-                y = cy + s * (0.16 + i * 0.11)
-                p.drawLine(cx - s * 0.30, y, cx + s * 0.30, y)
+
+def _grow(path: QPainterPath, by: float) -> QPainterPath:
+    """The shape plus a band `by` units wide all round - what gets cut away."""
+    return path.united(_stroke(path, by * 2)).simplified()
+
+
+def _cloud(cx: float = 50, cy: float = 49, k: float = 1.0) -> QPainterPath:
+    """Flat-bottomed cloud: one big puff, one small one, on a pill.
+
+    Its bounding box is centred on (cx, cy); at k=1 it is 72 x 54 units.
+    """
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(14, 48, 72, 28), 14, 14)
+    puffs = QPainterPath()
+    puffs.addEllipse(QPointF(43, 44), 22, 22)
+    puffs.addEllipse(QPointF(66, 53), 15, 15)
+    puffs.setFillRule(Qt.WindingFill)
+    path = path.united(puffs)
+    t = QTransform()
+    t.translate(cx, cy)
+    t.scale(k, k)
+    t.translate(-50, -49)
+    path = t.map(path)
+    # Overlaps would come out as holes under the default odd-even rule.
+    path.setFillRule(Qt.WindingFill)
+    return path.simplified()
+
+
+def _sun(cx: float, cy: float, r: float, ray_in: float, ray_out: float,
+         ray_w: float) -> QPainterPath:
+    path = QPainterPath()
+    path.addEllipse(QPointF(cx, cy), r, r)
+    rays = QPainterPath()
+    for i in range(8):
+        a = math.radians(i * 45)
+        rays.moveTo(cx + math.cos(a) * ray_in, cy + math.sin(a) * ray_in)
+        rays.lineTo(cx + math.cos(a) * ray_out, cy + math.sin(a) * ray_out)
+    return path.united(_stroke(rays, ray_w))
+
+
+def _moon(cx: float, cy: float, r: float) -> QPainterPath:
+    disc = QPainterPath()
+    disc.addEllipse(QPointF(cx, cy), r, r)
+    bite = QPainterPath()
+    bite.addEllipse(QPointF(cx + r * 0.64, cy - r * 0.48), r * 0.84, r * 0.84)
+    return disc.subtracted(bite)
+
+
+def _sparkle(cx: float, cy: float, r: float) -> QPainterPath:
+    """A four-pointed star with concave sides."""
+    c = r * 0.16
+    path = QPainterPath(QPointF(cx, cy - r))
+    path.quadTo(cx + c, cy - c, cx + r, cy)
+    path.quadTo(cx + c, cy + c, cx, cy + r)
+    path.quadTo(cx - c, cy + c, cx - r, cy)
+    path.quadTo(cx - c, cy - c, cx, cy - r)
+    path.closeSubpath()
+    return path
+
+
+def _snowflake(cx: float, cy: float, arm: float, w: float) -> QPainterPath:
+    lines = QPainterPath()
+    for i in range(3):
+        a = math.radians(90 + i * 60)
+        dx, dy = math.cos(a), math.sin(a)
+        lines.moveTo(cx - dx * arm, cy - dy * arm)
+        lines.lineTo(cx + dx * arm, cy + dy * arm)
+        # A V near each end of the arm, opening outwards.
+        for sign in (1, -1):
+            bx, by = cx + sign * dx * arm * 0.55, cy + sign * dy * arm * 0.55
+            out = a if sign > 0 else a + math.pi
+            for turn in (40, -40):
+                b = out + math.radians(turn)
+                lines.moveTo(bx, by)
+                lines.lineTo(bx + math.cos(b) * arm * 0.38,
+                             by + math.sin(b) * arm * 0.38)
+    path = _stroke(lines, w)
+    path.setFillRule(Qt.WindingFill)
+    return path.simplified()
+
+
+def _dashes(points, w: float = 4.6, length: float = 11.0) -> QPainterPath:
+    """Rain: short strokes leaning forward, each from its top end."""
+    lines = QPainterPath()
+    dx, dy = -length * 0.42, length * 0.91
+    for x, y in points:
+        lines.moveTo(x, y)
+        lines.lineTo(x + dx, y + dy)
+    return _stroke(lines, w)
+
+
+def icon_paths(shape: int, night: bool = False):
+    """The icon as (colour role, path) pairs in 100-unit space, back to front."""
+    if shape == CLEAR:
+        if night:
+            return [("ink", _moon(46, 55, 25)),
+                    ("ink", _sparkle(77, 29, 9)),
+                    ("ink", _sparkle(63, 16, 5))]
+        return [("sun", _sun(50, 50, 17, 25, 38, 5.0))]
+
+    if shape == PARTLY:
+        if night:
+            cloud = _cloud(45, 62, 0.8)
+            cut = _grow(cloud, _GAP)
+            return [("ink", _moon(70, 34, 14).subtracted(cut)),
+                    ("ink", _sparkle(22, 30, 5).subtracted(cut)),
+                    ("ink", _sparkle(32, 19, 3.4)),
+                    ("heavy", cloud)]
+        cloud = _cloud(59, 62, 0.8)
+        return [("sun", _sun(37, 36, 13, 19, 28, 4.4)
+                 .subtracted(_grow(cloud, _GAP))),
+                ("cloud", cloud)]
+
+    if shape == OVERCAST:
+        return [("heavy", _cloud())]
+
+    if shape == RAIN:
+        cloud = _cloud(50, 39)
+        return [("cloud", cloud),
+                ("wet", _dashes([(32, 72), (46, 77), (60, 72), (74, 77)]))]
+
+    if shape == STORM:
+        cloud = _cloud(50, 40)
+        bolt = QPainterPath(QPointF(56, 36))
+        for x, y in ((37, 64), (49, 64), (42, 92), (67, 55), (55, 55),
+                     (63, 36)):
+            bolt.lineTo(x, y)
+        bolt.closeSubpath()
+        return [("cloud", cloud.subtracted(_grow(bolt, _GAP))),
+                ("white", bolt)]
+
+    if shape == SNOW:
+        return [("white", _snowflake(50, 50, 32, 4.6))]
+
+    if shape == SLEET:
+        cloud = _cloud(50, 36, 0.92)
+        flake = _snowflake(50, 63, 21, 4.2)
+        return [("cloud", cloud.subtracted(_grow(flake, _GAP))),
+                ("white", flake),
+                ("wet", _dashes([(24, 70), (30, 82), (78, 70), (84, 82)],
+                                4.2, 9.0))]
+
+    if shape == FOG:
+        cloud = _cloud(50, 37)
+        lines = QPainterPath()
+        for y, half in ((74, 24), (84, 24), (94, 16)):
+            lines.moveTo(50 - half, y)
+            lines.lineTo(50 + half, y)
+        return [("cloud", cloud), ("heavy", _stroke(lines, 4.0))]
+
+    return [("cloud", _cloud())]
+
+
+def draw_icon(p: QPainter, box: QRectF, shape: int, night: bool = False,
+              dark: bool = True) -> None:
+    colours = _ICON_DARK if dark else _ICON_LIGHT
+    s = min(box.width(), box.height()) / 100.0
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.translate(box.center().x() - 50 * s, box.center().y() - 50 * s)
+    p.scale(s, s)
+    p.setPen(Qt.NoPen)
+    for role, path in icon_paths(shape, night):
+        if role == "white" and not dark:
+            p.setBrush(QColor(colours["heavy"]))
+            p.drawPath(_grow(path, 2.4))
+        p.setBrush(QColor(colours[role]))
+        p.drawPath(path)
+    p.restore()

@@ -17,16 +17,47 @@ import sys
 import time
 
 
+def weather_response() -> dict:
+    """A canned Open-Meteo answer: a mild afternoon in London, 3:30 PM, sunset
+    at 4:13 PM inside the hourly row, and a shower due in the next hour.
+    Shaped exactly like the real thing, so it goes through the real parser."""
+    days = [f"2026-11-{d:02d}" for d in range(11, 18)]
+    hours = [f"2026-11-11T{h:02d}:00" for h in range(15, 24)] + \
+            [f"2026-11-12T{h:02d}:00" for h in range(0, 17)]
+    temps = [21, 20, 19, 18, 17, 16, 15, 15, 14, 14, 13, 13, 13, 12, 12, 12,
+             12, 13, 14, 16, 18, 19, 20, 21, 21, 20]
+    codes = [2, 61, 61, 3, 3, 2, 1, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 1,
+             1, 2, 2, 3, 3]
+    quarters = [f"2026-11-11T{h:02d}:{m:02d}" for h, m in
+                ((15, 15), (15, 30), (15, 45), (16, 0), (16, 15), (16, 30),
+                 (16, 45))]
+    return {
+        "current": {"time": "2026-11-11T15:30", "temperature_2m": 21.0,
+                    "apparent_temperature": 20.0, "weather_code": 2,
+                    "is_day": 1, "wind_speed_10m": 14.0},
+        "hourly": {"time": hours, "temperature_2m": temps,
+                   "weather_code": codes,
+                   "is_day": [1 if t[11:13] in ("07", "08", "09", "10", "11",
+                                                 "12", "13", "14", "15") else 0
+                              for t in hours],
+                   "precipitation_probability": [10, 60, 70, 40, 20] + [5] * 21},
+        "daily": {"time": days,
+                  "weather_code": [2, 61, 0, 95, 3, 71, 45],
+                  "temperature_2m_max": [22, 19, 24, 20, 18, 9, 14],
+                  "temperature_2m_min": [14, 13, 15, 12, 11, 2, 8],
+                  "sunrise": [f"{d}T07:{12 + i:02d}" for i, d in enumerate(days)],
+                  "sunset": [f"{d}T16:{13 - i:02d}" for i, d in enumerate(days)],
+                  "precipitation_sum": [0.6, 4.2, 0, 11.5, 0.2, 3.0, 0],
+                  "precipitation_probability_max": [70, 90, 0, 95, 20, 80, 10]},
+        "minutely_15": {"time": quarters,
+                        "precipitation": [0, 0, 0, 0.1, 0.3, 0.4, 0.2]},
+    }
+
+
 def weather(card) -> None:
     """Give the weather tile deterministic data for rendering."""
-    from ..tiles.weather import Day, Forecast
-    card.data = Forecast(
-        place="London, GB", temp=21.0, feels=20.0, code=2,
-        days=[Day("Wed", 2, 22, 14), Day("Thu", 61, 19, 13),
-              Day("Fri", 0, 24, 15), Day("Sat", 95, 20, 12),
-              Day("Sun", 3, 18, 11), Day("Mon", 71, 9, 2),
-              Day("Tue", 45, 14, 8)],
-    )
+    from ..tiles.weather import parse
+    card.data = parse(weather_response(), "London, GB", "C")
 
 
 def stocks(card) -> None:
