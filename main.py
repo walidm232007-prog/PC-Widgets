@@ -2027,6 +2027,8 @@ def _check_weather_faces(out: str) -> None:
         for size in w.WeatherWidget.supported_sizes:
             card = w.WeatherWidget(pal, size, {})
             faces = card.available_faces()
+            assert [k for k, _ in faces] == [k for k, _ in w.WeatherWidget.FACES[size]], (
+                f"{size}: a listed face isn't built: {faces}")
             if size == "small":
                 assert [k for k, _ in faces] == ["classic", "conditions",
                                                  "forecast", "nexthour", "sun"]

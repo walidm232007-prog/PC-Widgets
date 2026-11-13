@@ -392,6 +392,27 @@ def precip_summary(fc: Forecast) -> str:
     return f"None for {len(fc.days)}d" if fc.days else "—"
 
 
+# Apple's temperature scale for the range bars, in °C: cold blue through
+# green and yellow to hot red.
+_TEMP_STOPS = ((-10, "#5e9cf5"), (0, "#5ac8fa"), (10, "#7fd6a4"),
+               (18, "#d8dc4a"), (25, "#f7c843"), (32, "#ff9f0a"),
+               (40, "#ff453a"))
+
+
+def _temp_colour(c: float) -> QColor:
+    stops = _TEMP_STOPS
+    if c <= stops[0][0]:
+        return QColor(stops[0][1])
+    for (t0, a), (t1, b) in zip(stops, stops[1:]):
+        if c <= t1:
+            f = (c - t0) / (t1 - t0)
+            ca, cb = QColor(a), QColor(b)
+            return QColor(round(ca.red() + (cb.red() - ca.red()) * f),
+                          round(ca.green() + (cb.green() - ca.green()) * f),
+                          round(ca.blue() + (cb.blue() - ca.blue()) * f))
+    return QColor(stops[-1][1])
+
+
 def _rain_level(rate_mm_h: float) -> float:
     """Bar height, 0..1, for a rate in mm an hour. Thirds for light (up to
     2.5 mm/h), moderate (7.6) and heavy - the Met Office's bands, and the
@@ -544,12 +565,18 @@ class WeatherWidget(WidgetCard):
     def _face_painters(self) -> dict:
         """The faces that are built, by key. A face listed in FACES but not
         here stays out of the menu, and a saved choice of it draws Classic."""
+        by_size = {
+            "small": {"conditions": self._paint_conditions,
+                      "forecast": self._paint_forecast,
+                      "nexthour": self._paint_nexthour,
+                      "sun": self._paint_sun},
+            "medium": {"hourly": self._paint_hourly,
+                       "nexthour": self._paint_nexthour_wide},
+            "large": {"daily": self._paint_daily,
+                      "nexthour": self._paint_nexthour_wide},
+        }
         return {"classic": self._paint_classic,
-                **({"conditions": self._paint_conditions,
-                    "forecast": self._paint_forecast,
-                    "nexthour": self._paint_nexthour,
-                    "sun": self._paint_sun}
-                   if self.size_class == "small" else {})}
+                **by_size.get(self.size_class, {})}
 
     def available_faces(self):
         built = self._face_painters()
@@ -742,7 +769,7 @@ class WeatherWidget(WidgetCard):
         self.text(p, foot, "60m", 8.5, pal.text_dim, QFont.DemiBold,
                   Qt.AlignRight | Qt.AlignVCenter)
 
-    def _rain_bars(self, p, chart: QRectF, n: int) -> None:
+    def _rain_bars(self, p, chart: QRectF, n: int, gap: float = 3.0) -> None:
         """Bars standing on the chart's floor, one per slice of the hour, under
         the dashed lines Apple draws at the light and heavy marks."""
         pal = self.palette_
@@ -755,7 +782,6 @@ class WeatherWidget(WidgetCard):
             p.drawLine(QPointF(chart.left(), y), QPointF(chart.right(), y))
         p.restore()
 
-        gap = 3.0
         bw = (chart.width() - gap * (n - 1)) / n
         grad = QLinearGradient(0, chart.top(), 0, chart.bottom())
         grad.setColorAt(0.0, QColor("#a8e6ff" if dark else "#1c9ddb"))
@@ -773,6 +799,194 @@ class WeatherWidget(WidgetCard):
             p.drawRoundedRect(QRectF(x, chart.bottom() - h, bw, h),
                               min(bw / 2, 2.5), min(bw / 2, 2.5))
         p.restore()
+
+    # ------------------------------------------------------------------ #
+    #  Medium and large faces
+    # ------------------------------------------------------------------ #
+    def _wide_head(self, p, r: QRectF, aside: str = "") -> None:
+        """Place and icon, the big temperature, and at the right either the
+        condition over 'H:22° L:14°' or, when given, one line of its own."""
+        d, pal = self.data, self.palette_
+        self._head(p, r)
+        self.text(p, QRectF(r.left() - 1, r.top() + 14, r.width(), 42),
+                  _deg(d.temp), 30, pal.text, QFont.Normal)
+        right = Qt.AlignRight | Qt.AlignVCenter
+        room = r.width() * 0.62
+        box = QRectF(r.right() - room, r.top(), room, 0)
+        if aside:
+            self.text(p, QRectF(box.left(), r.top() + 26, room, 20),
+                      self._fit(p, aside, 10.5, QFont.DemiBold, room),
+                      10.5, pal.text, QFont.DemiBold, right)
+            return
+        words = describe(d.code)[1]
+        self.text(p, QRectF(box.left(), r.top() + 20, room, 17), words, 10,
+                  pal.text, QFont.DemiBold, right)
+        if d.hi is not None and d.lo is not None:
+            self.text(p, QRectF(box.left(), r.top() + 37, room, 17),
+                      f"H:{_deg(d.hi)} L:{_deg(d.lo)}", 10, pal.text,
+                      QFont.DemiBold, right)
+
+    def _rule(self, p, r: QRectF, y: float) -> None:
+        c = QColor(self.palette_.text)
+        c.setAlphaF(0.22)
+        p.save()
+        p.setPen(QPen(c, 1.0))
+        y = round(y) + 0.5
+        p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+        p.restore()
+
+    def _hourly_row(self, p, row: QRectF, n: int = 6) -> None:
+        """Time, icon and temperature per hour; a sunrise or sunset takes its
+        own slot at its own time, as in Apple's row."""
+        d, pal = self.data, self.palette_
+        hours = d.hours[:n]
+        if not hours:
+            self.text(p, row, "No hourly forecast", 9.5, pal.text_dim,
+                      QFont.DemiBold, Qt.AlignCenter)
+            return
+        cw = row.width() / n
+        centre = Qt.AlignHCenter | Qt.AlignVCenter
+        icon = min(22.0, row.height() - 34)
+        for i, h in enumerate(hours):
+            x = row.left() + i * cw
+            self.text(p, QRectF(x - 4, row.top(), cw + 8, 14), h.label, 8.5,
+                      pal.text_dim, QFont.DemiBold, centre)
+            shape = (SUNDOWN if h.event == SUNSET else
+                     SUNUP if h.event == SUNRISE else describe(h.code)[0])
+            mid = row.top() + 14 + (row.height() - 30 - icon) / 2
+            self._glyph(p, QRectF(x + cw / 2 - icon / 2, mid, icon, icon),
+                        shape, not h.is_day)
+            self.text(p, QRectF(x, row.bottom() - 16, cw, 16), _deg(h.temp),
+                      10.5, pal.text, QFont.DemiBold, centre)
+
+    def _rain_chart(self, p, area: QRectF, n: int) -> None:
+        """'Next-Hour Precipitation', the bars, and minute marks under them."""
+        pal = self.palette_
+        self.text(p, QRectF(area.left(), area.top(), area.width(), 15),
+                  "Next-Hour Precipitation", 9, pal.text_dim, QFont.DemiBold)
+        lead = 21 if area.height() > 100 else 16
+        chart = QRectF(area.left(), area.top() + lead, area.width(),
+                       area.height() - lead - 17)
+        self._rain_bars(p, chart, n, gap=2.0)
+        tick = QColor(pal.text)
+        tick.setAlphaF(0.35)
+        p.save()
+        p.setPen(QPen(tick, 1.0))
+        for i in range(6):
+            x = round(chart.left() + chart.width() * i / 6) + 0.5
+            p.drawLine(QPointF(x, chart.bottom() + 1), QPointF(x, chart.bottom() + 4))
+        p.restore()
+        for i in range(6):
+            x = chart.left() + chart.width() * i / 6
+            self.text(p, QRectF(x + 3, chart.bottom() + 3, 40, 15),
+                      "Now" if i == 0 else f"{i * 10}m", 9, pal.text_dim,
+                      QFont.DemiBold)
+
+    def _paint_hourly(self, p, r: QRectF) -> None:
+        """Medium: the header, then the next six hours."""
+        self._wide_head(p, r)
+        self._hourly_row(p, QRectF(r.left(), r.top() + 64, r.width(),
+                                   r.bottom() - r.top() - 64))
+
+    def _paint_nexthour_wide(self, p, r: QRectF) -> None:
+        """Medium: the header with the hour's sentence, then the chart.
+        Large: the chart, the sentence under it, then the hourly row."""
+        d, pal = self.data, self.palette_
+        words = next_hour_summary(d)
+        large = self.size_class == "large"
+        if not words:
+            self._wide_head(p, r)
+            self.text(p, QRectF(r.left(), r.top() + 64, r.width(),
+                                (r.height() - 64) if not large else 120),
+                      "Next-hour precipitation isn't available here", 10,
+                      pal.text_dim, QFont.DemiBold, Qt.AlignCenter)
+            if large:
+                self._rule(p, r, r.bottom() - 74)
+                self._hourly_row(p, QRectF(r.left(), r.bottom() - 66,
+                                           r.width(), 66))
+            return
+        if not large:
+            self._wide_head(p, r, aside=words)
+            self._rain_chart(p, QRectF(r.left(), r.top() + 50, r.width(),
+                                       r.bottom() - r.top() - 50), 48)
+            return
+        self._wide_head(p, r)
+        self._rain_chart(p, QRectF(r.left(), r.top() + 72, r.width(), 130), 48)
+        self.text(p, QRectF(r.left(), r.top() + 208, r.width(), 22), words, 11,
+                  pal.text, QFont.DemiBold)
+        self._rule(p, r, r.bottom() - 74)
+        self._hourly_row(p, QRectF(r.left(), r.bottom() - 66, r.width(), 66))
+
+    def _paint_daily(self, p, r: QRectF) -> None:
+        """Large: header, the hourly row, then five days with range bars."""
+        d, pal = self.data, self.palette_
+        self._wide_head(p, r)
+        self._rule(p, r, r.top() + 64)
+        self._hourly_row(p, QRectF(r.left(), r.top() + 72, r.width(), 66))
+        self._rule(p, r, r.top() + 148)
+        days = d.days[:5]
+        if not days:
+            return
+        top = r.top() + 152
+        rh = (r.bottom() - top) / 5
+        w = r.width()
+        lo_all = min(day.lo for day in days)
+        hi_all = max(day.hi for day in days)
+        if d.temp is not None:
+            lo_all, hi_all = min(lo_all, d.temp), max(hi_all, d.temp)
+        span = max(1e-6, hi_all - lo_all)
+        bar_l, bar_r = r.left() + w * 0.44, r.left() + w * 0.83
+        right = Qt.AlignRight | Qt.AlignVCenter
+        for i, day in enumerate(days):
+            y = top + i * rh
+            self.text(p, QRectF(r.left(), y, w * 0.26, rh),
+                      "Today" if i == 0 else day.label[:3], 10.5, pal.text,
+                      QFont.DemiBold)
+            icon = min(20.0, rh - 6)
+            self._glyph(p, QRectF(r.left() + w * 0.29 - icon / 2,
+                                  y + (rh - icon) / 2, icon, icon),
+                        describe(day.code)[0])
+            self.text(p, QRectF(r.left(), y, bar_l - r.left() - 8, rh),
+                      _deg(day.lo), 10.5, pal.text_dim, QFont.DemiBold, right)
+            self.text(p, QRectF(r.left(), y, w, rh), _deg(day.hi), 10.5,
+                      pal.text, QFont.DemiBold, right)
+            cy = y + rh / 2
+            self._range_bar(p, bar_l, bar_r, cy,
+                            (day.lo - lo_all) / span, (day.hi - lo_all) / span,
+                            day.lo, day.hi,
+                            (d.temp - lo_all) / span if i == 0 and d.temp is not None
+                            else None)
+
+    def _range_bar(self, p, left: float, right: float, cy: float, f0: float,
+                   f1: float, t0: float, t1: float, now) -> None:
+        """A day's low-to-high on the week's scale, coloured by temperature
+        the way Apple colours it, with a dot for now on today's bar."""
+        pal = self.palette_
+        h = 4.0
+        track = QColor(pal.text)
+        track.setAlphaF(0.14)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(left, cy - h / 2, right - left, h), h / 2, h / 2)
+        x0 = left + (right - left) * f0
+        x1 = max(x0 + h, left + (right - left) * f1)
+        grad = QLinearGradient(x0, 0, x1, 0)
+        grad.setColorAt(0.0, _temp_colour(self._celsius(t0)))
+        grad.setColorAt(1.0, _temp_colour(self._celsius(t1)))
+        p.setBrush(grad)
+        p.drawRoundedRect(QRectF(x0, cy - h / 2, x1 - x0, h), h / 2, h / 2)
+        if now is not None:
+            nx = left + (right - left) * now
+            p.setBrush(QColor(0, 0, 0, 90) if pal.dark else QColor(255, 255, 255, 200))
+            p.drawEllipse(QPointF(nx, cy), 5, 5)
+            p.setBrush(QColor("#ffffff") if pal.dark else QColor("#1d1d1f"))
+            p.drawEllipse(QPointF(nx, cy), 3.2, 3.2)
+        p.restore()
+
+    def _celsius(self, t: float) -> float:
+        return (t - 32) / 1.8 if self.unit == "F" else t
 
     def _paint_sun(self, p, r: QRectF) -> None:
         """Small: the next sunrise or sunset, the sun on its day-long arc."""
