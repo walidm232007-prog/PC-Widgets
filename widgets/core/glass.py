@@ -25,14 +25,23 @@ blurred, behind every card on the others.
 The blur is a heavy downscale, a couple of box passes at that small size, and a
 smooth upscale. At 1/14 scale a 3840x2160 desktop is a ~275x155 image, so the
 whole thing costs a few milliseconds and is done once per wallpaper change.
+
+The cards' liquid glass (lens.py) needs the desktop clear rather than blurred,
+so a second copy is kept beside it: half size and only lightly frosted, about
+4 MB for a 3000x1920 desk. Building it takes a few hundred milliseconds, so it
+happens on a thread, and until it is there a card shows the frosted glass
+instead. numpy does the bending; without it (a checkout with only PySide6) the
+copy is never built and every card stays frosted.
 """
 
 from __future__ import annotations
 
 import os
+import threading
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QObject, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 
 from . import displays, winapi
@@ -40,6 +49,13 @@ from . import displays, winapi
 DOWNSCALE = 14           # bigger = blurrier and cheaper
 BOX_PASSES = 3
 BOX_RADIUS = 2
+
+CLEAR_SCALE = 2          # the clear copy is kept at 1/2 size...
+# ...and frosted at that size by box passes, (radius, passes) for each of
+# Settings' Blur choices. Light, three of radius 1, comes to about Glisse's own
+# 3px blur and is the default: with none, a busy wallpaper's fine detail ran
+# straight through the cards' small grey labels. More is about 6px.
+FROSTS = {"none": (0, 0), "light": (1, 3), "more": (2, 4)}
 
 
 def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
@@ -108,14 +124,36 @@ def _fit(p: QPainter, img: QImage, dest: QRect, mode: int) -> None:
         p.drawImage(dest, scaled, QRect(sx, sy, w, h))
 
 
+class _Notifier(QObject):
+    """Tells the GUI thread the clear copy is ready. A signal emitted from the
+    builder thread is delivered queued, on the thread that made this."""
+    ready = Signal()
+
+
 class GlassBackdrop:
-    """The blurred desktop, in virtual-screen coordinates."""
+    """The blurred desktop, in virtual-screen coordinates - and, for liquid
+    glass, a clear one."""
 
     def __init__(self) -> None:
         self.image: Optional[QImage] = None
         self.origin: Tuple[int, int] = (0, 0)
         self.tint: QColor = QColor(30, 34, 42)
         self._signature: Optional[Tuple] = None
+        # The clear copy: (3, H, W) uint8 red, green and blue planes at
+        # 1/CLEAR_SCALE size, or None until it's built (or with no numpy).
+        self.clear = None
+        self.clear_origin: Tuple[int, int] = (0, 0)
+        # Bumped whenever what liquid glass bends changes - a new desktop, a new
+        # clear copy - so a card can tell its kept bend is for an old one.
+        self.generation = 0
+        self.liquid = True            # Settings' Glass style; False for frosted
+        self.frost = "light"          # Settings' Blur, a key of FROSTS
+        self.notifier = _Notifier()
+        self.last_bend_ms = 0.0       # what the last bend cost, its setup aside
+        self._lock = threading.Lock()
+        self._job = 0
+        self._built = threading.Event()
+        self._last = None             # what the last refresh composed, to rebuild from
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -160,16 +198,145 @@ class GlassBackdrop:
         self._signature = sig
         r, g, b = winapi.desktop_colour()
         self.tint = QColor(r, g, b)
-        self.image, self.origin = self.compose(pics, mode, winapi.virtual_screen(),
-                                               QColor(r, g, b))
+        virtual = winapi.virtual_screen()
+        self.image, self.origin = self.compose(pics, mode, virtual, QColor(r, g, b))
+        self.generation += 1
+        self._last = (pics, mode, virtual, QColor(r, g, b))
+        if self.liquid:
+            self._start_clear(*self._last)
+        else:
+            self._drop_clear()
         return True
 
+    # ------------------------------------------------------------------ #
+    #  The clear copy, for liquid glass
+    # ------------------------------------------------------------------ #
+    @property
+    def ready(self) -> bool:
+        """Whether cards can bend: liquid glass chosen, and the clear copy
+        built for this desktop."""
+        return self.liquid and self.clear is not None
+
+    def set_liquid(self, on: bool) -> None:
+        """Settings' Glass style. Frosted drops the clear copy (4 MB, and the
+        build after every wallpaper change); liquid builds it again, frosted
+        until it lands."""
+        on = bool(on)
+        if on == self.liquid:
+            return
+        self.liquid = on
+        if on and self._last is not None:
+            self._start_clear(*self._last)
+        elif not on:
+            self._drop_clear()
+
+    def set_frost(self, level: str) -> None:
+        """Settings' Blur. The clear copy is built again with it, and the old
+        one stays in use until the new one lands, so the cards never flash
+        frosted while the setting changes."""
+        level = level if level in FROSTS else "light"
+        if level == self.frost:
+            return
+        self.frost = level
+        if self.liquid and self._last is not None:
+            self._start_clear(*self._last, keep=True)
+
+    def _drop_clear(self) -> None:
+        with self._lock:
+            self._job += 1             # and any build still running is ignored
+            self.clear = None
+            self._built.set()          # nothing coming: don't keep anyone waiting
+
+    def _start_clear(self, pictures, mode: int, virtual, colour: QColor,
+                     keep: bool = False) -> None:
+        frost = FROSTS.get(self.frost, FROSTS["light"])
+        with self._lock:
+            self._job += 1
+            job = self._job
+            if not keep:
+                self.clear = None      # the old one shows the old wallpaper
+            self._built.clear()
+
+        def build() -> None:
+            try:
+                planes, origin = self.compose_clear(pictures, mode, virtual, colour, frost)
+            except Exception:
+                planes = None          # no numpy, or a picture that won't load
+            with self._lock:
+                if job != self._job:
+                    return             # the desktop changed again meanwhile
+                if planes is not None:
+                    self.clear, self.clear_origin = planes, origin
+                    self.generation += 1
+                self._built.set()
+            if planes is not None:
+                self.notifier.ready.emit()
+
+        threading.Thread(target=build, name="glass-clear", daemon=True).start()
+
+    def wait_clear(self, timeout: float = 15.0) -> bool:
+        """Block until the clear copy is built (or failed to be). For the self
+        test and offscreen renders; the board itself never waits."""
+        self._built.wait(timeout)
+        return self.ready
+
     @staticmethod
-    def compose(pictures: Sequence[Tuple[displays.Display, Optional[str]]], mode: int,
-                virtual: Tuple[int, int, int, int], colour: QColor
-                ) -> Tuple[QImage, Tuple[int, int]]:
-        """The blurred desktop: each display's picture fitted to it the way the
-        shell fits it, then blurred as one image. Returns (image, origin)."""
+    def compose_clear(pictures: Sequence[Tuple[displays.Display, Optional[str]]], mode: int,
+                      virtual: Tuple[int, int, int, int], colour: QColor,
+                      frost: Tuple[int, int] = FROSTS["light"]):
+        """The desktop for liquid glass: fitted like the blurred one, then
+        halved and frosted by ``frost``, (box radius, passes) - by default
+        about as much as Glisse's 3px blur frosts the web. Returns ((3, H, W)
+        uint8 planes, origin)."""
+        import numpy as np
+
+        canvas = GlassBackdrop._canvas(pictures, mode, virtual, colour)
+        small = canvas.scaled(max(2, canvas.width() // CLEAR_SCALE),
+                              max(2, canvas.height() // CLEAR_SCALE),
+                              Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        radius, passes = frost
+        if radius and passes:
+            small = _box_blur(small, radius, passes)
+        small = small.convertToFormat(QImage.Format_RGBA8888)
+        w, h = small.width(), small.height()
+        rgba = np.frombuffer(small.constBits(), dtype=np.uint8,
+                             count=small.bytesPerLine() * h).reshape(h, small.bytesPerLine() // 4, 4)
+        planes = np.ascontiguousarray(rgba[:, :w, :3].transpose(2, 0, 1))
+        return planes, (virtual[0], virtual[1])
+
+    def bend(self, sx: int, sy: int, w: int, h: int, radius: float,
+             step: Optional[int] = None) -> Optional[QImage]:
+        """The pane at ``sx, sy`` on the virtual screen seen through liquid
+        glass (see lens.py), worked out on a ``step`` px grid (lens.STEP if
+        None), or None while there is no clear copy to bend.
+
+        ``last_bend_ms`` is left holding what the bend itself cost. Working out
+        a new size's field, once, is kept out of it: counted in, the first bend
+        of a new card made a quick PC look slow and its drag went frosted."""
+        with self._lock:
+            planes, origin = self.clear, self.clear_origin
+        if planes is None:
+            return None
+        from . import lens
+        w, h = int(round(w)), int(round(h))
+        step = int(step or lens.STEP)
+        lens.field(w, h, radius, step)
+        started = time.perf_counter()
+        img = lens.bend(planes, CLEAR_SCALE, origin, int(sx), int(sy), w, h, radius, step)
+        self.last_bend_ms = (time.perf_counter() - started) * 1000.0
+        return img
+
+    @staticmethod
+    def rim(w: float, h: float, radius: float, dark: bool) -> QImage:
+        """The lit rim to lay over a liquid pane (see lens.py)."""
+        from . import lens
+        return lens.rim(int(round(w)), int(round(h)), float(radius), bool(dark))
+
+    @staticmethod
+    def _canvas(pictures: Sequence[Tuple[displays.Display, Optional[str]]], mode: int,
+                virtual: Tuple[int, int, int, int], colour: QColor) -> QImage:
+        """The desktop as the shell draws it: each display's picture fitted to
+        it, across the virtual screen."""
         vl, vt, vr, vb = virtual
         vw, vh = max(1, vr - vl), max(1, vb - vt)
         canvas = QImage(vw, vh, QImage.Format_RGBA8888)
@@ -202,7 +369,17 @@ class GlassBackdrop:
                     ml, mt, mr, mb = d.rect
                     _fit(p, img, QRect(ml - vl, mt - vt, mr - ml, mb - mt), mode)
         p.end()
+        return canvas
 
+    @staticmethod
+    def compose(pictures: Sequence[Tuple[displays.Display, Optional[str]]], mode: int,
+                virtual: Tuple[int, int, int, int], colour: QColor
+                ) -> Tuple[QImage, Tuple[int, int]]:
+        """The blurred desktop: each display's picture fitted to it the way the
+        shell fits it, then blurred as one image. Returns (image, origin)."""
+        vl, vt, vr, vb = virtual
+        vw, vh = max(1, vr - vl), max(1, vb - vt)
+        canvas = GlassBackdrop._canvas(pictures, mode, virtual, colour)
         small = canvas.scaled(max(1, vw // DOWNSCALE), max(1, vh // DOWNSCALE),
                               Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         small = _box_blur(small, BOX_RADIUS, BOX_PASSES)

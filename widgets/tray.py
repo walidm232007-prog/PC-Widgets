@@ -183,14 +183,23 @@ class WidgetTray(QSystemTrayIcon):
             a.triggered.connect(lambda _c, v=pct: self.board.set_opacity(v / 100))
             op.addAction(a)
 
-        glass = QAction("Frosted glass", m, checkable=True)
+        glass = QAction("Glass", m, checkable=True)
         glass.setChecked(self.board.state.glass)
         glass.toggled.connect(self.board.set_glass)
         m.addAction(glass)
 
+        style = m.addMenu("Glass style")
+        sg = QActionGroup(style)
+        for key, label in (("liquid", "Liquid"), ("frosted", "Frosted")):
+            a = QAction(label, style, checkable=True)
+            a.setChecked((self.board.state.glass_style == "frosted") == (key == "frosted"))
+            a.setActionGroup(sg)
+            a.triggered.connect(lambda _c, k=key: self.board.set_glass_style(k))
+            style.addAction(a)
+
         frost = m.addMenu("Glass strength")
         fg = QActionGroup(frost)
-        for label, alpha in (("Clearer", 78), ("Balanced", 112), ("Frostier", 158)):
+        for label, alpha in (("Clearer", 78), ("Balanced", 112), ("Stronger", 158)):
             a = QAction(label, frost, checkable=True)
             a.setChecked(abs(self.board.state.glass_tint - alpha) < 12)
             a.setActionGroup(fg)

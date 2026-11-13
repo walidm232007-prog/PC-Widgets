@@ -66,7 +66,7 @@ Four pages, down the side:
   picks which - it starts on the one the window is on. A badge shows which ones
   you already have.
 - **On your desktop** — the widgets you have, under a heading per display.
-  Select one to change its size, the display it's on, frosted or solid
+  Select one to change its size, the display it's on, glass or solid
   background, background and text colours, and background photo. **Show on
   desktop** points it out; **More settings…** opens the same menu as
   right-clicking it (location, watchlist, time style and so on); **Remove
@@ -74,9 +74,9 @@ Four pages, down the side:
 - **Presets** — your displays as they're arranged, drawn to scale with every
   widget where it sits, and your saved layouts: **Save this layout**, then
   **Apply** one to switch to it (see [Presets](#presets)).
-- **Settings** — theme, accent, frosted glass and its strength, opacity, where
-  widgets sit (on the desktop, floating, always on top), snap and lock, start
-  with Windows, and Quit.
+- **Settings** — theme, accent, glass (liquid or frosted, its blur and its
+  strength), opacity, where widgets sit (on the desktop, floating, always on
+  top), snap and lock, start with Windows, and Quit.
 
 The previews are the real tiles painted offscreen, not artwork, so the gallery
 can't drift from what a widget actually looks like. Nothing in the window keeps
@@ -470,8 +470,11 @@ The cards are drawn to sit next to Apple's rather than Windows':
 ## Frosted glass
 
 The cards are genuinely see-through: a blurred copy of the desktop shows through
-each one, tinted, clipped to the squircle. **Frosted glass** and **Glass
-strength** (Clearer / Balanced / Frostier) are in the tray menu.
+each one, tinted, clipped to the squircle. By default the cards and the Glass
+Dock are [liquid glass](#liquid-glass), built on the same copy of the desktop;
+**Glass style → Frosted** (in Settings, or the tray menu beside **Glass** and
+**Glass strength**) gives them this blur instead. Frosted glass is also what the
+app window's sidebar uses, and what a card or the dock falls back to.
 
 Windows offers two materials for this — Mica and Acrylic — and neither works
 here. Both are applied by DWM to the whole *window*, and the window is
@@ -508,6 +511,70 @@ changes (checked every 20s, rebuilt only on a real change).
 happens to be behind. In the default desktop layer that is exactly correct,
 since nothing is between the cards and the wallpaper. When the board is peeked
 to the front over an app, the material still shows wallpaper.
+
+## Liquid glass
+
+The cards are liquid glass, after Apple's in iOS 26 and macOS Tahoe. It is
+clearer than frosted glass, and the wallpaper bends along the rim as it would
+through a thick pane. Near each edge a card shows what lies a little further
+in, red bending a touch further than blue, and a thin line of light runs round
+the rim, on every side but fading across the corner away from a light at the top
+left. The middle shows what is straight behind it.
+
+The maths is [Glisse](https://github.com/0kzh/glisse)'s (Kelvin Zhang, MIT,
+credited in THIRD-PARTY.md). Glisse does this for the web with an SVG
+displacement map over the live page: within a band along the rim, each point
+looks inward by the slope of a shallow dome there, smoothed over the band's
+inner edge, with red, green and blue pulled 1.1, 1.05 and 1 times as far.
+`lens.py` runs the same maths in numpy over the board's own copy of the
+wallpaper, which works because, as above, the wallpaper *is* what is behind a
+card.
+
+A browser redoes this every frame on the GPU; a card does it once. Its bent
+slice is kept until the card moves, changes size or the wallpaper changes, so a
+board sitting still costs no more than it did. Measured on a Ryzen 5 5600G with
+a game running beside it, a large card bends in about 4.5 ms, a medium one in
+about 3 and a small one in about 1.5. Three changes from Glisse, all for
+widget-sized glass, make that possible:
+
+- **The band is held to 26 px and the reach to 70 px.** Glisse scales both with
+  the pane, which suits a 44 px switch, but turned a 348 px card into a
+  fishbowl.
+- **The bend is worked out on a 2 px grid and drawn scaled up**, a quarter of
+  the work. The clear copy of the desktop is kept at half size anyway (about
+  4 MB for a 3000×1920 desk) and frosted about as much as Glisse's own 3 px
+  blur, so a finer grid would find no more detail. The rim, the one sharp
+  thing, is drawn at full size. That frost is Glisse's default too, and it is
+  needed: with none, a busy wallpaper's fine detail ran straight through the
+  cards' small grey labels.
+- **The rim follows the cards' continuous corners**, measured to the curve
+  itself, where CSS draws it round a circle.
+
+A drag bends the glass again at every step, on a 4 px grid instead of 2 px.
+That's a quarter of the work again, and the detail it loses can't be seen on a
+card in motion; where the card is let go, it's bent in full. A whole frame of
+dragging a large card, glass and everything on it, costs about 4 ms that way,
+against 2 ms for frosted glass. On a PC slow enough that a step would still take
+longer than 12 ms, the card shows frosted glass while it moves.
+
+The clear copy is built on a thread after each wallpaper change, taking about
+0.4 s here, and until it lands a card shows frosted glass. A card also stays
+frosted without numpy (a checkout with only PySide6).
+
+**Settings → Look** has the choices. **Glass style** is Liquid or Frosted, for
+the cards and the dock together; Frosted drops the clear copy altogether.
+**Blur** sets how much liquid glass softens the wallpaper. Light is the
+default, Glisse's 3 px. None shows it crisp, and More is about 6 px, for a busy
+wallpaper behind small text. A new Blur rebuilds the clear copy on its thread,
+and the cards keep the old one until the new one lands, so nothing flashes
+frosted while it changes. **Glass strength** is the tint over either style, and
+its third step is now Stronger rather than Frostier, since the blur is a
+setting of its own.
+
+The Glass Dock, its music menu and its window previews are liquid glass too.
+Each is bent once for where it comes to rest, and its slide, rise or neon
+redraws that without bending it again. GLASS-DOCK.md has how. **Not liquid
+yet:** the app window's sidebar is still frosted.
 
 ## Glass Dock
 

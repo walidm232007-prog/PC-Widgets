@@ -28,7 +28,7 @@ from PySide6.QtGui import QGuiApplication
 from . import card, displays, winapi
 from .card import MARGIN, WidgetCard, card_size
 from .displays import Anchor, Display
-from .glass import GlassBackdrop
+from .glass import FROSTS, GlassBackdrop
 from .palette import Palette, build as build_palette
 from .store import BoardState, Placement, Preset, save   # noqa: F401 (BoardState: fields())
 
@@ -118,6 +118,14 @@ class Board(QObject):
         self._watch_screens()
 
         self.glass = GlassBackdrop()
+        # Settings' Glass style and Blur, before the first refresh builds (or,
+        # for frosted glass, skips) the clear copy liquid glass bends.
+        self.glass.liquid = state.glass_style != "frosted"
+        self.glass.frost = state.glass_blur if state.glass_blur in FROSTS else "light"
+        # The cards' liquid glass waits on that copy, built on a thread after
+        # each refresh; when it lands, everything glass repaints. Connected
+        # before the first refresh so its signal can't be missed.
+        self.glass.notifier.ready.connect(self._glass_ready)
         self.glass.refresh()
         # The wallpaper can change under us - a slideshow, a theme switch, a
         # monitor being plugged in. Cheap to check, only rebuilt when it moved.
@@ -949,6 +957,13 @@ class Board(QObject):
                 for c in self.cards:
                     c.update()
 
+    def _glass_ready(self) -> None:
+        """The clear desktop is built: frosted cards turn liquid."""
+        self.glass_changed.emit()
+        if self.state.glass:
+            for c in getattr(self, "cards", []):
+                c.update()
+
     def set_glass(self, on: bool) -> None:
         self.state.glass = on
         if on:
@@ -956,6 +971,27 @@ class Board(QObject):
         for c in self.cards:
             c.glass = self.glass if on else None
             c.update()
+        self.persist()
+        self.prefs_changed.emit()
+
+    def set_glass_style(self, style: str) -> None:
+        """Liquid glass (lens.py) or frosted (the blur alone), for the cards
+        and the dock alike."""
+        style = "frosted" if style == "frosted" else "liquid"
+        self.state.glass_style = style
+        self.glass.set_liquid(style == "liquid")
+        self.glass_changed.emit()
+        for c in self.cards:
+            c.update()
+        self.persist()
+        self.prefs_changed.emit()
+
+    def set_glass_blur(self, level: str) -> None:
+        """How much liquid glass softens the wallpaper. The clear copy is built
+        again on its thread, and the cards repaint when it lands."""
+        level = level if level in FROSTS else "light"
+        self.state.glass_blur = level
+        self.glass.set_frost(level)
         self.persist()
         self.prefs_changed.emit()
 

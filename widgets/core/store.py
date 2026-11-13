@@ -90,8 +90,10 @@ class BoardState:
     opacity: float = 1.0
     locked: bool = False            # stop accidental dragging
     snap: bool = False              # free placement by default
-    glass: bool = True              # frosted wallpaper behind each card
-    glass_tint: int = 112           # alpha of the tint over the blur
+    glass: bool = True              # the wallpaper showing through each card
+    glass_style: str = "liquid"     # liquid (lens.py) | frosted (glass.py's blur)
+    glass_blur: str = "light"       # none | light | more: how much liquid glass softens
+    glass_tint: int = 112           # alpha of the tint over the glass
     close_hint_shown: bool = False  # "closing the window keeps the widgets", said once
     dock_enabled: bool = False      # opt in; ordinary desktop layout stays intact
     dock_style: str = "glass"       # glass | solid, independent of the cards
