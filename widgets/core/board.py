@@ -118,6 +118,10 @@ class Board(QObject):
         self._watch_screens()
 
         self.glass = GlassBackdrop()
+        # The cards' liquid glass waits on a clear copy of the desktop, built on
+        # a thread after each refresh; when it lands, everything glass repaints.
+        # Connected before the first refresh so its signal can't be missed.
+        self.glass.notifier.ready.connect(self._glass_ready)
         self.glass.refresh()
         # The wallpaper can change under us - a slideshow, a theme switch, a
         # monitor being plugged in. Cheap to check, only rebuilt when it moved.
@@ -946,6 +950,13 @@ class Board(QObject):
             if self.state.glass:
                 for c in self.cards:
                     c.update()
+
+    def _glass_ready(self) -> None:
+        """The clear desktop is built: frosted cards turn liquid."""
+        self.glass_changed.emit()
+        if self.state.glass:
+            for c in getattr(self, "cards", []):
+                c.update()
 
     def set_glass(self, on: bool) -> None:
         self.state.glass = on

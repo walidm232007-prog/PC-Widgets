@@ -59,6 +59,14 @@ MARGIN = 18.0
 SHADOW_LAYERS = 9
 SHADOW_ALPHA = 34
 
+# Liquid glass is bent again at every step of a drag, on a coarser grid than at
+# rest (lens.STEP is 2 px): a quarter of the work, and detail nobody can see
+# on a moving card. Where it's let go it's bent again in full. A PC whose last
+# bend still took longer than BEND_BUDGET_MS shows frosted glass while the card
+# moves instead.
+DRAG_STEP = 4
+BEND_BUDGET_MS = 12.0
+
 
 # --------------------------------------------------------------------------- #
 #  Quiet mode
@@ -259,6 +267,8 @@ class WidgetCard(QWidget):
         self.opacity_ = 1.0
         self.glass = None                # a shared GlassBackdrop, set by Board
         self.glass_tint = 112            # alpha of the tint over the blur
+        self._bent = None                # (key, image): the liquid glass, kept
+        self._drag_ms = 0.0              # what bending it at a step of a drag costs
         self._drag_from: Optional[QPoint] = None
         self._hover = False
 
@@ -570,14 +580,17 @@ class WidgetCard(QWidget):
         layer = self._image_layer(p, r)
         image = layer is not None
         frosted = False
+        liquid = False
         if not (image and layer[1]):
-            # Frosted material: the blurred desktop showing through, then a tint
-            # on top. The blur is clipped to the squircle, which is the whole
-            # reason it's done in-process rather than handed to DWM.
+            # Glass: the desktop showing through, then a tint on top. Liquid
+            # glass (lens.py) when it can be bent, frosted glass otherwise -
+            # both clipped to the squircle, which is the whole reason it's done
+            # in-process rather than handed to DWM.
             if not self.solid_bg and self.glass is not None:
                 p.save()
                 p.setClipPath(path)
-                frosted = self.glass.paint_into(
+                liquid = self._paint_liquid(p, r)
+                frosted = liquid or self.glass.paint_into(
                     p, r, self.x() + int(MARGIN), self.y() + int(MARGIN))
                 p.restore()
 
@@ -597,11 +610,16 @@ class WidgetCard(QWidget):
         if image:
             self._draw_image_layer(p, r, layer[0])
 
-        # A soft inner light along the top - the sheen that makes frosted
-        # glass read as glass. It belongs only *on* glass: over a flat colour it
-        # is the grey glare that gave a solid card a smudged top edge, and over a
-        # picture it would fog the image. So it is skipped for both.
-        if not self.solid_bg and not image:
+        if liquid:
+            # Liquid glass's light is a thin lit rim, not a sheen: the edge
+            # catching a light from the top left, over a hairline.
+            p.drawImage(QPointF(r.left(), r.top()),
+                        self.glass.rim(r.width(), r.height(), RADIUS, pal.dark))
+        elif not self.solid_bg and not image:
+            # A soft inner light along the top - the sheen that makes frosted
+            # glass read as glass. It belongs only *on* glass: over a flat colour
+            # it is the grey glare that gave a solid card a smudged top edge, and
+            # over a picture it would fog the image. So it is skipped for both.
             p.save()
             p.setClipPath(path)
             sheen = QLinearGradient(r.left(), r.top(), r.left(), r.top() + 46)
@@ -632,6 +650,40 @@ class WidgetCard(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setPen(Qt.NoPen)
         self.paint_content(p, inner)
+
+    def _paint_liquid(self, p: QPainter, r: QRectF) -> bool:
+        """Paint the card's slice of desktop through liquid glass (lens.py).
+
+        The bend is kept until the card moves, changes size or the wallpaper
+        changes, so a card sitting still costs nothing to repaint - the clock
+        ticking redraws the kept image, as it redrew the frosted slice.
+
+        Returns False to fall back to frosted glass: while the clear copy of
+        the desktop is still being built (it's done on a thread), without
+        numpy, or on a PC too slow to bend at every step of a drag.
+        """
+        g = self.glass
+        if not getattr(g, "ready", False):
+            return False
+        sx, sy = self.x() + int(MARGIN), self.y() + int(MARGIN)
+        w, h = int(round(r.width())), int(round(r.height()))
+        moving = self._drag_from is not None
+        key = (id(g), g.generation, sx, sy, w, h, moving)
+        kept = self._bent
+        if kept is None or kept[0] != key:
+            if moving and self._drag_ms > BEND_BUDGET_MS:
+                return False
+            img = g.bend(sx, sy, w, h, RADIUS, step=DRAG_STEP if moving else None)
+            if img is None:
+                return False
+            # What a step of a drag costs: measured on one, or - from a bend at
+            # rest, on a grid with four times the points - about a quarter.
+            self._drag_ms = g.last_bend_ms if moving else g.last_bend_ms / 4.0
+            kept = self._bent = (key, img)
+        # Bent on a coarser grid than the screen's (lens.STEP); drawn scaled
+        # up, smoothly - paint_card sets SmoothPixmapTransform.
+        p.drawImage(QRectF(r.left(), r.top(), w, h), kept[1])
+        return True
 
     # -- painting helpers shared by every tile --------------------------- #
     def font(self, size: float, weight: int = QFont.Normal,
@@ -717,6 +769,9 @@ class WidgetCard(QWidget):
         self._drag_from = None
         self.settle()
         self.moved.emit()
+        # Where it landed, liquid glass is bent in full for the exact spot: the
+        # drag bent it on a coarser grid, or not at all on a slow PC.
+        self.update()
         ev.accept()
 
     def settle(self) -> None:

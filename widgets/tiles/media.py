@@ -1112,6 +1112,12 @@ class MediaWidget(WidgetCard):
         self.unsetCursor()
         super().leaveEvent(ev)
 
+    def settle(self) -> None:
+        super().settle()
+        # The glass under the card is bent for the spot it stands on, and the
+        # buffer still holds the one from before the drag: recompose it here.
+        self._dirty = True
+
     def mouseReleaseEvent(self, ev) -> None:
         if self._pressed:
             name, self._pressed = self._pressed, None

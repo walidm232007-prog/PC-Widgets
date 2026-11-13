@@ -78,8 +78,12 @@ def selftest() -> int:
     # would hide exactly the thing the frosted material is for.
     backdrop = GlassBackdrop()
     backdrop.refresh()
+    # The clear copy liquid glass bends is built on a thread; the board shows
+    # frosted glass until it lands, but these renders should show the real thing.
+    backdrop.wait_clear()
     print(f"glass backdrop: "
-          f"{'built from wallpaper' if backdrop.image else 'unavailable'}")
+          f"{'built from wallpaper' if backdrop.image else 'unavailable'}, "
+          f"liquid glass {'ready' if backdrop.ready else 'unavailable (frosted)'}")
     spot = [40, 40]
 
     made = []
@@ -151,6 +155,7 @@ def selftest() -> int:
     _check_displays()
     _check_presets()
     _check_glass_displays()
+    _check_liquid_glass(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -906,6 +911,126 @@ def _check_glass_displays() -> None:
               f"{len(pics)} display(s), {own} with a picture (fit mode {mode})")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _check_liquid_glass(pal) -> None:
+    """The cards' liquid glass bends the desktop along its rim, and only there.
+
+    Checked against a made-up desktop whose colour rises one step per column,
+    so the colour a card shows says which column it looked at. The middle of a
+    card has to show what is straight behind it; near the left edge it has to
+    show something further right, near the right edge something further left,
+    and red has to look further than blue. The rim has to be lit along the top
+    and left and hardly at all across the corner away from the light. A large
+    card has to bend in a few milliseconds, since a drag bends it at every
+    step - and a PC too slow for that has to show frosted glass while the card
+    moves and bend it where it lands.
+    """
+    import time as _t
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QImage, QPainter
+
+    try:
+        import numpy as np
+    except ImportError:
+        print("  liquid glass: no numpy, so cards stay frosted (skipped)")
+        return
+
+    from widgets.core import lens
+    from widgets.core.board import REGISTRY
+    from widgets.core.card import BEND_BUDGET_MS, MARGIN, RADIUS
+    from widgets.core.glass import GlassBackdrop
+
+    # A desktop 1200x800, kept at half size like the real clear copy: column u
+    # of the copy is u - 150 bright in red, green and blue alike.
+    ramp = np.clip(np.arange(600) - 150, 0, 255).astype(np.uint8)
+    planes = np.ascontiguousarray(np.broadcast_to(ramp, (3, 400, 600)))
+    g = GlassBackdrop()
+    g.clear, g.clear_origin, g.generation = planes, (0, 0), 1
+    assert g.ready
+
+    sx, sy, w, h = 400, 200, 348, 348
+    img = g.bend(sx, sy, w, h, RADIUS)
+    f = lens.field(w, h, RADIUS)
+    assert (img.width(), img.height()) == (f.cols, f.rows), "bent on the wrong grid"
+
+    def seen(j: int, i: int):
+        c = img.pixelColor(j, i)
+        return c.red(), c.blue()
+
+    def straight(j: int) -> float:       # the copy's column behind grid point j
+        return (sx + j * f.step + f.step / 2.0) / 2.0 - 0.5 - 150
+
+    mid_i, mid_j = f.rows // 2, f.cols // 2
+    red, blue = seen(mid_j, mid_i)
+    assert abs(red - straight(mid_j)) <= 1 and abs(red - blue) <= 1, (
+        f"the middle of the glass is bent: shows {red}/{blue}, behind it is {straight(mid_j):.0f}")
+    red, blue = seen(1, mid_i)
+    assert red > straight(1) + 8, (
+        f"the left rim doesn't look inward: shows {red}, behind it is {straight(1):.0f}")
+    assert red > blue, f"red doesn't bend further than blue at the rim ({red} vs {blue})"
+    edge_red, _ = seen(f.cols - 2, mid_i)
+    assert edge_red < straight(f.cols - 2) - 8, (
+        f"the right rim doesn't look inward: shows {edge_red}, behind it is "
+        f"{straight(f.cols - 2):.0f}")
+
+    rim = g.rim(w, h, RADIUS, True)
+    alpha = lambda x, y: rim.pixelColor(x, y).alpha()
+    lit = max(alpha(k, k) for k in range(30))                 # the corner facing the light
+    away = max(alpha(w - 1 - k, k) for k in range(30))        # the one away from it
+    assert alpha(w // 2, 0) > 30 and alpha(0, h // 2) > 30, "the rim isn't lit along the top and left"
+    assert lit > 2 * away and away < 20, (
+        f"the rim is as bright across the far corner ({away}) as the near one ({lit})")
+    assert alpha(w // 2, h // 2) == 0, "the rim's light reaches into the middle"
+
+    times = []
+    for k in range(7):
+        started = _t.perf_counter()
+        g.bend(sx + k, sy + k, w, h, RADIUS)
+        times.append((_t.perf_counter() - started) * 1000.0)
+    times.sort()
+    # Generous, for GitHub's slower machines and a busy PC; it measures about
+    # 4.5 ms on a Ryzen 5 5600G.
+    assert times[0] < 30.0, f"bending a large card takes {times[0]:.1f} ms"
+
+    # A card: liquid at rest; bent at every step of a drag on a quick PC, on
+    # the coarser drag grid; on a slow one frosted while moving; bent in full
+    # where it lands either way.
+    card = REGISTRY["clock"](pal, "small", {})
+    card.glass = g
+    card.move(sx - int(MARGIN), sy - int(MARGIN))
+    buf = QImage(card.size(), QImage.Format_ARGB32_Premultiplied)
+    painter = QPainter(buf)
+    try:
+        r = card.card_rect()
+        full = lens.field(int(r.width()), int(r.height()), RADIUS).cols
+        assert card._paint_liquid(painter, r), "a card at rest isn't liquid"
+        assert card._bent[1].width() == full, "a card at rest isn't bent in full"
+        card._drag_from = QPoint(10, 10)
+        card._drag_ms = 1.0
+        card.move(card.x() + 7, card.y())
+        assert card._paint_liquid(painter, r), "a quick PC stopped bending during a drag"
+        assert card._bent[1].width() < full, "a drag step was bent on the full grid"
+        moved_to = card._bent[0]
+        card._drag_ms = BEND_BUDGET_MS + 5.0
+        card.move(card.x() + 7, card.y())
+        assert not card._paint_liquid(painter, r), "a slow PC kept bending during a drag"
+        assert card._bent[0] == moved_to, "a slow PC bent a step of the drag anyway"
+        card._drag_from = None
+        assert card._paint_liquid(painter, r) and card._bent[0] != moved_to, (
+            "a slow PC didn't bend the glass where the card was let go")
+        assert card._bent[1].width() == full, "where it was let go, it isn't bent in full"
+        g.clear = None
+        assert not card._paint_liquid(painter, r), "a card bent with no clear copy to bend"
+    finally:
+        painter.end()
+        card.close()
+        card.deleteLater()
+
+    print(f"  liquid glass: bends inward along the rim only, red further than blue, "
+          f"lit top-left; a large card bends in {times[len(times) // 2]:.1f} ms "
+          f"({f.bent_rows.size} of {f.cols * f.rows} points); slow PCs frost while dragging")
 
 
 def _check_layout_mirror() -> None:
