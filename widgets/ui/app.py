@@ -81,7 +81,9 @@ LAYER_TEXT = {
     "normal": "In among your other windows.",
     "top": "Above everything, all the time.",
 }
-GLASS = (("78", "Clearer"), ("112", "Balanced"), ("158", "Frostier"))
+GLASS = (("78", "Clearer"), ("112", "Balanced"), ("158", "Stronger"))
+GLASS_STYLES = (("liquid", "Liquid"), ("frosted", "Frosted"))
+BLURS = (("none", "None"), ("light", "Light"), ("more", "More"))
 OPACITY = (("50", "50%"), ("65", "65%"), ("80", "80%"), ("90", "90%"),
            ("100", "100%"))
 PAGE_MARGIN = 36
@@ -1124,7 +1126,7 @@ class Inspector(QWidget):
         self.bg_title = section_title("Background")
         lay.addWidget(self.bg_title)
         self.bg_group = Group()
-        self.fill = Segmented([("glass", "Frosted glass"), ("solid", "Solid colour")])
+        self.fill = Segmented([("glass", "Glass"), ("solid", "Solid colour")])
         self.fill.changed.connect(lambda k: self._set("fill", k))
         self.bg_group.add(form_row("Style", self.fill))
         self.bg = SwatchRow(appearance.BG_SWATCHES, "Background colour")
@@ -1551,13 +1553,23 @@ class SettingsPage(QWidget):
                  self.INSET)
         self.glass = Switch()
         self.glass.toggled.connect(board.set_glass)
-        look.add(setting_row("drop", "#0a84ff", "Frosted glass",
-                             "The blurred wallpaper showing through each widget.",
+        look.add(setting_row("drop", "#0a84ff", "Glass",
+                             "The wallpaper showing through each widget and the dock.",
                              self.glass), self.INSET)
+        self.glass_style = Segmented(GLASS_STYLES)
+        self.glass_style.changed.connect(self._set_glass_style)
+        look.add(setting_row("layers", "#5ac8fa", "Glass style",
+                             "Liquid bends the wallpaper at its edges; frosted blurs it all.",
+                             self.glass_style), self.INSET)
+        self.blur = Segmented(BLURS)
+        self.blur.changed.connect(board.set_glass_blur)
+        look.add(setting_row("eye", "#64d2ff", "Blur",
+                             "How much liquid glass softens the wallpaper behind it.",
+                             self.blur), self.INSET)
         self.tint = Segmented(GLASS)
         self.tint.changed.connect(lambda v: board.set_glass_tint(int(v)))
         look.add(setting_row("sliders", "#30b0c7", "Glass strength",
-                             "How much tint sits over the blur.", self.tint), self.INSET)
+                             "How much tint sits over the glass.", self.tint), self.INSET)
         self.opacity = Segmented(OPACITY)
         self.opacity.changed.connect(lambda v: board.set_opacity(int(v) / 100.0))
         look.add(setting_row("halfcircle", "#8e8e93", "Opacity",
@@ -1589,10 +1601,10 @@ class SettingsPage(QWidget):
         dock.add(setting_row("desktop", "#5e5ce6", "Floating dock",
                              "Apps, music and Windows controls on your main display.",
                              self.dock_enabled), self.INSET)
-        self.dock_style = Segmented((("glass", "Frosted glass"), ("solid", "Solid colour")))
+        self.dock_style = Segmented((("glass", "Glass"), ("solid", "Solid colour")))
         self.dock_style.changed.connect(lambda v: board.set_dock("style", v))
         dock.add(setting_row("drop", "#0a84ff", "Dock material",
-                             "Glass uses the wallpaper and glass strength above.",
+                             "Glass follows the glass settings above.",
                              self.dock_style), self.INSET)
         dock.add(setting_row("halfcircle", "#bf5af2", "Dock colour",
                              "Choose a tint or solid fill. Right-click the dock to reset.",
@@ -1673,6 +1685,11 @@ class SettingsPage(QWidget):
     def on_show(self) -> None:
         self.sync()     # the Startup shortcut can change outside the app
 
+    def _set_glass_style(self, style: str) -> None:
+        self.win.board.set_glass_style(style)
+        self.blur.setEnabled(style != "frosted")     # frosted has its own blur
+        self.blur.update()
+
     def sync(self) -> None:
         """Show the board's current settings, without re-applying any of them."""
         s = self.win.board.state
@@ -1681,6 +1698,9 @@ class SettingsPage(QWidget):
         if dot is not None:
             dot.setChecked(True)
         self.glass.set_quietly(s.glass)
+        self.glass_style.set_current("frosted" if s.glass_style == "frosted" else "liquid")
+        self.blur.set_current(s.glass_blur if s.glass_blur in dict(BLURS) else "light")
+        self.blur.setEnabled(s.glass_style != "frosted")     # frosted has its own blur
         self.tint.set_current(min(GLASS, key=lambda g: abs(int(g[0]) - s.glass_tint))[0])
         self.opacity.set_current(min(OPACITY, key=lambda o: abs(int(o[0]) - s.opacity * 100))[0])
         self.layer.set_current(s.layer)

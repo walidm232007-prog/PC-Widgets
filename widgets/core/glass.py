@@ -51,10 +51,11 @@ BOX_PASSES = 3
 BOX_RADIUS = 2
 
 CLEAR_SCALE = 2          # the clear copy is kept at 1/2 size...
-# ...and frosted by this many box passes of radius 1 at that size: three come to
-# about Glisse's own 3px blur. With none, a busy wallpaper's fine detail ran
-# straight through the cards' small grey labels.
-CLEAR_FROST = 3
+# ...and frosted at that size by box passes, (radius, passes) for each of
+# Settings' Blur choices. Light, three of radius 1, comes to about Glisse's own
+# 3px blur and is the default: with none, a busy wallpaper's fine detail ran
+# straight through the cards' small grey labels. More is about 6px.
+FROSTS = {"none": (0, 0), "light": (1, 3), "more": (2, 4)}
 
 
 def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
@@ -142,14 +143,17 @@ class GlassBackdrop:
         # 1/CLEAR_SCALE size, or None until it's built (or with no numpy).
         self.clear = None
         self.clear_origin: Tuple[int, int] = (0, 0)
-        # Bumped whenever the desktop picture changes, so a card can tell its
-        # kept bend is for an old one.
+        # Bumped whenever what liquid glass bends changes - a new desktop, a new
+        # clear copy - so a card can tell its kept bend is for an old one.
         self.generation = 0
+        self.liquid = True            # Settings' Glass style; False for frosted
+        self.frost = "light"          # Settings' Blur, a key of FROSTS
         self.notifier = _Notifier()
         self.last_bend_ms = 0.0       # what the last bend cost, its setup aside
         self._lock = threading.Lock()
         self._job = 0
         self._built = threading.Event()
+        self._last = None             # what the last refresh composed, to rebuild from
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -197,7 +201,11 @@ class GlassBackdrop:
         virtual = winapi.virtual_screen()
         self.image, self.origin = self.compose(pics, mode, virtual, QColor(r, g, b))
         self.generation += 1
-        self._start_clear(pics, mode, virtual, QColor(r, g, b))
+        self._last = (pics, mode, virtual, QColor(r, g, b))
+        if self.liquid:
+            self._start_clear(*self._last)
+        else:
+            self._drop_clear()
         return True
 
     # ------------------------------------------------------------------ #
@@ -205,19 +213,53 @@ class GlassBackdrop:
     # ------------------------------------------------------------------ #
     @property
     def ready(self) -> bool:
-        """Whether cards can bend: the clear copy is built for this desktop."""
-        return self.clear is not None
+        """Whether cards can bend: liquid glass chosen, and the clear copy
+        built for this desktop."""
+        return self.liquid and self.clear is not None
 
-    def _start_clear(self, pictures, mode: int, virtual, colour: QColor) -> None:
+    def set_liquid(self, on: bool) -> None:
+        """Settings' Glass style. Frosted drops the clear copy (4 MB, and the
+        build after every wallpaper change); liquid builds it again, frosted
+        until it lands."""
+        on = bool(on)
+        if on == self.liquid:
+            return
+        self.liquid = on
+        if on and self._last is not None:
+            self._start_clear(*self._last)
+        elif not on:
+            self._drop_clear()
+
+    def set_frost(self, level: str) -> None:
+        """Settings' Blur. The clear copy is built again with it, and the old
+        one stays in use until the new one lands, so the cards never flash
+        frosted while the setting changes."""
+        level = level if level in FROSTS else "light"
+        if level == self.frost:
+            return
+        self.frost = level
+        if self.liquid and self._last is not None:
+            self._start_clear(*self._last, keep=True)
+
+    def _drop_clear(self) -> None:
+        with self._lock:
+            self._job += 1             # and any build still running is ignored
+            self.clear = None
+            self._built.set()          # nothing coming: don't keep anyone waiting
+
+    def _start_clear(self, pictures, mode: int, virtual, colour: QColor,
+                     keep: bool = False) -> None:
+        frost = FROSTS.get(self.frost, FROSTS["light"])
         with self._lock:
             self._job += 1
             job = self._job
-            self.clear = None          # the old one shows the old wallpaper
+            if not keep:
+                self.clear = None      # the old one shows the old wallpaper
             self._built.clear()
 
         def build() -> None:
             try:
-                planes, origin = self.compose_clear(pictures, mode, virtual, colour)
+                planes, origin = self.compose_clear(pictures, mode, virtual, colour, frost)
             except Exception:
                 planes = None          # no numpy, or a picture that won't load
             with self._lock:
@@ -225,6 +267,7 @@ class GlassBackdrop:
                     return             # the desktop changed again meanwhile
                 if planes is not None:
                     self.clear, self.clear_origin = planes, origin
+                    self.generation += 1
                 self._built.set()
             if planes is not None:
                 self.notifier.ready.emit()
@@ -239,18 +282,21 @@ class GlassBackdrop:
 
     @staticmethod
     def compose_clear(pictures: Sequence[Tuple[displays.Display, Optional[str]]], mode: int,
-                      virtual: Tuple[int, int, int, int], colour: QColor):
+                      virtual: Tuple[int, int, int, int], colour: QColor,
+                      frost: Tuple[int, int] = FROSTS["light"]):
         """The desktop for liquid glass: fitted like the blurred one, then
-        halved and frosted about as much as Glisse's 3px blur frosts the web.
-        Returns ((3, H, W) uint8 planes, origin)."""
+        halved and frosted by ``frost``, (box radius, passes) - by default
+        about as much as Glisse's 3px blur frosts the web. Returns ((3, H, W)
+        uint8 planes, origin)."""
         import numpy as np
 
         canvas = GlassBackdrop._canvas(pictures, mode, virtual, colour)
         small = canvas.scaled(max(2, canvas.width() // CLEAR_SCALE),
                               max(2, canvas.height() // CLEAR_SCALE),
                               Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        if CLEAR_FROST:
-            small = _box_blur(small, 1, CLEAR_FROST)
+        radius, passes = frost
+        if radius and passes:
+            small = _box_blur(small, radius, passes)
         small = small.convertToFormat(QImage.Format_RGBA8888)
         w, h = small.width(), small.height()
         rgba = np.frombuffer(small.constBits(), dtype=np.uint8,

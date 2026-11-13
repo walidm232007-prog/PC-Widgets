@@ -66,7 +66,7 @@ Four pages, down the side:
   picks which - it starts on the one the window is on. A badge shows which ones
   you already have.
 - **On your desktop** — the widgets you have, under a heading per display.
-  Select one to change its size, the display it's on, frosted or solid
+  Select one to change its size, the display it's on, glass or solid
   background, background and text colours, and background photo. **Show on
   desktop** points it out; **More settings…** opens the same menu as
   right-clicking it (location, watchlist, time style and so on); **Remove
@@ -74,9 +74,9 @@ Four pages, down the side:
 - **Presets** — your displays as they're arranged, drawn to scale with every
   widget where it sits, and your saved layouts: **Save this layout**, then
   **Apply** one to switch to it (see [Presets](#presets)).
-- **Settings** — theme, accent, frosted glass and its strength, opacity, where
-  widgets sit (on the desktop, floating, always on top), snap and lock, start
-  with Windows, and Quit.
+- **Settings** — theme, accent, glass (liquid or frosted, its blur and its
+  strength), opacity, where widgets sit (on the desktop, floating, always on
+  top), snap and lock, start with Windows, and Quit.
 
 The previews are the real tiles painted offscreen, not artwork, so the gallery
 can't drift from what a widget actually looks like. Nothing in the window keeps
@@ -470,11 +470,11 @@ The cards are drawn to sit next to Apple's rather than Windows':
 ## Frosted glass
 
 The cards are genuinely see-through: a blurred copy of the desktop shows through
-each one, tinted, clipped to the squircle. **Frosted glass** and **Glass
-strength** (Clearer / Balanced / Frostier) are in the tray menu. The cards and
-the Glass Dock are now [liquid glass](#liquid-glass), built on the same copy of
-the desktop. Frosted glass is what the app window's sidebar uses, and what a
-card or the dock falls back to.
+each one, tinted, clipped to the squircle. By default the cards and the Glass
+Dock are [liquid glass](#liquid-glass), built on the same copy of the desktop;
+**Glass style → Frosted** (in Settings, or the tray menu beside **Glass** and
+**Glass strength**) gives them this blur instead. Frosted glass is also what the
+app window's sidebar uses, and what a card or the dock falls back to.
 
 Windows offers two materials for this — Mica and Acrylic — and neither works
 here. Both are applied by DWM to the whole *window*, and the window is
@@ -560,6 +560,16 @@ longer than 12 ms, the card shows frosted glass while it moves.
 The clear copy is built on a thread after each wallpaper change, taking about
 0.4 s here, and until it lands a card shows frosted glass. A card also stays
 frosted without numpy (a checkout with only PySide6).
+
+**Settings → Look** has the choices. **Glass style** is Liquid or Frosted, for
+the cards and the dock together; Frosted drops the clear copy altogether.
+**Blur** sets how much liquid glass softens the wallpaper. Light is the
+default, Glisse's 3 px. None shows it crisp, and More is about 6 px, for a busy
+wallpaper behind small text. A new Blur rebuilds the clear copy on its thread,
+and the cards keep the old one until the new one lands, so nothing flashes
+frosted while it changes. **Glass strength** is the tint over either style, and
+its third step is now Stronger rather than Frostier, since the blur is a
+setting of its own.
 
 The Glass Dock, its music menu and its window previews are liquid glass too.
 Each is bent once for where it comes to rest, and its slide, rise or neon

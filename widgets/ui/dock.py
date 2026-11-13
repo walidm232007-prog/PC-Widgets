@@ -1948,7 +1948,7 @@ class GlassDock(QWidget):
         if state.dock_hidden:
             menu.addAction("Show all taskbar pins", lambda: self.board.set_dock("hidden", []))
         menu.addSeparator()
-        for key, label in (("glass", "Frosted glass"), ("solid", "Solid colour")):
+        for key, label in (("glass", "Glass"), ("solid", "Solid colour")):
             action = menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(state.dock_style == key)
