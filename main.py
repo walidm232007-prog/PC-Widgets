@@ -156,6 +156,7 @@ def selftest() -> int:
     _check_presets()
     _check_glass_displays()
     _check_liquid_glass(pal_mod.build("dark", "blue"))
+    _check_glass_settings(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -1031,6 +1032,101 @@ def _check_liquid_glass(pal) -> None:
     print(f"  liquid glass: bends inward along the rim only, red further than blue, "
           f"lit top-left; a large card bends in {times[len(times) // 2]:.1f} ms "
           f"({f.bent_rows.size} of {f.cols * f.rows} points); slow PCs frost while dragging")
+
+
+def _check_glass_settings(pal) -> None:
+    """Settings' Glass style and Blur do what they say.
+
+    Frosted turns liquid glass off: the clear copy is dropped and a card
+    shows the blur. Each Blur level softens more than the one before, judged on
+    a made-up wallpaper of 8px black and white squares. Changing the Blur keeps
+    the old clear copy in use until the new one is built, so the cards never
+    flash frosted, and the new one is a new generation, so their kept bends
+    are redone. Style and blur survive a save as well.
+    """
+    import tempfile
+
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    try:
+        import numpy as np
+    except ImportError:
+        print("  glass settings: no numpy, so glass is always frosted (skipped)")
+        return
+
+    from widgets.core import store, winapi
+    from widgets.core.board import REGISTRY
+    from widgets.core.card import MARGIN
+    from widgets.core.displays import Display
+    from widgets.core.glass import FROSTS, GlassBackdrop
+
+    tmp = tempfile.mkdtemp(prefix="pcwidgets-blur-")
+    try:
+        check = QImage(400, 300, QImage.Format_RGB32)
+        check.fill(QColor("#000000"))
+        p = QPainter(check)
+        for y in range(0, 300, 8):
+            for x in range(0, 400, 8):
+                if (x // 8 + y // 8) % 2:
+                    p.fillRect(x, y, 8, 8, QColor("#ffffff"))
+        p.end()
+        picture = os.path.join(tmp, "check.png")
+        check.save(picture)
+        screen = Display("A", "A", (0, 0, 400, 300), (0, 0, 400, 300), True)
+        last = ([(screen, picture)], winapi.WALL_STRETCH, (0, 0, 400, 300), QColor("#000000"))
+
+        spread = {}
+        for level in ("none", "light", "more"):
+            planes, _origin = GlassBackdrop.compose_clear(*last, FROSTS[level])
+            spread[level] = float(planes[0].astype(np.float32).std())
+        assert spread["none"] > spread["light"] > spread["more"], (
+            f"the blur levels don't soften in order: {spread}")
+
+        g = GlassBackdrop()
+        g._last = last
+        g._start_clear(*last)
+        assert g.wait_clear() and g.ready, "the clear copy wasn't built"
+        before, gen = g.clear, g.generation
+        g.set_frost("more")
+        assert g.ready and g.clear is before, "changing the blur dropped the glass meanwhile"
+        assert g.wait_clear() and g.clear is not before and g.generation > gen, (
+            "the new blur's clear copy didn't replace the old one")
+
+        card = REGISTRY["clock"](pal, "small", {})
+        card.glass = g
+        card.move(40 - int(MARGIN), 40 - int(MARGIN))
+        buf = QImage(card.size(), QImage.Format_ARGB32_Premultiplied)
+        painter = QPainter(buf)
+        try:
+            assert card._paint_liquid(painter, card.card_rect()), "a card isn't liquid"
+            g.set_liquid(False)
+            assert g.clear is None and not g.ready, "frosted kept the clear copy"
+            assert not card._paint_liquid(painter, card.card_rect()), "frosted still bent"
+            g.set_liquid(True)
+            assert g.wait_clear() and card._paint_liquid(painter, card.card_rect()), (
+                "back to liquid, the card didn't bend again")
+        finally:
+            painter.end()
+            card.close()
+            card.deleteLater()
+
+        path = os.path.join(tmp, "board.json")
+        state = store.BoardState(glass_style="frosted", glass_blur="more")
+        import json
+        from dataclasses import asdict
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(asdict(state), f)
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        assert raw["glass_style"] == "frosted" and raw["glass_blur"] == "more"
+        fresh = store.BoardState()
+        assert (fresh.glass_style, fresh.glass_blur) == ("liquid", "light"), \
+            "a new board doesn't start liquid with a light blur"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"  glass settings: frosted drops the clear copy and cards blur; blur levels soften "
+          f"in order (spread {spread['none']:.0f} / {spread['light']:.0f} / "
+          f"{spread['more']:.0f}); a new blur swaps in without a frosted flash")
 
 
 def _check_layout_mirror() -> None:

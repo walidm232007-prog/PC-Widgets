@@ -1232,6 +1232,8 @@ class Segmented(Cached, QWidget):
     def paint(self, p: QPainter) -> None:
         ui = current()
         hints(p)
+        if not self.isEnabled():
+            p.setOpacity(0.4)           # a choice that doesn't apply just now
         r = QRectF(self.rect())
         rad = r.height() / 2
         p.fillPath(rounded(r, rad), QColor(ui.control))
