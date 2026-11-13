@@ -1991,7 +1991,7 @@ def _check_welcome() -> None:
             spot = (b.x() + int(b.height() * 0.55), b.y() + b.height() // 2)
             assert not b.filled(), "Start Setup opened filled"
             outline = shot.pixelColor(*spot)
-            b.hover = True
+            b.set_hover(True)
             lit = main.grab().toImage()
             assert outline.lightness() < 140 and lit.pixelColor(*spot).lightness() > 240, \
                 (outline.name(), lit.pixelColor(*spot).name())
@@ -1999,7 +1999,24 @@ def _check_welcome() -> None:
             lit.copy(QRect(b.x() - 260, top, b.width() + 520,
                            main.skip_btn.y() + main.skip_btn.height() + 30 - top)).save(
                 os.path.join(out, "_welcome_hover.png"))
-            b.hover = False
+            b.set_hover(False)
+            assert b.fill.t == 0.0, "the fill didn't go when the pointer left"
+
+            # With motion the fill eases in over FILL_MS on the frame clock
+            # instead of switching, and a reversal half way takes half as long.
+            from PySide6.QtCore import QAbstractAnimation
+            from PySide6.QtWidgets import QWidget
+            probe = QWidget()
+            fade = wmod._Fade(probe, wmod.FILL_MS, True)
+            fade.to(1.0)
+            assert fade.t < 1.0 and fade._tween.state() == QAbstractAnimation.Running, \
+                "the hover fill switched instead of fading"
+            fade._tween.stop()
+            fade.t = 0.5
+            fade.to(0.0)
+            assert abs(fade._tween._ms - wmod.FILL_MS * 0.5) < 1.0, fade._tween._ms
+            fade._tween.stop()
+            probe.deleteLater()
             QApplication.sendEvent(main, QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
             assert w.state == "closed" and board.state.setup == "done", w.state
             assert [c.kind for c in board.cards] == starter, [c.kind for c in board.cards]

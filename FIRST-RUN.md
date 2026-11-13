@@ -96,6 +96,10 @@ Rules that hold throughout:
   a large screen isn't repainted every frame.
 - Keys: Esc is Skip Setup, Enter is Start Setup, Tab reaches the buttons.
   Focus starts on the screen, not on Start Setup, so it opens as an outline.
+- Start Setup eases between its outline and its white fill over 0.18 s, its
+  label going from white to dark with it, and Skip Setup brightens the same
+  way. The fade steps on the frame clock, at the monitor's own refresh rate,
+  and a fade turned round half way takes half as long.
 - It is topmost only while it has the focus; Alt+Tab puts it behind whatever
   you switched to, with the taskbar back, and returning raises it again.
 - `tray.show_window()` opens the welcome instead of the app window while the
