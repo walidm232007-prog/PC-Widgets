@@ -2983,7 +2983,11 @@ def _check_updater() -> None:
         off = updater(enabled=False)
         off.check()
         assert off.status == "off" and served["fetches"] == 0, "a checkout looked for updates"
-        assert up.Updater(threaded=False).status == "off", "a source run would update itself"
+        # On by itself exactly when installed: this same test runs from a
+        # checkout and inside the built exe (tools/build_exe.py).
+        from widgets.core import paths
+        assert up.Updater(threaded=False).enabled == paths.FROZEN, \
+            "the updater's default doesn't follow installed versus checkout"
 
         u = updater()
         assert u.due()
@@ -3140,7 +3144,6 @@ def _check_update_install() -> None:
         assert not up.install_at_start(True, updater()) and len(started) == count, \
             "it installed with automatic updates off"
         assert not up.install_at_start(True, updater(enabled=False)), "a checkout installed"
-        assert up.Updater(threaded=False).enabled is False
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     print("  update install: the checked installer starts silently, told how to reopen and "
