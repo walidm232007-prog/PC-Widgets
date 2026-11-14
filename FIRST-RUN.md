@@ -9,7 +9,7 @@ plan for building it. The look was settled on mockups with the developer on
 | M1 – groundwork: tell a fresh install apart, Windows' theme and units, the town search, Weather's Set your town button | done |
 | M2 – the welcome screen: every screen dims, Welcome, Start Setup | done |
 | M3 – the steps: location, the widget slideshow, the dock, the finish | done |
-| M4 – finish: readable button colours everywhere, docs, installer build, a live try | next |
+| M4 – finish: readable button colours everywhere, docs, installer build, a live try | built and tested locally; the CI dry run waits on a push |
 
 ## Why it needs one
 
@@ -192,3 +192,13 @@ Rules that hold throughout:
   it points at `--reset` and Set up again. README lists Set up again under
   Settings and explains the deeper button shade; packaging/README.md says
   what Setup's Finish now opens on a fresh install.
+- The full local build (`tools/build_exe.py --installer`, from a clean export
+  of the commit) passed every check: the 101 MB app, its licences and
+  properties, the guard and the media helper, the packaged app's own
+  `--selftest` (welcome, setup steps and button shades included) in 30 s, the
+  31 MB installer, and a silent install, Start menu launch and uninstall.
+- The setup was tried live twice on a real desk (1920 x 1080 main screen and a
+  portrait one) through a scratch script with its own app data and no real
+  dock: no errors, Skip part way and Done with every widget switched off both
+  ending as they should. The button shades show once the branch reaches the
+  board the developer runs.
