@@ -1486,6 +1486,7 @@ def check_see_through(app, out):
         got.clear()
         pump(app, 1.0)
         moving = len(got)
+        blurred = w._style[1]
         assert w.patch is not None and (444, 706, 1052, 52, 20.0) in w.patch.bent, \
             "a new capture wasn't bent ahead for the pane the dock wants"
         frames["moving"] = False
@@ -1493,6 +1494,7 @@ def check_see_through(app, out):
         start = frames["n"]
         pump(app, 1.0)
         still = frames["n"] - start
+        cleared = w._style[1]
         w.stop()
         report = w.last_report
         logged = open(store.log_path(), encoding="utf-8").read() if             os.path.exists(store.log_path()) else ""
@@ -1502,10 +1504,14 @@ def check_see_through(app, out):
         logs.cleanup()
     assert report and report in logged, f"the stretch of movement wasn't logged: {report!r}"
     assert moving >= 30, f"only {moving} captures a second while the window behind moved"
+    user = behind._glass.FROSTS[b.glass.frost]
+    assert blurred == behind.MOTION_STEPS[-1],         f"liquid glass wasn't blurred for movement: {blurred}"
+    assert cleared == user, f"the glass didn't clear again once still: {cleared} not {user}"
     assert still <= 13, f"{still} grabs a second while nothing behind moved"
     print(f"PASS: with a window behind the dock its glass shows it, liquid {seen[0]} and frosted "
           f"{seen[1]} over a magenta window, and the wallpaper returns when it goes; "
-          f"{moving} captures a second while it moves, bent ahead, {still} grabs while it's still")
+          f"{moving} captures a second while it moves, bent ahead and blurred to "
+          f"{blurred}, {still} grabs while it's still, clear again at {cleared}")
 
 
 def main():
