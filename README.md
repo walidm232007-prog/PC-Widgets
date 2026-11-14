@@ -12,12 +12,12 @@ say "Windows protected your PC" the first time: **More info**, then **Run
 anyway**. A newer installer run over it updates it and keeps your widgets.
 `packaging/README.md` covers how it is built.
 
-From 1.0.3 it keeps itself up to date: once a day it asks GitHub whether
+From 1.1.0 it keeps itself up to date: once a day it asks GitHub whether
 there's a newer release, downloads it in the background, and installs it the
 next time it starts - or straight away from **Settings › Updates › Restart to
 update**. It installs nothing that isn't signed with the release key built into
 it, and the request sends nothing about your PC. **Automatic updates** in the
-same place turns it off. Copies of 1.0.2 move to 1.0.3 by running its
+same place turns it off. Copies of 1.0.2 move to 1.1.0 by running its
 installer once, over the top. [AUTO-UPDATE.md](AUTO-UPDATE.md) has the design.
 
 ## From a fresh clone

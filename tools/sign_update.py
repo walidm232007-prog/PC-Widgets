@@ -4,8 +4,8 @@ sign_update.py
 Write a release's update.json, signed - the file installed copies look for
 every day (widgets/core/updater.py, AUTO-UPDATE.md).
 
-    python tools/sign_update.py --installer build/PC-Widgets-Setup-1.0.3.exe
-                                --version 1.0.3 --out build/update.json
+    python tools/sign_update.py --installer build/PC-Widgets-Setup-1.1.0.exe
+                                --version 1.1.0 --out build/update.json
 
 The private key comes from the UPDATE_SIGNING_KEY environment variable: the
 release workflow's secret, made by tools/update_key.py. The file is checked

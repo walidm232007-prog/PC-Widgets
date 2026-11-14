@@ -1,7 +1,7 @@
 # Automatic updates
 
 How an installed PC Widgets keeps itself up to date, and the plan for
-building it. Agreed with the developer on 2026-11-14, to land before 1.0.3.
+building it. Agreed with the developer on 2026-11-14, for 1.1.0.
 
 | milestone | state |
 |---|---|
@@ -39,8 +39,8 @@ a new release and doing that by itself, so nobody has to go looking.
 5. **Settings › Updates.** An "Automatic updates" switch (on), "Check now", and a
    status line; one tray tip when an update is ready.
 
-Copies of 1.0.2 have no updater, so they move to 1.0.3 by running its
-installer once, over the top; from 1.0.3 on, updates come by themselves.
+Copies of 1.0.2 have no updater, so they move to 1.1.0 by running its
+installer once, over the top; from 1.1.0 on, updates come by themselves.
 
 ## What M1 laid down
 
@@ -132,8 +132,8 @@ installer once, over the top; from 1.0.3 on, updates come by themselves.
 - The wording and the button live in the updater (`describe`, `action`), so
   they're tested without a window; at start the updater picks up where the
   last run left off, so Settings is right before any check runs.
-- README's Download section says what happens from 1.0.3 on, and that 1.0.2
-  copies need the 1.0.3 installer once; INSTALL.md says a copy run from source
+- README's Download section says what happens from 1.1.0 on, and that 1.0.2
+  copies need the 1.1.0 installer once; INSTALL.md says a copy run from source
   updates with git.
 - Selftest: `_check_update_ui`, rendering the group to
   `_selftest/_app_updates_*.png`.
