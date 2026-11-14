@@ -97,6 +97,7 @@ class BoardState:
     close_hint_shown: bool = False  # "closing the window keeps the widgets", said once
     dock_enabled: bool = False      # opt in; ordinary desktop layout stays intact
     dock_style: str = "glass"       # glass | solid, independent of the cards
+    dock_see_through: bool = True   # glass shows the windows behind the dock (behind.py)
     dock_color: str = ""            # empty follows the board's light/dark theme
     dock_music_side: str = "left"
     dock_replace_taskbar: bool = True

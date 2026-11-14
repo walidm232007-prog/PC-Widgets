@@ -244,7 +244,7 @@ class MusicPanel(DockPanel):
         # dock's comes from where it rests up: bent once, not every frame.
         rest = self.rest()
         paint_material(p, self._capsule, s, pal, dock.board, tint, window, rest.x(), rest.y(),
-                       owner=self)
+                       owner=self, source=dock._through)
         if state.dock_neon:
             p.drawImage(0, 0, self._neon.frame(
                 self._content, self._capsule, RADIUS * s, s, state.dock_neon_colors,

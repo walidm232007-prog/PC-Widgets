@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 os.environ["PCWIDGETS_NO_AUDIO"] = "1"
 
-from PySide6.QtCore import QFileInfo, QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QFileInfo, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QFileIconProvider, QWidget
 from widgets.core import audio, dock_shell as shell, media, palette, store, winapi
@@ -1401,6 +1401,68 @@ def check_live(app, board, out):
     print("PASS: live dock shows, reserves its space, and gives the taskbar and work area back")
 
 
+def check_see_through(app, out):
+    """With a window behind it, the dock's glass shows that window, not the
+    wallpaper: a capture (behind.py) stands in for the desktop in both the
+    liquid and the frosted glass, and the wallpaper comes back when it goes.
+    The capture here is made up - a magenta window - so nothing is grabbed."""
+    import numpy as np
+    from widgets.core import behind
+    b = TestBoard()
+    b.palette = palette.build("dark")
+    b.state.dock_style = "glass"
+    dock = GlassDock(b, preview=True)
+    dock.setAttribute(Qt.WA_DontShowOnScreen)
+    dock._snap = fake_snapshot()
+    dock._np = media.NowPlaying()
+    dock.sync()
+    dock.resize(1100, 64)
+    dock.move(420, 700)
+    dock.show()
+    pump(app, 0.05)
+    assert dock._behind._thread is None, "a preview dock started grabbing the screen"
+
+    def middle():
+        dock.invalidate()
+        img = dock.grab().toImage()
+        cap = dock._capsule
+        # Between the buttons, on the glass: the capsule's left end, mid-height.
+        return QColor(img.pixel(round(cap.left() + 6), round(cap.center().y())))
+
+    rect = (420 - behind.MARGIN, 700 - behind.MARGIN, 420 + 1100 + behind.MARGIN,
+            700 + 64 + behind.MARGIN)
+    px = np.zeros((rect[3] - rect[1], rect[2] - rect[0], 4), np.uint8)
+    px[...] = (255, 0, 255, 0)                  # blue, green, red, x: magenta
+    seen = []
+    for liquid in (True, False):
+        b.glass.liquid = liquid
+        dock._behind.patch = None
+        wall = middle()
+        dock._behind.patch = behind.build(px, rect, liquid, (1, 3), 1 + liquid)
+        dock._on_behind()
+        live = middle()
+        assert live.red() - live.green() > 60 and live.blue() - live.green() > 60, \
+            f"{'liquid' if liquid else 'frosted'} glass doesn't show the window: {live.name()}"
+        assert dock.grab().save(str(out / f"see-through-{'liquid' if liquid else 'frosted'}.png"))
+        dock._behind.patch = None
+        dock._on_behind()
+        assert middle() == wall, "the wallpaper didn't come back when the window went"
+        seen.append(live.name())
+    b.glass.liquid = True
+    dock.close()
+
+    # The watcher's thread ends when it stops and starts again when asked.
+    w = behind.Behind(b.glass)
+    w.watch([QRect(0, 0, 8, 8)])
+    w.stop()
+    end = time.monotonic() + 2.0
+    while w._thread is not None and time.monotonic() < end:
+        time.sleep(0.01)
+    assert w._thread is None, "the capture thread didn't stop"
+    print(f"PASS: with a window behind the dock its glass shows it, liquid {seen[0]} and frosted "
+          f"{seen[1]} over a magenta window, and the wallpaper returns when it goes")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(ROOT / "_selftest" / "dock"))
@@ -1419,6 +1481,7 @@ def main():
     check_neon_bars(out, board)
     check_row_animation(app, out, board)
     check_liquid(app, out)
+    check_see_through(app, out)
     check_cover_fade(app, out, board)
     check_rows(board)
     check_native()

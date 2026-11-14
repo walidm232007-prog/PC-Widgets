@@ -25,7 +25,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinear
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QToolTip, QWidget
 
-from ..core import audio, dock_shell as shell, media, palette, typography, winapi
+from ..core import audio, behind, dock_shell as shell, media, palette, typography, winapi
 from ..core.card import Fader, squircle
 from ..core.frameclock import Ticker, Tween, clock
 from ..core.store import _log, report
@@ -362,15 +362,19 @@ def _paint_rim(p, cap, radius, dark, glass, sliced):
     p.drawImage(QRectF(left + w - end, top, end, h), base, QRectF(end + 2, 0, end, h))
 
 
-def paint_material(p, cap, s, pal, board, tint, area, x, y, owner=None, coarse=False):
+def paint_material(p, cap, s, pal, board, tint, area, x, y, owner=None, coarse=False,
+                   source=None):
     """The dock's capsule - its shadow, glass or matte fill, and its light - in
     a window whose whole rect is area, at x, y on the screen. The music menu
     draws itself with this too, so the two match exactly.
 
     The glass is liquid (see lens.py), kept on ``owner``, when the board's
     glass can bend: a lit rim, like the cards'. Otherwise frosted, with a sheen
-    and a hairline. ``coarse`` while the capsule changes size every frame."""
+    and a hairline. ``coarse`` while the capsule changes size every frame.
+    ``source`` stands in for the board's glass: the dock's LiveGlass, which
+    shows the windows behind it (behind.py)."""
     state = board.state
+    source = source or board.glass
     radius = RADIUS * s
     paint_shadow(p, cap, radius, blur=round(14 * s), alpha=80 if pal.dark else 50, dy=3 * s)
     path = squircle(cap, radius)
@@ -379,8 +383,8 @@ def paint_material(p, cap, s, pal, board, tint, area, x, y, owner=None, coarse=F
     glass = state.dock_style == "glass"
     liquid = False
     if glass:
-        liquid = _paint_liquid(p, cap, radius, board.glass, area, x, y, owner, coarse)
-        drew = liquid or board.glass.paint_into(p, area, x, y)
+        liquid = _paint_liquid(p, cap, radius, source, area, x, y, owner, coarse)
+        drew = liquid or source.paint_into(p, area, x, y)
         tint.setAlpha(max(70, min(225, state.glass_tint)) if drew else 235)
     p.fillPath(path, tint)
     if glass and not liquid:
@@ -393,7 +397,7 @@ def paint_material(p, cap, s, pal, board, tint, area, x, y, owner=None, coarse=F
     p.setBrush(Qt.NoBrush)
     if liquid:
         # The edge catching a light from the top left, as on the cards.
-        _paint_rim(p, cap, radius, pal.dark, board.glass, sliced=coarse)
+        _paint_rim(p, cap, radius, pal.dark, source, sliced=coarse)
         return
     if glass:
         # A hairline that catches that light along the top edge.
@@ -735,6 +739,12 @@ class GlassDock(QWidget):
         self._slider.valueChanged.connect(lambda v: self.move(self.x(), round(v)))
         self._slider.finished.connect(self._slid)
         self._glass_at = None         # while sliding: where the glass is sampled, fixed
+        # What is really behind the dock, captured while a window covers it
+        # (behind.py), and the glass that paints from it or the wallpaper.
+        self._behind = behind.Behind(board.glass)
+        self._through = behind.LiveGlass(self._behind)
+        self._behind.changed.connect(self._on_behind)
+        self._excluded = set()        # windows left out of screen captures
         self._neon = NeonRing()
         self._neon_img = None
         self._neon_timer = Ticker(self._neon_tick, max_fps=NEON_FPS)
@@ -786,6 +796,7 @@ class GlassDock(QWidget):
         self.invalidate()
         self._refresh()
         self._sync_neon()
+        self._sync_behind()
 
     def _start(self):
         self._running = True
@@ -814,6 +825,7 @@ class GlassDock(QWidget):
 
     def shutdown(self):
         self._running = False
+        self._sync_behind()
         self._watch.stop()
         self._frame.stop()
         self._soon.stop()
@@ -1011,6 +1023,53 @@ class GlassDock(QWidget):
             if self._listening:
                 self._frame.start()
         self._sync_neon()
+        self._sync_behind()
+
+    # -- seeing through to the windows behind (behind.py) ----------------- #
+    def _sync_behind(self):
+        """Watch the strip under the dock while it is up, or on its way up, as
+        glass - the music menu's too while it is open. Down, keep the last
+        capture for the next slide up; off, drop it and put the dock back in
+        screenshots."""
+        state = self.board.state
+        wanted = (not self.preview and self._running and state.dock_style == "glass"
+                  and state.dock_see_through)
+        if not wanted:
+            self._behind.stop()
+            self._exclude(())
+            return
+        screen = QApplication.primaryScreen()
+        if screen is None or not self._up or (not self.isVisible() and
+                                              self._slider.state() != QAbstractAnimation.Running):
+            self._behind.stop(keep=True)
+            return
+        rects, skip = [self._target(screen)], [int(self.winId())]
+        music = self._music
+        if music is not None and music.up:
+            rects.append(music.rest())
+            skip.append(int(music.winId()))
+        self._exclude(skip)
+        panels = [w for w in (self._previews, getattr(self._previews, "halo", None))
+                  if w is not None and w.isVisible()]
+        self._behind.watch(rects, skip + [int(w.winId()) for w in panels])
+
+    def _exclude(self, hwnds):
+        """Leave just these of the dock's windows out of screen captures, so
+        the grab sees past them; the rest go back into captures."""
+        want = {int(h) for h in hwnds if h}
+        for h in self._excluded - want:
+            behind.exclude(h, False)
+        for h in want - self._excluded:
+            if not behind.exclude(h, True):
+                want.discard(h)
+        self._excluded = want
+
+    def _on_behind(self):
+        """A new capture, or the window behind went: draw the glass again."""
+        self.invalidate()
+        music = self._music
+        if music is not None and music.isVisible():
+            music.update()
 
     def _lease_taskbar(self):
         if self.board.state.dock_replace_taskbar:
@@ -1037,6 +1096,7 @@ class GlassDock(QWidget):
         self.hide()
         self._frame.stop()
         self._neon_timer.stop()
+        self._sync_behind()
 
     def _slide(self, up):
         """Down off the screen's bottom edge, or back up, the way the taskbar
@@ -1073,6 +1133,7 @@ class GlassDock(QWidget):
         self._slider.setDuration(180 if up else 240)
         self._slider.setEasingCurve(QEasingCurve.OutCubic if up else QEasingCurve.InCubic)
         self._slider.start()
+        self._sync_behind()
 
     def _slid(self):
         self._glass_at = None
@@ -1080,6 +1141,7 @@ class GlassDock(QWidget):
             self.hide()
             self._frame.stop()
             self._neon_timer.stop()
+        self._sync_behind()
 
     def _edge_tick(self):
         """While something is fullscreen: the pointer resting on the main
@@ -1441,7 +1503,7 @@ class GlassDock(QWidget):
         growing = self._grow.state() == QAbstractAnimation.Running
         paint_material(p, self._capsule, self._s, self._pal, self.board, tint,
                        QRectF(0, 0, self.width(), self.height()), x, y,
-                       owner=self, coarse=growing)
+                       owner=self, coarse=growing, source=self._through)
 
     def _plate(self, p, ident, rect, active=False, radius=10):
         dark = self._pal.dark
@@ -1753,6 +1815,7 @@ class GlassDock(QWidget):
         self.hide_previews()
         QToolTip.hideText()
         self._music.open(self.x() + rect.center().x(), self.y() + self._capsule.top())
+        self._sync_behind()
 
     def close_music(self):
         if self._music is not None:

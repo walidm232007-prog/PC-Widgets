@@ -851,7 +851,7 @@ class Board(QObject):
     # ------------------------------------------------------------------ #
     def set_dock(self, key: str, value) -> None:
         """Dock preferences use the same save and notification path as cards."""
-        if key in ("enabled", "replace_taskbar", "neon"):
+        if key in ("enabled", "replace_taskbar", "neon", "see_through"):
             value = bool(value)
         elif key == "neon_colors":
             from PySide6.QtGui import QColor

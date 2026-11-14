@@ -1674,6 +1674,12 @@ class SettingsPage(QWidget):
         dock.add(setting_row("drop", "#0a84ff", "Dock material",
                              "Glass follows the glass settings above.",
                              self.dock_style), self.INSET)
+        self.dock_see_through = Switch()
+        self.dock_see_through.toggled.connect(lambda on: board.set_dock("see_through", on))
+        dock.add(setting_row("eye", "#64d2ff", "See through windows",
+                             "Glass blurs the window behind the dock. The dock then "
+                             "doesn't show in screenshots or recordings.",
+                             self.dock_see_through), self.INSET)
         dock.add(setting_row("halfcircle", "#bf5af2", "Dock colour",
                              "Choose a tint or solid fill. Right-click the dock to reset.",
                              Button("Choose…", "secondary", slot=self._dock_colour)), self.INSET)
@@ -1777,6 +1783,7 @@ class SettingsPage(QWidget):
         self.lock.set_quietly(s.locked)
         self.dock_enabled.set_quietly(s.dock_enabled)
         self.dock_style.set_current(s.dock_style)
+        self.dock_see_through.set_quietly(s.dock_see_through)
         self.dock_music.set_current(s.dock_music_side)
         self.dock_replace.set_quietly(s.dock_replace_taskbar)
         self.dock_neon.set_quietly(s.dock_neon)
