@@ -75,7 +75,11 @@ Four pages, down the side:
   **Apply** one to switch to it (see [Presets](#presets)).
 - **Settings** — theme, accent, glass (liquid or frosted, its blur and its
   strength), opacity, where widgets sit (on the desktop, floating, always on
-  top), snap and lock, start with Windows, and Quit.
+  top), snap and lock, start with Windows, Set up again, and Quit.
+
+Filled buttons use a deeper shade of the accent than the accent itself, so the
+white label on them passes 4.5:1 whichever accent is picked; the raw blue gives
+3.7:1 and green 2.3:1. Calendar's today circle does the same.
 
 The previews are the real tiles painted offscreen, not artwork, so the gallery
 can't drift from what a widget actually looks like. Nothing in the window keeps

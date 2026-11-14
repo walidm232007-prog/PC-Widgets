@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 from ..core import appearance, displays, mark, startup, winapi
 from ..core.board import REGISTRY, Board, placement_size
 from ..core.card import MARGIN, RADIUS
-from ..core.palette import ACCENTS
+from ..core.palette import ACCENTS, button_fill
 from . import cropper, previews, theme
 from .chrome import Chrome
 from .theme import (
@@ -856,7 +856,7 @@ class GalleryTile(Cached, QWidget):
             f = theme.font(8.75, QFont.DemiBold)
             tw = QFontMetricsF(f).horizontalAdvance(text)
             chip = QRectF(well.left() + 12, well.top() + 12, tw + 34, 24)
-            p.fillPath(rounded(chip, 12), QColor(ui.accent))
+            p.fillPath(rounded(chip, 12), QColor(button_fill(ui.accent)))
             glyph(p, "check", QRectF(chip.left() + 9, chip.top() + 6, 12, 12), "#ffffff", 1.8)
             p.setFont(f)
             p.setPen(QColor("#ffffff"))
