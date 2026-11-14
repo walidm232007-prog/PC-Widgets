@@ -6,8 +6,8 @@ building it. Agreed with the developer on 2026-11-14, to land before 1.0.3.
 | milestone | state |
 |---|---|
 | M1 – find, trust and download an update | done |
-| M2 – install it: a silent upgrade that reopens the app, tested end to end | built; the full build's update test is next |
-| M3 – Settings › App and the tray: the switch, Check now, the status, one tip | not started |
+| M2 – install it: a silent upgrade that reopens the app, tested end to end | done |
+| M3 – Settings › App and the tray: the switch, Check now, the status, one tip | next |
 | M4 – release: the signing key, the workflow signs and attaches the update file, a CI dry run | not started |
 
 ## Why
@@ -107,3 +107,7 @@ installer once, over the top; from 1.0.3 on, updates come by themselves.
   which shows nothing and leaves a log. Then it all uninstalls.
 - Selftest: `_check_update_install`, with Setup's start recorded instead of
   run.
+- The full local build passed with it: version 1.0.2 installed, handed over
+  to the same build packaged as 1.0.3, upgraded in place and reopened in
+  68 seconds, Setup's log showing the silent command line and a clean
+  install, and nothing left behind after the uninstall.
