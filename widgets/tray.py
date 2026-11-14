@@ -71,7 +71,9 @@ class WidgetTray(QSystemTrayIcon):
         self._window = None
         self._welcome = None             # the first-run welcome while it's open
         self._menu: QMenu | None = None
-        self.updater = None              # widgets/core/updater.Updater, set by main.run()
+        self.updater = None              # widgets/core/updater.Updater (watch_updates)
+        self._tip_kind = None            # what clicking the last balloon does
+        self.messageClicked.connect(self._tip_clicked)
 
         self.setToolTip("PC Widgets — click to open · Ctrl+Alt+W to peek")
         self.activated.connect(self._activated)
@@ -372,6 +374,37 @@ class WidgetTray(QSystemTrayIcon):
         self.board.close_all()
         self.hide()
         QCoreApplication.instance().quit()
+
+    # -- updates ------------------------------------------------------------ #
+    def watch_updates(self, updater) -> None:
+        """Keep the updater (widgets/core/updater.py) for Settings, and say
+        once, here, when an update has downloaded."""
+        self.updater = updater
+        updater.changed.connect(self._update_changed)
+
+    def _update_changed(self) -> None:
+        u = self.updater
+        if u is None or not u.tip_due():
+            return
+        u.tipped()
+        QSystemTrayIcon.showMessage(
+            self, f"PC Widgets {u.version} is ready",
+            "It installs the next time PC Widgets starts. Click here to restart and update now.",
+            self.icon(), 10000)
+        self._tip_kind = "update"
+
+    def showMessage(self, *args) -> None:
+        """Any other balloon: clicking it mustn't start an update."""
+        self._tip_kind = None
+        super().showMessage(*args)
+
+    def _tip_clicked(self) -> None:
+        if self._tip_kind != "update" or self.updater is None:
+            return
+        self._tip_kind = None
+        window = self._window is not None and self._window.isVisible()
+        if self.updater.apply("window" if window else "background", manual=True):
+            self._quit()
 
     # ------------------------------------------------------------------ #
     def install_hotkey(self, hotkey_id: int, mods: int, vk: int) -> bool:

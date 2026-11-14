@@ -12,6 +12,14 @@ say "Windows protected your PC" the first time: **More info**, then **Run
 anyway**. A newer installer run over it updates it and keeps your widgets.
 `packaging/README.md` covers how it is built.
 
+From 1.0.3 it keeps itself up to date: once a day it asks GitHub whether
+there's a newer release, downloads it in the background, and installs it the
+next time it starts - or straight away from **Settings › Updates › Restart to
+update**. It installs nothing that isn't signed with the release key built into
+it, and the request sends nothing about your PC. **Automatic updates** in the
+same place turns it off. Copies of 1.0.2 move to 1.0.3 by running its
+installer once, over the top. [AUTO-UPDATE.md](AUTO-UPDATE.md) has the design.
+
 ## From a fresh clone
 
 Windows 10 or 11 and Python 3.11+.
@@ -84,7 +92,8 @@ Four pages, down the side:
   **Apply** one to switch to it (see [Presets](#presets)).
 - **Settings** — theme, accent, glass (liquid or frosted, its blur and its
   strength), opacity, where widgets sit (on the desktop, floating, always on
-  top), snap and lock, start with Windows, Set up again, and Quit.
+  top), snap and lock, start with Windows, automatic updates, Set up again, and
+  Quit.
 
 Filled buttons use a deeper shade of the accent than the accent itself, so the
 white label on them passes 4.5:1 whichever accent is picked; the raw blue gives

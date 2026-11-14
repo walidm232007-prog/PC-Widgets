@@ -161,6 +161,7 @@ def selftest() -> int:
     _check_button_shades()
     _check_updater()
     _check_update_install()
+    _check_update_ui()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -3152,6 +3153,115 @@ def _check_update_install() -> None:
           "Setup that won't start, automatic updates off and a checkout all start nothing")
 
 
+def _check_update_ui() -> None:
+    """What the updater shows: Settings › App's Updates group and the tray's
+    one tip. Every state has its words and the one button that fits; a copy
+    run from its folder says updates come with the installed app, with both
+    controls resting; in an installed copy (GitHub canned) Check now finds an
+    update and the button becomes Restart to update; the switch is kept; and
+    the tray says an update is ready once a version. Renders go to
+    _selftest/_app_updates_*.png."""
+    import datetime
+    import hashlib
+    import json
+    import tempfile
+    import types
+
+    from PySide6.QtCore import Qt
+
+    from widgets.core import net, signature, store
+    from widgets.core import palette as pal_mod
+    from widgets.core import updater as up
+    from widgets.core.board import Board
+    from widgets.ui import theme
+    from widgets.ui.app import MainWindow
+
+    noon = datetime.datetime(2026, 11, 14, 15, 40).timestamp()
+    assert up._when(noon, noon + 60) == "today at 3:40 PM"
+    assert up._when(noon - 86400, noon) == "yesterday"
+    assert up._when(noon - 3 * 86400, noon) == "on 11 Nov"
+
+    private, public = signature.generate()
+    payload = b"MZ" + bytes(2 * 1024 * 1024)
+    manifest = {"version": "1.0.4", "url": up.installer_url("1.0.4"), "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest()}
+    signed = json.dumps({"manifest": manifest,
+                         "signature": signature.sign(private, up.canonical(manifest))}).encode()
+    now = [noon]
+    out = os.path.join(_write_dir(), "_selftest")
+    folder = tempfile.mkdtemp(prefix="pcwidgets-updateui-")
+    before = theme.current()
+    try:
+        def updater(**kw):
+            args = dict(enabled=True, folder=os.path.join(folder, "updates"), current="1.0.3",
+                        public_key=public, threaded=False, clock=lambda: now[0],
+                        fetch=lambda url, headers=None, limit=0: signed,
+                        download=lambda url, path, limit, size, progress, stop, headers=None:
+                            net.save_stream(__import__("io").BytesIO(payload), path, limit, size,
+                                            progress, stop),
+                        spawn=lambda args: None)
+            args.update(kw)
+            return up.Updater(**args)
+
+        assert up.describe(None).startswith("Updates come with the installed app")
+        assert up.action(None) == ("Check now", False)
+        u = updater()
+        assert up.describe(u) == "It checks for updates once a day." and up.action(u) == ("Check now", True)
+        u.status, u.progress = "downloading", (512, 1024)
+        assert up.describe(u) == "Downloading the update… 50%" and up.action(u) == ("Checking…", False)
+        u.status = "idle"
+
+        with _sandboxed_layout():
+            for mode in ("light", "dark"):
+                board = Board(store.BoardState(theme=mode))
+                for timer in (board._autosave, board._watch, board._glass_timer, board._park):
+                    timer.stop()
+                theme.set_current(theme.build(pal_mod.build(mode, "blue")))
+
+                plain = MainWindow(board)                   # a copy run from its folder
+                page = plain.settings
+                assert not page.auto_update.isEnabled() and not page.update_btn.isEnabled()
+                assert page.version_row.desc.text().startswith("Updates come with the installed app")
+
+                shutil.rmtree(os.path.join(folder, "updates"), ignore_errors=True)
+                u = updater()
+                win = MainWindow(board, types.SimpleNamespace(updater=u))
+                page = win.settings
+                page.on_show()
+                assert page.auto_update.isEnabled() and page.auto_update.isChecked()
+                assert page.update_btn.text() == "Check now" and page.update_btn.isEnabled()
+                page.update_btn.click()                     # Check now
+                assert u.status == "ready", (u.status, u.detail)
+                assert page.update_btn.text() == "Restart to update"
+                assert "1.0.4 is ready" in page.version_row.desc.text(), page.version_row.desc.text()
+                assert u.tip_due(), "the tray wouldn't say the update is ready"
+                u.tipped()
+                assert not u.tip_due() and not updater().tip_due(), "the tray would say it twice"
+                page.updates_group.grab().save(os.path.join(out, f"_app_updates_{mode}.png"))
+                page.auto_update.click()
+                assert not u.auto and not updater().auto, "switching automatic updates off wasn't kept"
+                page.auto_update.click()
+                assert updater().auto
+                # The windows aren't deleted: the board's signals still reach
+                # them, as _check_app_window's, and a deleted one would be
+                # repainted when the glass lands.
+                _close_test_board(board)
+
+        stale = updater()                                   # a later run, last check a day old
+        stale._state.pop("ready", None)
+        stale.status = "up_to_date"
+        now[0] = noon + 86400
+        assert up.describe(stale).startswith("PC Widgets is up to date. Checked yesterday"), \
+            up.describe(stale)
+    finally:
+        theme.set_current(before)
+        shutil.rmtree(folder, ignore_errors=True)
+    print("  update settings: each state has its words and its one button; a copy run from "
+          "its folder rests both controls; Check now finds an update and becomes Restart to "
+          "update; the switch is kept; the tray tip comes once a version; renders in "
+          "_selftest/_app_updates_*.png")
+
+
 def _check_persistence(pal) -> None:
     """The layout has to actually reach the disk, and keep reaching it.
 
@@ -3268,9 +3378,10 @@ def run(open_window: bool = True) -> int:
     tray = WidgetTray(board, app)
     tray.install_hotkey(HOTKEY_ID, winapi.MOD_CONTROL | winapi.MOD_ALT, VK_W)
     app.aboutToQuit.connect(board.persist)
-    # The daily look for an update, in an installed copy only.
+    # The daily look for an update, in an installed copy only; Settings and
+    # the tray read it from the tray.
     from widgets.core.updater import Updater, schedule
-    tray.updater = Updater(app)
+    tray.watch_updates(Updater(app))
     if tray.updater.enabled:
         schedule(tray.updater)
     if open_window:

@@ -59,6 +59,9 @@ all three are also in the app once it's running).
 - **The app window** opens when you launch it after that: a gallery to add
   widgets from, your widgets with their sizes, colours and background photos,
   and settings. Closing it leaves the widgets on the desktop.
+- **Updates**: a copy run from this folder updates with git. The automatic
+  updates in Settings are the installed app's ([AUTO-UPDATE.md](AUTO-UPDATE.md));
+  here that row says so and rests.
 - **Tray icon**: click it to open the app window; right-click for a quick menu.
 - **Ctrl+Alt+W** brings the whole board to the front, and sends it back down.
 - **Right-click a widget** for its size, its settings, or to remove it.

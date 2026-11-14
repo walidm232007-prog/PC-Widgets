@@ -1721,6 +1721,25 @@ class SettingsPage(QWidget):
                              "The accent colour, or the neon outline's colours, motion "
                              "and glow.", self.dock_bars), self.INSET)
 
+        # Updates (AUTO-UPDATE.md): what the updater is doing, in words, and
+        # the one button that fits - Check now, or Restart to update once one
+        # is downloaded. A copy run from its folder says updates come with
+        # the installed app, and both controls rest.
+        from ..version import VERSION
+        updates = self._group(col, "Updates")
+        self.auto_update = Switch()
+        self.auto_update.toggled.connect(self._set_auto_update)
+        updates.add(setting_row("reset", "#0a84ff", "Automatic updates",
+                                "Checks once a day, and installs the next time PC Widgets starts.",
+                                self.auto_update), self.INSET)
+        self.update_btn = Button("Check now", "secondary", slot=self._update_action)
+        self.version_row = setting_row("check", "#30d158", f"PC Widgets {VERSION}", "",
+                                       self.update_btn)
+        updates.add(self.version_row, self.INSET)
+        self.updates_group = updates
+        if self._updater() is not None:
+            self._updater().changed.connect(self._sync_updates)
+
         app = self._group(col, "App")
         self.boot = Switch()
         self.boot.toggled.connect(self._set_startup)
@@ -1802,6 +1821,7 @@ class SettingsPage(QWidget):
         else:
             self.peek.setEnabled(True)
             self.peek.setText("Send back" if self.win.board.peeked else "Bring to front")
+        self._sync_updates()
 
     # -- actions --------------------------------------------------------- #
     def _dock_colour(self) -> None:
@@ -1869,6 +1889,45 @@ class SettingsPage(QWidget):
     def _quit(self) -> None:
         if self.win.tray is not None:
             self.win.tray._quit()
+
+    # -- updates ----------------------------------------------------------- #
+    def _updater(self):
+        return getattr(self.win.tray, "updater", None)
+
+    def _sync_updates(self) -> None:
+        from ..core import updater as up
+        u = self._updater()
+        on = u is not None and u.enabled
+        self.auto_update.setEnabled(on)
+        self.auto_update.set_quietly(bool(on and u.auto))
+        self.version_row.desc.setText(up.describe(u))
+        label, ready = up.action(u)
+        self.update_btn.setText(label)
+        self.update_btn.setEnabled(ready)
+        # An update waiting is the one thing here asking to be done: the
+        # filled button, in the accent's readable shade.
+        self.update_btn.kind = "primary" if label == "Restart to update" else "secondary"
+        self.update_btn.update()
+
+    def _set_auto_update(self, on: bool) -> None:
+        u = self._updater()
+        if u is not None:
+            u.set_auto(on)
+
+    def _update_action(self) -> None:
+        """Check now, or Restart to update: hand over to Setup, which reopens
+        the app with this window once the update is in, and quit."""
+        from ..core import updater as up
+        u = self._updater()
+        if u is None:
+            return
+        if up.action(u)[0] == "Restart to update":
+            if u.apply("window", manual=True):
+                self._quit()
+            else:
+                self.win.toast("The update couldn't start. It tries again at the next start.")
+        else:
+            u.check()
 
 
 # --------------------------------------------------------------------------- #

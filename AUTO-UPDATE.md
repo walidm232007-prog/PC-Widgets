@@ -7,8 +7,8 @@ building it. Agreed with the developer on 2026-11-14, to land before 1.0.3.
 |---|---|
 | M1 – find, trust and download an update | done |
 | M2 – install it: a silent upgrade that reopens the app, tested end to end | done |
-| M3 – Settings › App and the tray: the switch, Check now, the status, one tip | next |
-| M4 – release: the signing key, the workflow signs and attaches the update file, a CI dry run | not started |
+| M3 – Settings › App and the tray: the switch, Check now, the status, one tip | done |
+| M4 – release: the signing key, the workflow signs and attaches the update file, a CI dry run | next |
 
 ## Why
 
@@ -36,7 +36,7 @@ a new release and doing that by itself, so nobody has to go looking.
    silently and quits, and the installer upgrades in place - per user, no
    admin prompt, settings kept - and reopens PC Widgets. A failed install
    leaves the old version running and isn't retried in a loop.
-5. **Settings › App.** An "Automatic updates" switch (on), "Check now", and a
+5. **Settings › Updates.** An "Automatic updates" switch (on), "Check now", and a
    status line; one tray tip when an update is ready.
 
 Copies of 1.0.2 have no updater, so they move to 1.0.3 by running its
@@ -111,3 +111,29 @@ installer once, over the top; from 1.0.3 on, updates come by themselves.
   to the same build packaged as 1.0.3, upgraded in place and reopened in
   68 seconds, Setup's log showing the silent command line and a clean
   install, and nothing left behind after the uninstall.
+
+## What M3 laid down
+
+- Settings has an **Updates** group, just before App. **Automatic updates**
+  is the switch (on unless turned off; kept in the updater's state file).
+  **PC Widgets <version>** carries a line saying what the updater is doing -
+  checking, downloading with a percentage, a version ready, up to date and
+  when it last checked, couldn't reach GitHub, an update that didn't install -
+  and the one button that fits: Check now, or Restart to update once an update
+  has downloaded, which is then the filled button in the accent's readable
+  shade. Restart to update hands over to Setup and quits; Setup reopens the
+  app with its window.
+- A copy run from its folder says updates come with the installed app, and
+  both controls rest.
+- The tray says once a version that an update is ready ("It installs the next
+  time PC Widgets starts. Click here to restart and update now"). Clicking that
+  balloon - and only that one - restarts into the update; the app reopens as
+  it was, with its window if it was open.
+- The wording and the button live in the updater (`describe`, `action`), so
+  they're tested without a window; at start the updater picks up where the
+  last run left off, so Settings is right before any check runs.
+- README's Download section says what happens from 1.0.3 on, and that 1.0.2
+  copies need the 1.0.3 installer once; INSTALL.md says a copy run from source
+  updates with git.
+- Selftest: `_check_update_ui`, rendering the group to
+  `_selftest/_app_updates_*.png`.

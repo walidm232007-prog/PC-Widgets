@@ -196,13 +196,23 @@ class Updater(QObject):
         self._state = self._read_state()
         self._landed.connect(self._land)
         self._moved.connect(self._move)
+        # Where the last run left things, so Settings can say so straight away.
         ready = self._state.get("ready") or {}
-        if self.enabled and ready and newer(ready.get("version", ""), current):
+        failed = self._state.get("failed") or {}
+        updated = self._state.get("updated") or {}
+        if not self.enabled:
+            pass
+        elif ready and newer(ready.get("version", ""), current):
             # Downloaded on an earlier run: ready still, if the file is.
             self.status, self.version, self.path = "ready", ready["version"], ready.get("path", "")
-        updated = self._state.get("updated") or {}
-        if self.enabled and updated.get("version") == current and not ready:
+            if self._state.get("skip") == ready["version"] and failed:
+                self.status, self.detail = "failed", failed.get("reason", "")
+        elif updated.get("version") == current:
             self.status, self.version = "updated", current
+        elif failed:
+            self.status, self.detail = failed.get("kind", "failed"), failed.get("reason", "")
+        elif self._state.get("checked"):
+            self.status, self.version = "up_to_date", current
 
     # -- preferences ------------------------------------------------------------ #
     @property
@@ -214,6 +224,27 @@ class Updater(QObject):
         self._state["auto"] = bool(on)
         self._write_state()
         self.changed.emit()
+
+    def checked_at(self) -> float:
+        """When the last check finished, as time.time(); 0 if never."""
+        try:
+            return float(self._state.get("checked") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def has_ready(self) -> bool:
+        """An installer is waiting for a newer version - by the record alone,
+        without re-hashing it (apply() does that before running anything)."""
+        ready = self._state.get("ready") or {}
+        return bool(self.enabled and ready.get("path") and newer(ready.get("version", ""), self.current))
+
+    def tip_due(self) -> bool:
+        """Whether the tray should say this update is ready: once a version."""
+        return self.status == "ready" and self._state.get("tipped") != self.version
+
+    def tipped(self) -> None:
+        self._state["tipped"] = self.version
+        self._write_state()
 
     # -- what's kept between runs ------------------------------------------ #
     def _state_file(self) -> str:
@@ -329,7 +360,7 @@ class Updater(QObject):
             self._tidy(keep=None)
         else:
             self.status, self.detail = kind, result[1]
-            self._state["failed"] = {"reason": result[1], "at": self.clock()}
+            self._state["failed"] = {"reason": result[1], "kind": kind, "at": self.clock()}
         self._write_state()
         self.changed.emit()
 
@@ -456,6 +487,59 @@ def install_at_start(background: bool, updater: Optional[Updater] = None) -> boo
     if not u.auto:
         return False
     return u.apply("background" if background else "window")
+
+
+def _when(stamp: float, now: float) -> str:
+    """'today at 3:40 PM', 'yesterday', or 'on 12 Nov'."""
+    import datetime
+    then = datetime.datetime.fromtimestamp(stamp)
+    days = (datetime.date.fromtimestamp(now) - then.date()).days
+    if days == 0:
+        return f"today at {then.hour % 12 or 12}:{then.minute:02d} {'AM' if then.hour < 12 else 'PM'}"
+    if days == 1:
+        return "yesterday"
+    return f"on {then.day} {then.strftime('%b')}"
+
+
+def describe(u: Optional[Updater], now: Optional[float] = None) -> str:
+    """The line under the version in Settings › App, in words."""
+    if u is None or not u.enabled:
+        return "Updates come with the installed app. This copy runs from its own folder."
+    s = u.status
+    if s == "checking":
+        return "Checking for updates…"
+    if s == "downloading":
+        got, total = u.progress
+        return f"Downloading the update… {int(got * 100 / total) if total else 0}%"
+    if s == "ready":
+        return f"Version {u.version} is ready. It installs the next time PC Widgets starts."
+    if s == "installing":
+        return f"Installing version {u.version}…"
+    if s == "updated":
+        return f"Updated to version {u.version}."
+    if s == "offline":
+        return "Couldn't reach GitHub to check for updates. It tries again later."
+    if s == "failed":
+        return u.detail or "The last check for updates didn't work."
+    checked = u.checked_at()
+    if checked:
+        return f"PC Widgets is up to date. Checked {_when(checked, now or u.clock())}."
+    if u.auto:
+        return "It checks for updates once a day."
+    return "Automatic updates are off. Check now looks once."
+
+
+def action(u: Optional[Updater]) -> Tuple[str, bool]:
+    """The version row's button: its label, and whether it can be pressed."""
+    if u is None or not u.enabled:
+        return "Check now", False
+    if u.status in ("checking", "downloading"):
+        return "Checking…", False
+    if u.status == "installing":
+        return "Installing…", False
+    if u.status in ("ready", "failed") and u.has_ready():
+        return "Restart to update", True
+    return "Check now", True
 
 
 def schedule(u: Updater, first_ms: int = 120_000, every_ms: int = 3_600_000) -> None:
