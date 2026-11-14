@@ -64,8 +64,9 @@ with an error naming the version it needs. What the installer does:
   installed (on), and its button says Install. Then the progress page, then a
   last page saying it's installed. Finish opens it if that third box was
   ticked, so whatever the app shows first appears as Setup closes, not behind
-  it. Settings → Start with Windows and Desktop shortcut change the first two
-  later, as the page says.
+  it - on a fresh install, the app's own first-run setup (FIRST-RUN.md), which
+  doesn't ask either question again. Settings → Start with Windows and Desktop
+  shortcut change the first two later, as the page says.
 - **It looks like the app, and like Windows.** Inno Setup's Windows 11 style,
   light or dark as Windows is set (read once, as Setup starts), on the app's
   own background colours from `design_system/tokens.py`, with no divider lines.

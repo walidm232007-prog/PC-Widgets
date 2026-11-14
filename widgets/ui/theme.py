@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 
 from ..core import typography
 from ..core.card import RADIUS, squircle
-from ..core.palette import Palette, _mix
+from ..core.palette import Palette, _mix, button_fill
 
 # Panels share the widgets' corner exactly.
 CORNER = RADIUS
@@ -1087,12 +1087,17 @@ class Button(Cached, QAbstractButton):
         text, g = self._label()
 
         if self.kind == "primary" or self._flash is not None:
-            base = QColor(self._flash[2] if self._flash else ui.accent)
+            # The accent's button shade, deep enough for the white label to
+            # pass 4.5:1 on every accent (the raw blue gives 3.7:1, green
+            # 2.3:1); the green "Added" flash takes the same treatment. Hover
+            # and press go darker, never lighter, so the label never drops
+            # back under the line.
+            base = QColor(button_fill(self._flash[2] if self._flash else ui.accent))
             if not self.isEnabled():
                 p.fillPath(path, QColor(ui.control))
                 ink = QColor(ui.text_faint)
             else:
-                fill = base.darker(112) if down else mix(base.name(), base.lighter(112).name(), t)
+                fill = base.darker(118) if down else mix(base.name(), base.darker(108).name(), t)
                 p.fillPath(path, fill)
                 ink = QColor("#ffffff")
         else:

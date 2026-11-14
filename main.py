@@ -156,6 +156,7 @@ def selftest() -> int:
     _check_town_search()
     _check_welcome()
     _check_setup_steps()
+    _check_button_shades()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -2528,6 +2529,65 @@ def _check_setup_steps() -> None:
           "applied; Done lays the widgets out as the starter board does with the town, "
           "theme and dock saved; Skip keeps what was chosen; on a second run Cancel changes "
           "nothing and Done only what changed; renders in _selftest/_setup_*.png")
+
+
+def _check_button_shades() -> None:
+    """Every white label on a filled accent keeps 4.5:1, on all seven accents
+    in light and dark: the app's primary buttons at rest, under the pointer
+    and pressed, the green "Added" they flash, and Calendar's today circle. The
+    raw accents fail it - blue gives 3.7:1, green 2.3:1 - which is why each of
+    these takes the accent's button shade instead (palette.button_fill)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage
+
+    from widgets.core import palette as pal_mod
+    from widgets.tiles.calendar import CalendarWidget
+    from widgets.ui import theme
+
+    worst = (99.0, "")
+    before = theme.current()
+    try:
+        for name in pal_mod.ACCENTS:
+            for mode in ("light", "dark"):
+                pal = pal_mod.build(mode, name)
+                theme.set_current(theme.build(pal))
+                b = theme.Button("Add", "primary", "plus")
+                b.resize(b.sizeHint())
+                for state in ("rest", "hover", "down", "flash"):
+                    b._hover.t = 1.0 if state == "hover" else 0.0
+                    b.setDown(state == "down")
+                    b._flash = ("Added", "check", theme.current().good) if state == "flash" else None
+                    # Inside the capsule, left of the glyph: the fill itself.
+                    c = b.grab().toImage().pixelColor(6, b.height() // 2)
+                    ratio = pal_mod.contrast("#ffffff", c.name())
+                    worst = min(worst, (ratio, f"{name} {mode} {state}"))
+                    assert ratio >= 4.5, (name, mode, state, c.name(), round(ratio, 2))
+                b.deleteLater()
+
+                card = CalendarWidget(pal, "medium", {})
+                img = QImage(card.width(), card.height(), QImage.Format_ARGB32_Premultiplied)
+                img.fill(Qt.transparent)
+                card.render(img)
+                # Today's circle is small and mostly under its number: count the
+                # pixels of the button shade, and of the raw accent, which the
+                # card otherwise doesn't use.
+                shade, raw = QColor(pal_mod.button_fill(pal.accent)), QColor(pal.accent)
+
+                def count(c):
+                    return sum(1 for y in range(img.height()) for x in range(img.width())
+                               if max(abs(img.pixelColor(x, y).red() - c.red()),
+                                      abs(img.pixelColor(x, y).green() - c.green()),
+                                      abs(img.pixelColor(x, y).blue() - c.blue())) <= 3)
+                hits = count(shade)
+                assert hits >= 20, f"today's circle isn't in the button shade ({name} {mode}: {hits})"
+                if shade != raw:
+                    assert count(raw) < hits // 4, f"today's circle is the raw accent ({name} {mode})"
+                card.deleteLater()
+    finally:
+        theme.set_current(before)
+    print(f"  button shades: white labels on filled accents {worst[0]:.2f}:1 or better "
+          f"(lowest: {worst[1]}) - primary buttons at rest, hovered, pressed and flashing "
+          "Added, and Calendar's today circle, on every accent in light and dark")
 
 
 def _check_persistence(pal) -> None:

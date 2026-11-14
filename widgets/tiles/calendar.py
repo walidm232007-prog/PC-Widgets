@@ -9,6 +9,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont
 
 from ..core.card import WidgetCard
+from ..core.palette import button_fill
 
 
 class CalendarWidget(WidgetCard):
@@ -72,9 +73,11 @@ class CalendarWidget(WidgetCard):
                 is_today = day == today.day
                 if is_today:
                     # A filled pill rather than a ring: reads instantly at 22px.
+                    # In the accent's button shade, so the white number on it
+                    # stays at 4.5:1 whatever the accent.
                     d = min(cell.width(), cell.height()) - 3
                     p.setPen(Qt.NoPen)
-                    p.setBrush(QColor(pal.accent))
+                    p.setBrush(QColor(button_fill(pal.accent)))
                     p.drawEllipse(QRectF(cell.center().x() - d / 2,
                                          cell.center().y() - d / 2, d, d))
                 colour = ("#ffffff" if is_today else

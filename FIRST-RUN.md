@@ -80,8 +80,8 @@ Rules that hold throughout:
   `net.fetch`; `widgets/ui/townsearch.py` is the popup a card opens, with
   separate messages for no match and no connection.
 - `palette.button_fill()` deepens an accent until white text on it passes
-  4.5:1 (the blue accent gives 3.7:1, green 2.3:1). The new button uses it; M4
-  moves every filled button onto it.
+  4.5:1 (the blue accent gives 3.7:1, green 2.3:1). The new button used it
+  first; M4 moved every filled button onto it.
 - Selftest: `_check_first_run` and `_check_town_search`, with no network.
 
 ## What M2 laid down
@@ -176,3 +176,19 @@ Rules that hold throughout:
 - Selftest: `_check_setup_steps`, offscreen with the town search and forecast
   canned, and `_check_welcome` now follows Start Setup into the steps. Renders
   go to `_selftest/_setup_*.png`.
+
+## What M4 laid down
+
+- Every white label on a filled accent now sits on the accent's button shade
+  (`palette.button_fill`): the app's primary buttons (Add, Open the gallery,
+  Save this layout, the photo editor's Done) and the green "Added" they flash,
+  the gallery's "On desktop" chip, and Calendar's today circle. Hover and press
+  darken that shade rather than lighten it, so the label never drops back under
+  4.5:1. `_check_button_shades` renders the buttons at rest, hovered, pressed
+  and flashing, and the calendar, on all seven accents in light and dark; the
+  lowest is 4.53:1 (green, dark theme).
+- INSTALL.md says what the first launch does, and corrects how to start over:
+  deleting `board.json` alone brings the layout back from its mirror copy, so
+  it points at `--reset` and Set up again. README lists Set up again under
+  Settings and explains the deeper button shade; packaging/README.md says
+  what Setup's Finish now opens on a fresh install.

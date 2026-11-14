@@ -52,9 +52,13 @@ That drops a **PC Widgets** shortcut in this folder. `--shortcut` puts one on th
 Desktop, `--install-startup` makes it start with Windows (the flags combine, and
 all three are also in the app once it's running).
 
-- **The app window** opens when you launch it: a gallery to add widgets from,
-  your widgets with their sizes, colours and background photos, and settings.
-  Closing it leaves the widgets on the desktop.
+- **The first launch** is a short setup: every screen dims, and you choose your
+  town, your widgets and whether to use the Glass Dock. Skip leaves you the five
+  starter widgets; Settings › App › Set up again brings it back. It never
+  opens at sign-in or over a full-screen game ([FIRST-RUN.md](FIRST-RUN.md)).
+- **The app window** opens when you launch it after that: a gallery to add
+  widgets from, your widgets with their sizes, colours and background photos,
+  and settings. Closing it leaves the widgets on the desktop.
 - **Tray icon**: click it to open the app window; right-click for a quick menu.
 - **Ctrl+Alt+W** brings the whole board to the front, and sends it back down.
 - **Right-click a widget** for its size, its settings, or to remove it.
@@ -71,8 +75,11 @@ on the machine changes.
 ## Where your settings live
 
 `%APPDATA%\PCWidgets\` — the layout (`board.json`, plus a `.bak` one step
-behind), your notes, and `errors.log` if anything ever fails to save. Deleting
-`board.json` gives you a fresh default board, as does `python main.py --reset`.
+behind), your notes, and `errors.log` if anything ever fails to save. A second
+copy of the layout is kept beside the app in `.boardstate`, so deleting
+`board.json` alone brings the layout back from there; `python main.py --reset`
+gives you the starter board instead (your presets stay), and Settings › App ›
+Set up again lets you choose afresh.
 
 ## A note on the Workspace widget
 
