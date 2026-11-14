@@ -159,6 +159,7 @@ def selftest() -> int:
     _check_welcome()
     _check_setup_steps()
     _check_button_shades()
+    _check_updater()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -2859,6 +2860,186 @@ def _check_weather_faces(out: str) -> None:
           f"{worst['text']:.1f}:1, secondary {worst['secondary']:.1f}:1, bars "
           f"{worst['bars']:.1f}:1; screen readers get a sentence; {wrote} renders "
           f"in _selftest/*_weather_*_<face>.png")
+
+
+def _check_updater() -> None:
+    """Finding, trusting and downloading an update, with GitHub canned.
+
+    Windows' own crypto signs and checks; a changed byte, another key or
+    garbage never passes. An update file is believed only after its signature
+    checks out, and even then only if it names a newer version, this
+    repository's own installer for it, a sane size and a SHA-256. A download
+    is the length promised and nothing more, or it leaves no file. The
+    updater fetches nothing in a checkout, reuses an installer it already has,
+    throws away one that doesn't match, and checks again a day later - or
+    three hours after a failure."""
+    import hashlib
+    import io
+    import json
+    import tempfile
+    import threading
+    import urllib.error
+
+    from widgets.core import net, signature, updater as up
+
+    private, public = signature.generate()
+    assert signature.public_of(private) == public
+    sig = signature.sign(private, b"PC Widgets")
+    assert signature.verify(public, b"PC Widgets", sig)
+    assert not signature.verify(public, b"PC Widgetz", sig), "a changed message passed"
+    assert not signature.verify(signature.generate()[1], b"PC Widgets", sig), "another key passed"
+    for bad_key, bad_sig in (("", sig), ("not base64!", sig), (private, sig), (public, ""),
+                             (public, "AAAA"), (public, sig[:-4] + "AAAA")):
+        assert not signature.verify(bad_key, b"PC Widgets", bad_sig), (bad_key[:8], bad_sig[:8])
+
+    assert up.parse_version("1.0.4") == (1, 0, 4) and up.parse_version("v1.2") == (1, 2, 0)
+    for junk in ("", "1.0.4-beta", "1.0.4.1", "one", None, "1..2"):
+        assert up.parse_version(junk) is None, junk
+    assert up.newer("1.0.10", "1.0.9") and up.newer("1.1", "1.0.9") and not up.newer("1.0.2", "1.0.2")
+    assert not up.newer("1.0.1", "1.0.2") and not up.newer("junk", "1.0.2")
+    assert up.canonical({"b": 1, "a": "é"}) == b'{"a":"\\u00e9","b":1}'
+
+    payload = bytes(range(256)) * 8192                      # 2 MB: an "installer"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    def update_file(version="1.0.4", key=private, **changes):
+        manifest = {"version": version, "url": up.installer_url(version),
+                    "size": len(payload), "sha256": digest}
+        manifest.update(changes)
+        return json.dumps({"manifest": manifest,
+                           "signature": signature.sign(key, up.canonical(manifest))}).encode()
+
+    good = up.read_update(update_file(), public)
+    assert (good.version, good.size, good.sha256) == ("1.0.4", len(payload), digest)
+    assert good.url.startswith(f"https://github.com/{up.REPO}/releases/download/v1.0.4/")
+    tampered = json.loads(update_file())
+    tampered["manifest"]["version"] = "9.9.9"
+    refused = {
+        "no key in the build": (update_file(), ""),
+        "a manifest changed after signing": (json.dumps(tampered).encode(), public),
+        "another key's signature": (update_file(key=signature.generate()[0]), public),
+        "somewhere else's installer": (update_file(url="https://example.com/x.exe"), public),
+        "another version's installer": (update_file(url=up.installer_url("1.0.3")), public),
+        "a tiny installer": (update_file(size=10), public),
+        "a checksum that isn't one": (update_file(sha256="xyz"), public),
+        "a version that isn't one": (update_file(version="1.0.4-rc"), public),
+        "not JSON": (b"<html>", public),
+    }
+    for what, (raw, key) in refused.items():
+        try:
+            up.read_update(raw, key)
+        except up.UpdateError:
+            continue
+        raise AssertionError(f"read_update accepted {what}")
+
+    folder = tempfile.mkdtemp(prefix="pcwidgets-update-")
+    try:
+        dest = os.path.join(folder, "x.bin")
+        assert net.save_stream(io.BytesIO(payload), dest, 10 ** 8, len(payload)) == digest
+        assert open(dest, "rb").read() == payload
+        os.remove(dest)
+        for what, kw in (("short", {"size": len(payload) + 1}), ("long", {"size": len(payload) - 1}),
+                         ("past the cap", {"limit": 1000})):
+            args = {"limit": 10 ** 8, "size": None}
+            args.update(kw)
+            try:
+                net.save_stream(io.BytesIO(payload), dest, args["limit"], args["size"])
+            except OSError:
+                assert not os.path.exists(dest) and not os.path.exists(dest + ".part"), what
+                continue
+            raise AssertionError(f"a {what} download was kept")
+        stop = threading.Event()
+        stop.set()
+        try:
+            net.save_stream(io.BytesIO(payload), dest, 10 ** 8, None, stop=stop)
+            raise AssertionError("a stopped download was kept")
+        except OSError:
+            assert not os.path.exists(dest + ".part")
+
+        now = [1_000_000.0]
+        served = {"file": update_file(), "body": payload, "fetches": 0, "downloads": 0}
+
+        def fetch(url, headers=None, limit=0):
+            served["fetches"] += 1
+            assert url == up.UPDATE_URL and limit == up.MANIFEST_LIMIT
+            assert headers["User-Agent"].startswith("pc-widgets/")
+            if isinstance(served["file"], Exception):
+                raise served["file"]
+            return served["file"]
+
+        def download(url, path, limit, size, progress, stop, headers=None):
+            served["downloads"] += 1
+            assert url == up.installer_url("1.0.4")
+            return net.save_stream(io.BytesIO(served["body"]), path, limit, size, progress, stop)
+
+        def updater(**kw):
+            args = dict(enabled=True, folder=os.path.join(folder, "updates"), current="1.0.3",
+                        public_key=public, fetch=fetch, download=download,
+                        clock=lambda: now[0], threaded=False)
+            args.update(kw)
+            return up.Updater(**args)
+
+        off = updater(enabled=False)
+        off.check()
+        assert off.status == "off" and served["fetches"] == 0, "a checkout looked for updates"
+        assert up.Updater(threaded=False).status == "off", "a source run would update itself"
+
+        u = updater()
+        assert u.due()
+        u.check()
+        assert u.status == "ready" and u.version == "1.0.4" and served["downloads"] == 1, u.detail
+        assert u.progress == (len(payload), len(payload))
+        version, path = u.ready_installer()
+        assert version == "1.0.4" and open(path, "rb").read() == payload
+        assert not u.due(), "it checked again straight away"
+        now[0] += up.CHECK_EVERY + 1
+        assert u.due(), "a day later it didn't check"
+
+        again = updater()                           # the next run: still ready
+        assert again.status == "ready" and again.version == "1.0.4"
+        again.check()
+        assert served["downloads"] == 1, "an installer already here was downloaded again"
+
+        with open(path, "r+b") as fh:               # changed on disk since
+            fh.write(b"MZ")
+        assert again.ready_installer() is None and again.status == "failed"
+
+        served["body"] = payload[:-1] + b"!"        # GitHub serves the wrong bytes
+        bad = updater()
+        bad.check()
+        assert bad.status == "failed" and "match" in bad.detail, bad.detail
+        assert not any(n.startswith("PC-Widgets-Setup-") for n in os.listdir(bad.folder))
+
+        served["file"] = update_file(version="1.0.3")
+        same = updater()
+        same.check()
+        assert same.status == "up_to_date", same.status
+
+        served["file"] = update_file(key=signature.generate()[0])
+        before = served["downloads"]
+        forged = updater()
+        forged.check()
+        assert forged.status == "failed" and served["downloads"] == before, \
+            "an update signed by another key was downloaded"
+
+        served["file"] = urllib.error.URLError("no route")
+        lost = updater()
+        lost.check()
+        assert lost.status == "offline" and not lost.due()
+        now[0] += up.RETRY_AFTER + 1
+        assert lost.due(), "after a failure it didn't try again three hours later"
+
+        served["file"] = urllib.error.HTTPError(up.UPDATE_URL, 404, "Not Found", None, None)
+        missing = updater()
+        missing.check()
+        assert missing.status == "failed" and "no update file" in missing.detail
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    print("  updater: Windows' ECDSA P-256 signs and checks, and a changed byte, another key "
+          "or garbage never passes; an update is believed only once signed, newer, this "
+          "repository's own installer, a sane size and a SHA-256; downloads are the length "
+          "promised or leave nothing; off in a checkout, reuses what it has, drops what "
+          "changed or doesn't match, checks daily and three hours after a failure")
 
 
 def _check_persistence(pal) -> None:

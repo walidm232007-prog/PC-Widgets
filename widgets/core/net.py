@@ -25,12 +25,14 @@ had that store to lean on.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import ssl
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 _lock = threading.Lock()
 _context: Optional[ssl.SSLContext] = None
@@ -103,10 +105,69 @@ def fetch(url: str, headers: Optional[Dict[str, str]] = None, timeout: float = 1
     roots with the usual hostname checks, redirects only to HTTPS, and at most
     ``limit`` bytes read.
     """
+    with _open(url, headers, timeout) as r:
+        return read_capped(r, limit)
+
+
+def _open(url: str, headers: Optional[Dict[str, str]], timeout: float):
     if urllib.parse.urlsplit(url).scheme.lower() != "https":
         raise ValueError("only https:// addresses are fetched")
     opener = urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=tls_context()), _StayOnHttps())
-    req = urllib.request.Request(url, headers=headers or {})
-    with opener.open(req, timeout=timeout) as r:
-        return read_capped(r, limit)
+    return opener.open(urllib.request.Request(url, headers=headers or {}), timeout=timeout)
+
+
+def download(url: str, dest: str, limit: int, size: Optional[int] = None,
+             progress: Optional[Callable[[int, Optional[int]], None]] = None,
+             stop: Optional[threading.Event] = None,
+             headers: Optional[Dict[str, str]] = None, timeout: float = 30) -> str:
+    """Stream an https:// address to the file ``dest`` and return its SHA-256.
+
+    For what is too big to hold in memory - an update's installer - with the
+    same rules as ``fetch``: HTTPS only, the trusted roots, redirects only to
+    HTTPS, and never more than ``limit`` bytes (nor more than ``size``, when
+    the size is known). See ``save_stream`` for how the file is written.
+    """
+    with _open(url, headers, timeout) as r:
+        return save_stream(r, dest, limit, size, progress, stop)
+
+
+def save_stream(response, dest: str, limit: int, size: Optional[int] = None,
+                progress: Optional[Callable[[int, Optional[int]], None]] = None,
+                stop: Optional[threading.Event] = None, chunk: int = 256 * 1024) -> str:
+    """Write a reply to ``dest`` a piece at a time, hashing as it goes, and
+    return the SHA-256.
+
+    The bytes land in ``dest + ".part"`` and only become ``dest`` once they are
+    all there - the length promised, nothing past the cap - so a cut-off
+    download never looks like a finished one. Any failure, ``stop`` included,
+    removes the part file and raises.
+    """
+    part = dest + ".part"
+    digest = hashlib.sha256()
+    got = 0
+    try:
+        with open(part, "wb") as fh:
+            while True:
+                if stop is not None and stop.is_set():
+                    raise OSError("the download was stopped")
+                block = response.read(chunk)
+                if not block:
+                    break
+                got += len(block)
+                if got > limit or (size is not None and got > size):
+                    raise OSError("the download ran past its size")
+                digest.update(block)
+                fh.write(block)
+                if progress is not None:
+                    progress(got, size)
+        if size is not None and got != size:
+            raise OSError(f"the download stopped at {got} of {size} bytes")
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    return digest.hexdigest()
