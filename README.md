@@ -52,6 +52,14 @@ window, where everything is chosen and changed. Closing the window leaves the
 widgets where they are; click the tray icon, or launch PC Widgets again, to
 bring it back.
 
+The first time it opens after installing, every screen dims for a short setup:
+your town for the weather, the widgets you want from a slideshow of the real
+ones, and whether to use the Glass Dock. **Skip** keeps whatever you've chosen
+so far and the five starter widgets otherwise; **Settings › App › Set up again**
+runs it once more, starting from the desktop as it is, and there **Cancel**
+changes nothing. It never opens at sign-in or over a full-screen game.
+[FIRST-RUN.md](FIRST-RUN.md) has the design.
+
 **Ctrl+Alt+W** brings the whole board to the front and sends it back down again.
 Right-click the tray icon for a quick menu with the common settings.
 

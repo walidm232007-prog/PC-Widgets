@@ -155,6 +155,7 @@ def selftest() -> int:
     _check_first_run()
     _check_town_search()
     _check_welcome()
+    _check_setup_steps()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -658,6 +659,16 @@ def _sandboxed_layout():
         if real_appdata is not None:
             os.environ["APPDATA"] = real_appdata
         shutil.rmtree(sandbox, ignore_errors=True)
+
+
+def _close_test_board(board) -> None:
+    """Shut a check's board down and let its cards go. Deleting the cards
+    alone left them in the board's list, and the glass finishing its clear
+    copy on a thread a moment later repainted cards that were already gone."""
+    cards = list(board.cards)
+    board.close_all()
+    for c in cards:
+        c.deleteLater()
 
 
 @contextlib.contextmanager
@@ -2102,11 +2113,11 @@ def _check_town_search() -> None:
 
         box = TownSearch(pal, picked.append, finder=lambda q: towns, threaded=False)
         box.field.setText("Chic")
-        box._typed("Chic")
-        box._debounce.stop()
-        box.search_now()
+        box.q.type("Chic")
+        assert box.q.pending(), "typing searched at once instead of after a pause"
+        box.q.search_now()
         assert box.state == "results" and len(box.towns) == 3, box.state
-        box._landed(box._seq - 1, [])
+        box.q._landed(box.q._seq - 1, [])
         assert box.state == "results", "an older, overtaken search replaced the list"
         box.grab().save(os.path.join(out, f"_townsearch_{theme}.png"))
         box.current = 1
@@ -2116,9 +2127,8 @@ def _check_town_search() -> None:
         for finder, state in ((lambda q: [], "none"), (offline, "offline")):
             other = TownSearch(pal, picked.append, finder=finder, threaded=False)
             other.field.setText("Zzqx")
-            other._typed("Zzqx")
-            other._debounce.stop()
-            other.search_now()
+            other.q.type("Zzqx")
+            other.q.search_now()
             assert other.state == state, (state, other.state)
             if theme == "light":
                 other.grab().save(os.path.join(out, f"_townsearch_{state}.png"))
@@ -2187,8 +2197,13 @@ def _check_welcome() -> None:
         "an unfinished welcome left the desktop empty at the next sign-in"
     assert not wmod.welcome_due(store.BoardState(), True), "an update was welcomed"
 
+    from widgets.ui import setup_steps
+    from widgets.ui.dock import Snapshot
+
     real_start, real_full = WidgetCard.start, winapi.foreground_is_fullscreen
+    real_read = setup_steps.read_desktop
     WidgetCard.start = lambda self: None            # never put a card on screen
+    setup_steps.read_desktop = lambda watcher: Snapshot()   # the dock preview's desktop
     out = os.path.join(_write_dir(), "_selftest")
     starter = ["clock", "weather", "system", "disk", "notes"]
     try:
@@ -2196,7 +2211,7 @@ def _check_welcome() -> None:
             state = store.first_run_board(area)
             wmod.welcome_due(state, True)
             board = Board(state)
-            w = wmod.Welcome(board, offscreen=True, motion=False)
+            w = wmod.Welcome(board, offscreen=True, motion=False, threaded=False)
             winapi.foreground_is_fullscreen = lambda: False
             w.open()
             assert w.state == "ready", w.state
@@ -2243,14 +2258,13 @@ def _check_welcome() -> None:
             assert [c.kind for c in board.cards] == starter, [c.kind for c in board.cards]
             saved = store.load(area)
             assert saved.setup == "done" and len(saved.placements) == 5, "Skip wasn't saved"
-            for c in list(board.cards):
-                c.deleteLater()
+            _close_test_board(board)
 
         with _sandboxed_layout():
             state = store.first_run_board(area)
             wmod.welcome_due(state, True)
             board = Board(state)
-            w = wmod.Welcome(board, offscreen=True, motion=False, glass=False)
+            w = wmod.Welcome(board, offscreen=True, motion=False, glass=False, threaded=False)
             winapi.foreground_is_fullscreen = lambda: True
             w.open()
             assert w.state == "waiting" and not w.stages, "it opened over a full-screen game"
@@ -2259,17 +2273,261 @@ def _check_welcome() -> None:
             assert w.state == "ready" and all(s.backdrop is None for s in w.stages), \
                 "transparency effects off should give a plain dark screen"
             w.start()
+            assert w.state == "steps" and w.main.steps is not None, "Start Setup didn't open the steps"
+            assert not board.cards, "a widget appeared before the setup finished"
+            w.skip()
             assert w.state == "closed" and board.state.setup == "done"
             assert [c.kind for c in board.cards] == starter
-            for c in list(board.cards):
-                c.deleteLater()
+            _close_test_board(board)
     finally:
         WidgetCard.start, winapi.foreground_is_fullscreen = real_start, real_full
+        setup_steps.read_desktop = real_read
     print(f"  welcome: a veil over each of {len(QGuiApplication.screens())} screen(s), "
           "Start Setup an outline that fills under the pointer, Esc skips to the "
           "starter widgets and saves the setup as done, waits out a full-screen game, "
           f"never at sign-in; a white wallpaper is dimmed to {dim:.2f} for 7:1 text; "
           "renders in _selftest/_welcome*.png")
+
+
+def _check_setup_steps() -> None:
+    """The first-run steps, offscreen, with the town search and the forecast
+    canned. A town picked from several, by the arrow keys and Enter; Weather in
+    its three sizes for it, in °F or °C from one fetch; the slideshow moved by
+    the keys, the wheel and a click, the real size and Add controls only on the
+    settled middle slot; the dock's switches changing the preview and nothing
+    else. Done lays the widgets down the right edge exactly as the starter
+    board does, with the town, units, theme and dock applied and saved. Skip
+    part way keeps what was chosen; on a second run Cancel changes nothing and
+    Done touches only what changed. Renders go to _selftest/_setup_*.png."""
+    from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+    from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+    from PySide6.QtWidgets import QApplication
+
+    from widgets.core import store, winapi
+    from widgets.core.board import Board
+    from widgets.core.card import WidgetCard
+    from widgets.tiles import weather
+    from widgets.ui import setup_steps as ss
+    from widgets.ui import welcome as wmod
+    from widgets.ui.dock import Snapshot
+
+    area = (0, 0, 1920, 1040)
+
+    # The packer puts the starter five exactly where the starter board does,
+    # steps round a card already there, and starts a column to the left when
+    # one runs out of height.
+    starter = store.default_board(area).placements
+    got = ss.pack([(pl.kind, pl.size) for pl in starter], area)
+    assert got == [(pl.kind, pl.size, pl.x, pl.y) for pl in starter], got
+    top_right = QRectF(1920 - 24 - 168 + 18, 24 + 18, 168, 168)
+    got = ss.pack([("clock", "small")], area, [top_right])
+    assert got[0][2:] == (1920 - 372, 24), "a new card didn't take the free half beside one"
+    got = ss.pack([("weather", "medium")] * 7, area)
+    assert {x for _k, _s, x, _y in got} == {1548, 1188}, "a full column didn't carry on leftwards"
+    hot = weather.Forecast(place="x", temp=10.0, feels=0.0,
+                           days=[weather.Day("Mon", 0, 20.0, -5.0)])
+    f = ss.in_unit(hot, "F")
+    assert (f.temp, f.feels, f.days[0].hi, f.days[0].lo) == (50.0, 32.0, 68.0, 23.0)
+
+    geo = {"results": [
+        {"name": "Chicago", "admin1": "Illinois", "country": "United States",
+         "country_code": "US", "latitude": 41.85, "longitude": -87.65},
+        {"name": "Chico", "admin1": "California", "country": "United States",
+         "country_code": "US", "latitude": 39.73, "longitude": -121.84},
+        {"name": "Chicopee", "admin1": "Massachusetts", "country": "United States",
+         "country_code": "US", "latitude": 42.15, "longitude": -72.61}]}
+    days = [f"2026-11-{d:02d}" for d in range(13, 20)]
+    forecast = {"current": {"temperature_2m": 9.0, "apparent_temperature": 6.4,
+                            "weather_code": 2},
+                "daily": {"time": days, "weather_code": [2, 61, 0, 95, 3, 71, 45],
+                          "temperature_2m_max": [11, 9, 13, 10, 8, 3, 6],
+                          "temperature_2m_min": [4, 5, 6, 3, 1, -2, 0]}}
+    asked = []
+
+    def canned(url, params):
+        asked.append(url)
+        if url == weather.GEO:
+            return geo
+        assert params.get("temperature_unit") == "celsius", "one fetch should serve both units"
+        return forecast
+
+    def key(widget, k):
+        QApplication.sendEvent(widget, QKeyEvent(QEvent.KeyPress, k, Qt.NoModifier))
+
+    def shot(stage, name):
+        img = stage.grab().toImage()
+        img.scaled(img.width() // 2, img.height() // 2, Qt.KeepAspectRatio,
+                   Qt.SmoothTransformation).save(os.path.join(out, name))
+
+    def start_setup(board, **kw):
+        w = wmod.Welcome(board, offscreen=True, motion=False, threaded=False, **kw)
+        w.open()
+        if not kw.get("again"):
+            w.start()
+        assert w.state == "steps", w.state
+        return w, w.main.steps
+
+    out = os.path.join(_write_dir(), "_selftest")
+    real = (WidgetCard.start, winapi.foreground_is_fullscreen, weather._get, ss.read_desktop)
+    WidgetCard.start = lambda self: None
+    winapi.foreground_is_fullscreen = lambda: False
+    weather._get = canned
+    ss.read_desktop = lambda watcher: Snapshot()
+    try:
+        with _sandboxed_layout():
+            state = store.first_run_board(area)
+            wmod.welcome_due(state, True)
+            board = Board(state)
+            first_theme = board.state.theme
+            w, steps = start_setup(board)
+            assert steps.skip_btn.text() == "Skip" and not steps.back_btn.isVisible()
+
+            # Step 1: several matches with their regions; the cards follow the
+            # highlight; Enter picks; the units come from the region.
+            loc = steps.pages[0]
+            loc.field.setText("Chic")
+            loc.typed("Chic")
+            assert loc.query.pending(), "it searched on the first keystroke"
+            loc.query.search_now()
+            assert [t.name for t in loc.list.towns] == ["Chicago", "Chico", "Chicopee"]
+            key(loc.field, Qt.Key_Down)
+            assert loc.shown_town().name == "Chico", "the cards didn't follow the highlight"
+            loc._fetch_shown()
+            assert steps.forecasts.get(loc.shown_town()) is not None
+            key(loc.field, Qt.Key_Up)
+            shot(w.main, "_setup_location.png")
+            key(loc.field, Qt.Key_Return)
+            ch = steps.choices
+            assert ch.town is not None and ch.town.name == "Chicago" and not loc.list.isVisible()
+            assert ch.unit == winapi.temperature_unit(), ch.unit
+            loc.units.set_current("C", emit=True)
+            assert ch.unit == "C"
+            loc.units.set_current("F", emit=True)
+            fetches = asked.count(weather.API)
+            assert fetches <= 2, f"{fetches} forecast fetches for two towns"
+            assert board.state.theme == first_theme and not board.cards, "a choice applied early"
+
+            # Step 2: the slideshow, by keys, the wheel and a click.
+            key(steps, Qt.Key_Return)
+            assert steps.index == 1 and steps.back_btn.isVisible()
+            wp = steps.pages[1]
+            kinds = wp.kinds
+            assert kinds[:2] == ["clock", "weather"] and "workspace" not in kinds
+            assert wp.size.isVisible() and wp.add.isVisible() and wp.add.text() == "Added"
+            key(steps, Qt.Key_Right)
+            assert wp.kind() == "weather" and wp.size.current == "medium"
+            wheel = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120),
+                                Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+            wp.carousel.wheelEvent(wheel)
+            assert wp.kind() == "calendar", wp.kind()
+            assert wp.add.text() == "Add" and wp.size.current == "small"
+            wp.add.click()
+            wp.size.set_current("medium", emit=True)
+            assert "calendar" in ch.picked and ch.sizes["calendar"] == "medium"
+            back = wp.carousel.box(-1.0).center()
+            for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+                QApplication.sendEvent(wp.carousel, QMouseEvent(
+                    kind, back, back, Qt.LeftButton,
+                    Qt.LeftButton if kind == QEvent.MouseButtonPress else Qt.NoButton,
+                    Qt.NoModifier))
+            assert wp.kind() == "weather", "a click on a neighbour didn't bring it to the middle"
+            wp.carousel.go(2)
+            other = "light" if ch.theme == "dark" else "dark"
+            wp.look.set_current(other, emit=True)
+            assert ch.theme == other and board.state.theme == first_theme
+            wp.carousel.go(len(kinds) - 1)
+            assert not wp.next_.isEnabled() and wp.prev.isEnabled()
+            wp.carousel.go(2)
+            shot(w.main, "_setup_widgets.png")
+
+            # Step 3: the dock, previewed and not applied.
+            steps.forward()
+            dp = steps.pages[2]
+            assert not dp.look.isEnabled() and not dp.neon.isEnabled(), "dock rows live while off"
+            dp.on.click()
+            assert ch.dock and dp.look.isEnabled() and dp.dock is not None and dp.dock.width() > 200
+            dp.look.set_current("solid", emit=True)
+            dp.neon.click()
+            assert dp.proxy.state.dock_style == "solid" and dp.proxy.state.dock_neon
+            assert not board.state.dock_enabled and board.state.dock_style == "glass"
+            img = dp._image()
+            assert not img.isNull() and img.pixelColor(img.width() // 2, img.height() // 2).alpha() > 0
+            shot(w.main, "_setup_dock.png")
+
+            steps.forward()
+            assert steps.index == 3 and not steps.next_btn.isVisible()
+            shot(w.main, "_setup_done.png")
+            dp_page = steps.pages[3]
+            key(dp_page.done, Qt.Key_Return)
+            assert w.state == "closed" and board.state.setup == "done", w.state
+
+            want = ["clock", "weather", "system", "disk", "notes", "calendar"]
+            assert [c.kind for c in board.cards] == want, [c.kind for c in board.cards]
+            rects = [c.card_rect().translated(c.x(), c.y()) for c in board.cards]
+            for i, r in enumerate(rects):
+                assert 0 <= r.left() and r.right() <= 1920 and 0 <= r.top() and r.bottom() <= 1040
+                assert not any(r.intersects(o) for o in rects[i + 1:]), "widgets overlap"
+            wcard = next(c for c in board.cards if c.kind == "weather")
+            assert wcard.config.get("place") == "Chicago, US" and wcard.config.get("unit") == "F"
+            assert next(c for c in board.cards if c.kind == "calendar").size_class == "medium"
+            st = board.state
+            assert st.theme == other and st.dock_enabled and st.dock_style == "solid" and st.dock_neon
+            saved = store.load(area)
+            assert saved.setup == "done" and len(saved.placements) == 6 and saved.dock_enabled
+
+            # A second run: Cancel changes nothing at all.
+            before = [(c.kind, c.size_class, c.x(), c.y()) for c in board.cards]
+            w2, steps2 = start_setup(board, again=True)
+            assert steps2.skip_btn.text() == "Cancel" and steps2.choices.town.label == "Chicago, US"
+            steps2.set_theme(first_theme)
+            steps2.choices.picked.remove("disk")
+            w2.skip()
+            assert [(c.kind, c.size_class, c.x(), c.y()) for c in board.cards] == before
+            assert board.state.theme == other, "Cancel applied a choice"
+
+            # And Done touches only what changed: Storage off, Clock medium,
+            # Stocks on in a free spot; the rest stay exactly where they are.
+            w3, steps3 = start_setup(board, again=True)
+            c3 = steps3.choices
+            c3.picked.remove("disk")
+            c3.sizes["clock"] = "medium"
+            c3.picked.append("stocks")
+            steps3.go(3)
+            w3.finish()
+            kinds_now = [c.kind for c in board.cards]
+            assert "disk" not in kinds_now and "stocks" in kinds_now, kinds_now
+            assert next(c for c in board.cards if c.kind == "clock").size_class == "medium"
+            kept = {(c.kind, c.x(), c.y()) for c in board.cards}
+            assert {(k, x, y) for k, s, x, y in before if k not in ("disk", "clock")} <= kept
+            assert next(c for c in board.cards if c.kind == "weather").config["place"] == \
+                "Chicago, US", "a second run lost the town"
+            _close_test_board(board)
+
+        # Skip part way keeps what was chosen so far.
+        with _sandboxed_layout():
+            state = store.first_run_board(area)
+            wmod.welcome_due(state, True)
+            board = Board(state)
+            w, steps = start_setup(board)
+            loc = steps.pages[0]
+            loc.field.setText("Chic")
+            loc.typed("Chic")
+            loc.query.search_now()
+            loc.pick(1)
+            steps.forward()
+            steps.choices.picked.remove("notes")
+            key(steps, Qt.Key_Escape)
+            assert w.state == "closed" and board.state.setup == "done"
+            assert [c.kind for c in board.cards] == ["clock", "weather", "system", "disk"]
+            assert next(c for c in board.cards if c.kind == "weather").config["place"] == "Chico, US"
+            _close_test_board(board)
+    finally:
+        WidgetCard.start, winapi.foreground_is_fullscreen, weather._get, ss.read_desktop = real
+    print("  setup steps: a town picked from three by the keys, its weather in both units "
+          "from one fetch; the slideshow by keys, wheel and click; the dock previewed, not "
+          "applied; Done lays the widgets out as the starter board does with the town, "
+          "theme and dock saved; Skip keeps what was chosen; on a second run Cancel changes "
+          "nothing and Done only what changed; renders in _selftest/_setup_*.png")
 
 
 def _check_persistence(pal) -> None:

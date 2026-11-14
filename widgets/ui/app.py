@@ -1660,6 +1660,10 @@ class SettingsPage(QWidget):
         app.add(setting_row("gallery", "#5e5ce6", "Start menu",
                             "Find PC Widgets by typing its name, or pin it to Start.",
                             self.start_menu), self.INSET)
+        app.add(setting_row("reset", "#bf5af2", "Set up again",
+                            "Your town, your widgets and the Glass Dock, chosen the way a "
+                            "new install does. Cancel leaves everything as it is.",
+                            Button("Start", "secondary", slot=self._setup_again)), self.INSET)
         app.add(setting_row("save", "#34c759", "Save layout now",
                             "It saves as you go - this is for peace of mind.",
                             Button("Save", "secondary", slot=self._save)), self.INSET)
@@ -1732,6 +1736,15 @@ class SettingsPage(QWidget):
     def _dock_pin(self) -> None:
         if self.win.board.dock is not None:
             self.win.board.dock.add_pin()
+
+    def _setup_again(self) -> None:
+        """The first-run steps over the desktop again, starting from the board
+        as it is. The window steps aside so it isn't left on top of them."""
+        tray = self.win.tray
+        if tray is None:
+            return
+        self.win.hide()
+        tray.show_welcome(again=True)
 
     def _dock_neon_colours(self) -> None:
         if self.win.board.dock is not None:

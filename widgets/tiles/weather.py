@@ -361,8 +361,14 @@ class WeatherWidget(WidgetCard):
         super().leaveEvent(ev)
 
     def _toggle_unit(self) -> None:
-        self.unit = "F" if self.unit == "C" else "C"
-        self.config["unit"] = self.unit
+        self.set_unit("F" if self.unit == "C" else "C")
+
+    def set_unit(self, unit: str) -> None:
+        """°F or °C, fetched afresh in that unit."""
+        if unit not in ("C", "F") or unit == self.unit:
+            return
+        self.unit = unit
+        self.config["unit"] = unit
         self.changed.emit()
         self._refresh()
 

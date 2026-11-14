@@ -13,8 +13,9 @@ answer from the service.
 Only the typed text leaves the PC, to Open-Meteo's geocoding service, through
 the app's HTTPS-only fetch (core/net.py). Nothing looks up where the PC is.
 
-The first-run setup's location step asks the same question with the same
-search (``weather.find_towns``); this is the version that opens from a card.
+The search itself - debounced, threaded, stale answers dropped - is
+``TownQuery``, shared with the first-run setup's location step; ``TownSearch``
+is the popup a card opens round it.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from __future__ import annotations
 import threading
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPalette
 from PySide6.QtWidgets import QLineEdit, QWidget
 
@@ -36,6 +37,100 @@ SEARCHING = "Searching…"
 NO_MATCH = "No places match “{q}”. Check the spelling, or try a town nearby."
 OFFLINE = "Couldn't reach Open-Meteo. Check your connection, then try again."
 PRIVACY = "Only what you type is sent, to Open-Meteo."
+
+
+class TownQuery(QObject):
+    """What has been typed and what matched: the search behind both the
+    popup a card opens and the first-run setup's location step.
+
+    A search goes out once typing pauses (DEBOUNCE_MS), never for fewer than
+    two characters, and on a worker thread; an answer that comes back after a
+    newer search has gone out is dropped, so a slow reply can't overwrite the
+    list for what is now in the field. ``changed`` fires whenever ``state`` or
+    ``towns`` do.
+    """
+
+    changed = Signal()
+    found = Signal(int, object)     # (query number, towns or the exception raised)
+
+    DEBOUNCE_MS = 300
+    MAX = 6
+
+    def __init__(self, parent=None, finder: Optional[Callable] = None,
+                 threaded: bool = True) -> None:
+        super().__init__(parent)
+        if finder is None:
+            from ..tiles.weather import find_towns
+            finder = find_towns
+        self.finder = finder
+        self.threaded = threaded
+        self.towns: List = []
+        self.state = "idle"             # idle | searching | results | none | offline
+        self.query = ""
+        self._seq = 0
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(self.DEBOUNCE_MS)
+        self._debounce.timeout.connect(self.search_now)
+        self.found.connect(self._landed)
+
+    def type(self, text: str) -> None:
+        self.query = text
+        if len(text.strip()) < 2:
+            self._debounce.stop()
+            self._seq += 1              # anything still on its way is now stale
+            self.state, self.towns = "idle", []
+            self.changed.emit()
+            return
+        self._debounce.start()
+
+    def pending(self) -> bool:
+        return self._debounce.isActive()
+
+    def search_now(self) -> None:
+        self._debounce.stop()
+        q = self.query.strip()
+        if len(q) < 2:
+            return
+        self._seq += 1
+        seq = self._seq
+        self.state = "searching"
+        self.changed.emit()
+        if not self.threaded:
+            self._landed(seq, self._run(q))
+            return
+
+        def work() -> None:
+            got = self._run(q)
+            try:
+                self.found.emit(seq, got)
+            except RuntimeError:
+                pass                    # closed before the answer came back
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _run(self, q: str):
+        try:
+            return self.finder(q)
+        except Exception as exc:        # the network, a timeout, a bad reply: all "couldn't reach"
+            return exc
+
+    def _landed(self, seq: int, got) -> None:
+        if seq != self._seq:
+            return                      # an older query, overtaken by typing
+        if isinstance(got, Exception):
+            self.state, self.towns = "offline", []
+        elif not got:
+            self.state, self.towns = "none", []
+        else:
+            self.state, self.towns = "results", list(got)[:self.MAX]
+        self.changed.emit()
+
+    def message(self) -> str:
+        """What to say in place of a list, for every state but results."""
+        return {"idle": HINT, "searching": SEARCHING,
+                "none": NO_MATCH.format(q=self.query.strip()), "offline": OFFLINE,
+                "results": ""}[self.state]
 
 
 class _Field(QLineEdit):
@@ -57,17 +152,12 @@ class TownSearch(QWidget):
     """A popup: type, see matches, pick one with the mouse, the arrow keys and
     Enter, or close it with Esc or a click elsewhere."""
 
-    # (query number, a list of towns or the exception the search raised).
-    # Emitted from the search thread; Qt queues it over to the GUI thread.
-    found = Signal(int, object)
-
     M = 18              # room round the panel for its shadow
     W = 380
     PAD = 14
     FIELD = 38
     ROW = 46
-    MAX_ROWS = 6
-    DEBOUNCE_MS = 300   # a search per pause in typing, not per keystroke
+    MAX_ROWS = TownQuery.MAX
 
     def __init__(self, palette: Palette, on_pick: Callable, finder: Optional[Callable] = None,
                  threaded: bool = True) -> None:
@@ -80,16 +170,9 @@ class TownSearch(QWidget):
         # on white; this is 5.9:1 on the panel. The dark grey already passes.
         self.dim = theme.rgba(255, 255, 255, 0.62) if self.ui.dark else "#5d5d63"
         self.on_pick = on_pick
-        if finder is None:
-            from ..tiles.weather import find_towns
-            finder = find_towns
-        self.finder = finder
-        self.threaded = threaded
-        self.towns: List = []
-        self.state = "idle"             # idle | searching | results | none | offline
-        self.query = ""
+        self.q = TownQuery(self, finder, threaded)
+        self.q.changed.connect(self._changed)
         self.current = 0
-        self._seq = 0
         self._anchor: Optional[QRect] = None
         self._above = False
 
@@ -99,16 +182,18 @@ class TownSearch(QWidget):
         self.field.setFixedHeight(self.FIELD)
         self.field.setClearButtonEnabled(True)
         self._style_field()
-        self.field.textEdited.connect(self._typed)
+        self.field.textEdited.connect(self.q.type)
         self.field.installEventFilter(self)
-
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(self.DEBOUNCE_MS)
-        self._debounce.timeout.connect(self.search_now)
-        self.found.connect(self._landed)
         self.setMouseTracking(True)
         self._relayout()
+
+    @property
+    def state(self) -> str:
+        return self.q.state
+
+    @property
+    def towns(self) -> List:
+        return self.q.towns
 
     # ------------------------------------------------------------------ #
     def _style_field(self) -> None:
@@ -173,52 +258,8 @@ class TownSearch(QWidget):
         self.move(QPoint(int(x - self.M), int(y - self.M)))
 
     # -- searching ------------------------------------------------------- #
-    def _typed(self, text: str) -> None:
-        self.query = text
-        if len(text.strip()) < 2:
-            self._debounce.stop()
-            self._seq += 1          # anything still on its way is now stale
-            self.state, self.towns = "idle", []
-            self._relayout()
-            return
-        self._debounce.start()
-
-    def search_now(self) -> None:
-        q = self.query.strip()
-        if len(q) < 2:
-            return
-        self._seq += 1
-        seq = self._seq
-        self.state = "searching"
-        self._relayout()
-        if not self.threaded:
-            self._landed(seq, self._run(q))
-            return
-
-        def work() -> None:
-            got = self._run(q)
-            try:
-                self.found.emit(seq, got)
-            except RuntimeError:
-                pass                # closed before the answer came back
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _run(self, q: str):
-        try:
-            return self.finder(q)
-        except Exception as exc:    # the network, a timeout, a bad reply: all "couldn't reach"
-            return exc
-
-    def _landed(self, seq: int, got) -> None:
-        if seq != self._seq:
-            return                  # an older query, overtaken by typing
-        if isinstance(got, Exception):
-            self.state, self.towns = "offline", []
-        elif not got:
-            self.state, self.towns = "none", []
-        else:
-            self.state, self.towns = "results", list(got)[:self.MAX_ROWS]
+    def _changed(self) -> None:
+        if self.q.state == "results":
             self.current = 0
         self._relayout()
 
@@ -242,9 +283,8 @@ class TownSearch(QWidget):
                 self.update()
                 return True
             if key in (Qt.Key_Return, Qt.Key_Enter):
-                if self._debounce.isActive():
-                    self._debounce.stop()
-                    self.search_now()       # Enter before the pause: search, then pick
+                if self.q.pending():
+                    self.q.search_now()     # Enter before the pause: search, then pick
                 if self.state == "results":
                     self.pick(self.current)
                 return True
@@ -307,8 +347,7 @@ class TownSearch(QWidget):
                     p.drawText(QRectF(x + nw + 10, r.top(), room, r.height()),
                                Qt.AlignLeft | Qt.AlignVCenter, text)
         else:
-            words = {"idle": HINT, "searching": SEARCHING, "none": NO_MATCH.format(q=self.query.strip()),
-                     "offline": OFFLINE}[self.state]
+            words = self.q.message()
             p.setFont(theme.font(10))
             p.setPen(QColor(self.dim if self.state != "offline" else ui.text))
             p.drawText(QRectF(self.M + self.PAD + 4, top, self.W - 2 * self.PAD - 8,

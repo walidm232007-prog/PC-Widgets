@@ -25,8 +25,9 @@ It is built to never get in the way:
 - the veil darkens a bright wallpaper further, so white text over it stays at
   7:1 or better whatever the picture.
 
-Skip puts up the five starter widgets. Until the steps arrive (M3), Start
-Setup ends the welcome the same way.
+Start Setup leads into the steps - your town, your widgets, the dock - on the
+same veil (setup_steps.py). Skip puts up the five starter widgets. "Set up
+again" in Settings opens the veil straight onto the steps.
 """
 
 from __future__ import annotations
@@ -35,7 +36,8 @@ from typing import List, Optional
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPointF,
                             QRect, QRectF, Qt, QTimer, Signal)
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QPainter, QPen
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QPainter, QPen,
+                           QPixmap)
 from PySide6.QtWidgets import QAbstractButton, QGraphicsBlurEffect, QWidget
 
 from ..core import store, winapi
@@ -52,6 +54,7 @@ VEIL_IN = (0.0, 0.30)
 TITLE_IN = (0.45, 1.25)
 BUTTONS_IN = (1.45, 1.80)
 LIFT_MS = 450
+LEAVE_MS = 300                  # the welcome's words going as the first step comes
 FILL_MS = 180                   # a button easing between outline and fill
 GAME_POLL_MS = 2000
 
@@ -349,6 +352,10 @@ class Stage(QWidget):
         self.dim = dim_for(self.backdrop, text_area)
         if welcome.offscreen:
             self.setAttribute(Qt.WA_DontShowOnScreen, True)
+        self._bg: Optional[QPixmap] = None      # the backdrop under its veil, drawn once
+        self.show_mark = main
+        self.steps = None
+        self._leave = None
 
         self.title = self.start_btn = self.skip_btn = None
         if main:
@@ -381,7 +388,7 @@ class Stage(QWidget):
             self._lay_out()
 
     def set_intro(self, title: float, buttons: float) -> None:
-        if not self.main:
+        if not self.main or self.steps is not None:
             return
         self.title.set_progress(title)
         for b in (self.start_btn, self.skip_btn):
@@ -389,15 +396,74 @@ class Stage(QWidget):
             b.setEnabled(buttons > 0.5)
             b.update()
 
+    def open_steps(self, again: bool = False) -> None:
+        """The welcome gives way to the steps: "Welcome" blurs away as it came,
+        the buttons fade, and the first step comes in over the same veil."""
+        from .setup_steps import Steps
+        self.steps = Steps(self.welcome, self, again=again)
+        self.steps.show()
+        self.steps.raise_()
+        self.show_mark = False
+        words = [w for w in (self.title, self.start_btn, self.skip_btn) if w is not None]
+        for b in (self.start_btn, self.skip_btn):
+            if b is not None:
+                b.setEnabled(False)
+
+        def fade(t: float) -> None:
+            if self.title is not None:
+                self.title.set_progress(1.0 - t)
+            for b in (self.start_btn, self.skip_btn):
+                if b is not None:
+                    b.alpha = 1.0 - t
+                    b.update()
+
+        def gone() -> None:
+            fade(1.0)
+            for w in words:
+                w.hide()
+            self._leave = None
+
+        if words and self.welcome.motion and not again:
+            from ..core.frameclock import Tween
+            self._leave = Tween(self)
+            self._leave.setStartValue(0.0)
+            self._leave.setEndValue(1.0)
+            self._leave.setDuration(LEAVE_MS)
+            self._leave.valueChanged.connect(fade)
+            self._leave.finished.connect(gone)
+            self._leave.start()
+            # The first step comes in as "Welcome" is nearly gone, not over it.
+            QTimer.singleShot(round(LEAVE_MS * 0.6), self._begin_steps)
+        else:
+            gone()
+            self.steps.begin()
+        self.update()
+
+    def _begin_steps(self) -> None:
+        if self.steps is not None and self.steps.index < 0:
+            self.steps.begin()
+
+    def _background(self) -> QPixmap:
+        """The blurred wallpaper and its veil, drawn once at the screen's size:
+        the steps repaint parts of the screen many times a second, and redoing
+        a full-screen scale and fill for each would be most of the work."""
+        if self._bg is None or self._bg.size() != self.size():
+            pm = QPixmap(self.size())
+            p = QPainter(pm)
+            r = self.rect()
+            if self.backdrop is None:
+                p.fillRect(r, PLAIN)
+            else:
+                p.drawImage(r, self.backdrop)
+                p.fillRect(r, QColor(0, 0, 0, round(255 * self.dim)))
+            p.end()
+            self._bg = pm
+        return self._bg
+
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
-        r = self.rect()
-        if self.backdrop is None:
-            p.fillRect(r, PLAIN)
-        else:
-            p.drawImage(r, self.backdrop)
-            p.fillRect(r, QColor(0, 0, 0, round(255 * self.dim)))
-        if self.main:
+        p.drawPixmap(0, 0, self._background())
+        if self.main and self.show_mark:
             self._paint_mark(p)
         p.end()
 
@@ -425,6 +491,9 @@ class Stage(QWidget):
 
     # -- input ----------------------------------------------------------- #
     def keyPressEvent(self, ev) -> None:
+        if self.steps is not None:
+            self.steps.keyPressEvent(ev)
+            return
         key = ev.key()
         if key == Qt.Key_Escape:
             self.welcome.skip()
@@ -453,22 +522,29 @@ class Stage(QWidget):
 #  The whole welcome
 # --------------------------------------------------------------------------- #
 class Welcome(QObject):
-    """Opens the stages, runs the intro, and ends with the widgets in place.
+    """Opens the stages, runs the intro and the steps, and ends with the
+    widgets in place.
 
-    ``state``: waiting (for a game to leave) -> intro -> ready -> leaving ->
-    closed. ``motion`` and ``glass`` default to Windows' animation and
-    transparency settings; the selftest passes them explicitly.
+    ``state``: waiting (for a game to leave) -> intro -> ready -> steps ->
+    leaving -> closed. ``again`` is "Set up again" from Settings: the veil
+    opens straight onto the steps, and their Skip becomes Cancel. ``motion``
+    and ``glass`` default to Windows' animation and transparency settings, and
+    ``threaded`` to searching and fetching off the GUI thread; the selftest
+    passes all three.
     """
 
-    finished = Signal(str)          # "skipped" or "started"
+    finished = Signal(str)          # "done", "skipped" or "cancelled"
 
     def __init__(self, board, offscreen: bool = False, motion: Optional[bool] = None,
-                 glass: Optional[bool] = None) -> None:
+                 glass: Optional[bool] = None, again: bool = False,
+                 threaded: bool = True) -> None:
         super().__init__()
         self.board = board
         self.offscreen = offscreen
         self.motion = winapi.animations_enabled() if motion is None else motion
         self.glass = winapi.transparency_enabled() if glass is None else glass
+        self.again = again
+        self.threaded = threaded
         self.stages: List[Stage] = []
         self.main: Optional[Stage] = None
         self.state = "closed"
@@ -528,17 +604,24 @@ class Welcome(QObject):
             st.setWindowOpacity(0.0 if self.motion else 1.0)
             st.show()
         self.focus_main()
-        self.state = "intro"
+        if self.again:
+            # Set up again: the veil comes in and the steps are already there.
+            self.state = "steps"
+            self.main.open_steps(again=True)
+            end = VEIL_IN[1]
+        else:
+            self.state = "intro"
+            end = BUTTONS_IN[1]
         if not self.motion:
-            self._apply(BUTTONS_IN[1])
-            self.state = "ready"
+            self._apply(end)
+            self._intro_done()
             return
         self._apply(0.0)
         from ..core.frameclock import Tween
         self._intro = Tween(self)
         self._intro.setStartValue(0.0)
-        self._intro.setEndValue(BUTTONS_IN[1])
-        self._intro.setDuration(BUTTONS_IN[1] * 1000)
+        self._intro.setEndValue(end)
+        self._intro.setDuration(end * 1000)
         self._intro.valueChanged.connect(self._apply)
         self._intro.finished.connect(self._intro_done)
         self._intro.start()
@@ -581,7 +664,7 @@ class Welcome(QObject):
 
     def bring_up(self) -> None:
         """Another launch, or the tray, asked for the window while it's open."""
-        if self.state in ("intro", "ready"):
+        if self.state in ("intro", "ready", "steps"):
             self._set_front(True)
             self.focus_main()
 
@@ -589,7 +672,7 @@ class Welcome(QObject):
         QTimer.singleShot(0, self._settle_front)
 
     def _settle_front(self) -> None:
-        if self.state not in ("intro", "ready"):
+        if self.state not in ("intro", "ready", "steps"):
             return
         self._set_front(any(st.isActiveWindow() for st in self.stages))
 
@@ -604,29 +687,47 @@ class Welcome(QObject):
         for st in self.stages:
             winapi.bring_to_front(int(st.winId()), front)
 
-    # -- ending ------------------------------------------------------------ #
+    # -- the steps, and ending ---------------------------------------------- #
     def start(self) -> None:
         if self.state == "intro":
             self.finish_intro()
             return
-        if self.state != "ready":
+        if self.state != "ready" or self.main is None:
             return
-        # The steps (location, widgets, dock) come here in M3. Until then Start
-        # Setup ends the welcome the way Skip does.
-        self._end("started")
+        self.state = "steps"
+        self.main.open_steps()
 
     def skip(self) -> None:
-        if self.state in ("intro", "ready"):
-            self._end("skipped")
+        """Skip Setup, Esc, or a step's Skip: whatever has been chosen so far,
+        and the starter board's choices for the rest. On a second run the same
+        button is Cancel, and nothing changes."""
+        if self.state not in ("intro", "ready", "steps"):
+            return
+        if self.again:
+            self._end("cancelled", None)
+            return
+        steps = self.main.steps if self.main is not None else None
+        if steps is not None:
+            self._end("skipped", steps.choices, steps.start)
+            return
+        from .setup_steps import Choices
+        starter = Choices.from_board(self.board)
+        self._end("skipped", starter, starter.copy())
 
-    def _end(self, how: str) -> None:
+    def finish(self) -> None:
+        """Done, on the last screen: every choice made."""
+        steps = self.main.steps if self.main is not None else None
+        if self.state == "steps" and steps is not None:
+            self._end("done", steps.choices, steps.start)
+
+    def _end(self, how: str, choices, start=None) -> None:
         self.state = "leaving"
         if self._intro is not None:
             self._intro.stop()
         board = self.board
-        if not board.cards:
-            for pl in store.first_run_board(winapi.work_area()).placements:
-                board.restore(pl)
+        if choices is not None:
+            from .setup_steps import apply
+            apply(board, choices, start if start is not None else choices)
         board.state.setup = "done"
         board.persist(force=True)
         if not self.motion:
@@ -644,6 +745,8 @@ class Welcome(QObject):
 
     def _closed(self, how: str) -> None:
         for st in self.stages:
+            if st.steps is not None:
+                st.steps.release()
             st.hide()
             st.deleteLater()
         self.stages = []

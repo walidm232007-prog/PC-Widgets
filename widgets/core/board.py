@@ -19,6 +19,7 @@ each card back where it belongs on the screens there are now.
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from dataclasses import fields
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Type
 
@@ -656,6 +657,18 @@ class Board(QObject):
         ok = save(self.state)
         self._saved_sig = sig if ok else None
         return ok
+
+    @contextmanager
+    def batch(self):
+        """Hold the saving while many things change at once - the first-run
+        setup's widgets, theme and dock - and write the whole of it once at
+        the end, rather than a half-made board after every single change."""
+        self._holding += 1
+        try:
+            yield self
+        finally:
+            self._holding -= 1
+        self.persist(force=True)
 
     # ------------------------------------------------------------------ #
     #  Presets

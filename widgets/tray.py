@@ -96,7 +96,7 @@ class WidgetTray(QSystemTrayIcon):
         it is asked for from: Setup's Finish, the Start menu, the tray, or a
         second launch knocking. A start at sign-in never asks, so it never
         pops up on its own."""
-        if self.board.state.setup == "pending":
+        if self.board.state.setup == "pending" or self._welcome is not None:
             self.show_welcome()
             return
         if self._window is None:
@@ -104,16 +104,31 @@ class WidgetTray(QSystemTrayIcon):
             self._window = MainWindow(self.board, self)
         self._window.bring_up(page)
 
-    def show_welcome(self) -> None:
+    def show_welcome(self, again: bool = False) -> None:
+        """The first-run welcome, or with ``again`` its steps run once more
+        from Settings. One at a time: asked for while it's open, it comes to
+        the front."""
         if self._welcome is None:
             from .ui.welcome import Welcome
-            self._welcome = Welcome(self.board)
+            self._welcome = Welcome(self.board, again=again)
             self._welcome.finished.connect(self._welcome_done)
         self._welcome.open()
 
-    def _welcome_done(self, _how: str) -> None:
+    def _welcome_done(self, how: str) -> None:
+        first = self._welcome is not None and not self._welcome.again
         self._welcome = None
         self.rebuild_menu()
+        if first and how in ("done", "skipped"):
+            self._tray_tip()
+
+    def _tray_tip(self) -> None:
+        """Said once, as the first-run setup ends: where the app went. The
+        widgets are in plain sight; the app itself is a tray icon that Windows
+        tucks under the arrow, which nothing else would point out."""
+        where = ("Open the dock's tray arrow to find it" if self.board.state.dock_enabled
+                 else "Open the arrow by the clock to find it")
+        self.showMessage("PC Widgets lives in the tray",
+                         f"{where}, and click it to open PC Widgets again.", self.icon(), 8000)
 
     # ------------------------------------------------------------------ #
     def rebuild_menu(self) -> None:
