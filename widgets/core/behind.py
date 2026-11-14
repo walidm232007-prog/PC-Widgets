@@ -66,14 +66,6 @@ IDLE = 0.1               # ...and while it's still, ten a second to notice it mo
 SETTLE = 0.25            # s without a change before it slows down again
 DUTY = 0.5               # never busier than half a core: rest as long as it worked
 MARGIN = 8               # px grabbed round the strip: liquid glass looks only inward
-# While what's behind moves, liquid glass frosts harder - box (radius,
-# passes) at half size, about 3, 5, 6, 8, 10 and 13 px of blur at full size -
-# two steps up with each new frame, and one back down each 1/30 s once it has
-# been still for SETTLE. At 50 captures a second on a 200 Hz screen a clear
-# pane shows every jump; a blurred one hides them, the way a moving scene
-# smears behind real frosted glass.
-MOTION_STEPS = ((1, 4), (2, 3), (2, 4), (3, 4), (4, 4), (5, 4))
-EASE = 1 / 30            # s between steps back down
 CHANGED = 8              # levels (0..255) a pixel must move by to count as changed...
 CHANGED_SHARE = 0.0005   # ...in this share of the pixels looked at, four at least
 
@@ -226,15 +218,6 @@ def build(pixels, rect, liquid: bool, frost: Tuple[int, int], generation: int) -
     return Patch(rect, image, planes, generation)
 
 
-def frost_at(user: Tuple[int, int], motion: int) -> Tuple[int, int]:
-    """The frost for a motion step: the user's own when still, else the
-    step's, never less than the user's."""
-    if motion <= 0:
-        return user
-    step = MOTION_STEPS[min(motion, len(MOTION_STEPS)) - 1]
-    return max(step, user)
-
-
 def _planes(pixels, frost: Tuple[int, int]):
     """A grab halved and frosted into (3, H, W) uint8 red, green and blue, as
     glass.compose_clear makes the wallpaper's - in numpy alone, on planes
@@ -273,7 +256,6 @@ class Behind(QObject):
         self.patch: Optional[Patch] = None
         self.grab_ms = 0.0                 # what the last grab and build cost
         self.last_report = ""              # the last line written to the log
-        self.motion = 0                    # 0 still .. len(MOTION_STEPS): how blurred for movement
         self._rect: Optional[Tuple[int, int, int, int]] = None
         self._skip: List[int] = []
         self._lock = threading.Lock()
@@ -356,19 +338,11 @@ class Behind(QObject):
                     started = time.perf_counter()
                     pixels = grab(rect)
                     grabbed = time.perf_counter()
-                    fresh = pixels is not None and (last is None or
-                                                    last.shape != pixels.shape)
-                    changed = pixels is not None and not fresh and _differs(last, pixels)
-                    liquid = bool(self.base.liquid)
-                    if changed:
-                        moved = grabbed
-                        if liquid:             # frosted is blurred enough already
-                            self.motion = min(len(MOTION_STEPS), self.motion + 2)
-                    elif self.motion and (grabbed - moved >= SETTLE or not liquid):
-                        self.motion -= 1       # still again: a step clearer each EASE
-                    user = _glass.FROSTS.get(self.base.frost, _glass.FROSTS["light"])
-                    style = (liquid, frost_at(user, self.motion))
-                    if pixels is not None and (fresh or changed or style != self._style):
+                    style = (bool(self.base.liquid),
+                             _glass.FROSTS.get(self.base.frost, _glass.FROSTS["light"]))
+                    if pixels is not None and (last is None or last.shape != pixels.shape or
+                                               style != self._style or
+                                               _differs(last, pixels)):
                         last = pixels
                         self._count += 1
                         patch = build(pixels, rect, style[0], style[1], self._count)
@@ -377,6 +351,7 @@ class Behind(QObject):
                             if self._rect == rect:
                                 self.patch, self._style = patch, style
                         self.changed.emit()
+                        moved = time.perf_counter()
                     took = time.perf_counter() - started
                     # The grab is mostly waiting on the compositor - 5 ms
                     # long, 0.4 ms of CPU - so the work after it is what's
@@ -392,14 +367,12 @@ class Behind(QObject):
                             burst = {"start": started, "grabs": 0, "new": 0,
                                      "grab": 0.0, "work": 0.0}
                         burst["grabs"] += 1
-                        burst["new"] += changed
+                        burst["new"] += moved >= started
                         burst["grab"] += grabbed - started
                         burst["work"] += work
-                    elif self.motion:
-                        wait = max(EASE - took, work)      # easing back to clear
             except Exception:
                 last = None                # a failed grab: try again next time
-            if burst is not None and time.perf_counter() - moved >= SETTLE:
+            if wait >= IDLE and burst is not None:
                 self._report(burst)
                 burst = None
             if wait < IDLE:
