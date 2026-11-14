@@ -19,6 +19,46 @@ wallpaper under a tint, with a sheen on its upper half and a hairline lit
 along the top edge. Solid colour is matte: one flat colour and an even
 hairline. It kept the sheen and the lit edge at first, and still read as glass.
 
+## Seeing through to the windows behind
+
+The cards' glass is the wallpaper, because the wallpaper is what is behind
+them. The dock floats over everything, so with a window open under it the
+wallpaper was the wrong picture: a white page behind a dock showing a blurred
+beach. With **Settings → Glass Dock → See through windows** (on by default),
+the glass shows what is really there, blurred, or bent by liquid glass.
+
+Windows' own materials can't do it here. Acrylic and blur-behind cover the
+whole window, the shadow gutter included, so the capsule would sit in a grey
+block. They get Windows' 8 px corners or a jagged region instead of the
+squircle, and they can't be bent. So the dock grabs the strip of screen it sits
+on and runs it through the same blur and bend as the wallpaper.
+`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` leaves the dock and its
+music menu out of that grab, so the strip shows what is under them. The price
+is that they leave every other capture too: **with See through windows on, the
+dock doesn't appear in screenshots, recordings or screen sharing.** Turning it
+off puts them back.
+
+A grab of the 1100 by 64 px strip costs about 5 ms on a Ryzen 5 5600G at 1080p.
+That is too slow for a 200 Hz frame, so it never runs per frame:
+
+- **Only while a window covers the strip.** With just the desktop behind it,
+  the dock uses the wallpaper glass, which is the same picture for nothing. A
+  quick look through the window list, about half a millisecond, decides.
+- **At most ten times a second, on a thread of its own.** That thread also
+  builds the glass: the half-size frosted planes liquid glass bends, or the
+  blur for frosted glass, never both. About 10 ms in all.
+- **The dock redraws only when the strip changed.** An idle page behind it
+  costs the grab and nothing else; a video costs a redraw (one bend, 1.5 ms)
+  each time.
+- **Nothing while the dock is down**, so a maximised window or a full-screen
+  game pays nothing. Sliding up, the dock starts with the last capture, as it
+  does with the last bend, and a new one lands within a tenth of a second.
+
+The window previews keep the wallpaper glass: they are opaque, and Windows
+draws their edge.
+
+## How the glass is kept
+
 The dock bends its glass once for where it rests and keeps it, so a hover, a
 cover fade or the neon redraws it without bending it again (1.5 ms for the
 bend, on a Ryzen 5 5600G). Sliding down below a maximised window and back up,
