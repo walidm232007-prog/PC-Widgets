@@ -19,13 +19,19 @@ later) leaves it out of every capture, so the strip shows what is under the
 dock. That has a price: the dock doesn't appear in screenshots, recordings or
 screen sharing either. Turned off, the dock is put back into them.
 
-What it costs. A GDI grab of a 1100x64 strip is about 5 ms on a Ryzen 5 5600G
-at 1080p - far too slow for a 200 Hz frame, so it never runs per frame:
+What it costs. A GDI grab of a 1100x64 strip takes about 5 ms on a Ryzen 5
+5600G at 1080p, 0.4 ms of it CPU - the rest is waiting on the compositor. It
+never runs in the dock's 200 Hz frame:
 
 - Only while a window actually covers the strip. With just the desktop behind
   the dock, the wallpaper glass is the same picture for nothing.
-- At most ten times a second, on a thread of its own, which also blurs (and,
-  for liquid glass, halves and frosts) what it grabbed.
+- On a thread of its own, which also builds the glass (the blur for frosted,
+  the half-size planes for liquid) and bends each new capture for the panes
+  the dock last drew, so the dock's redraw is only drawing.
+- About 50 a second while what's behind keeps changing - resting as long as
+  it worked, so never more than half a core - and ten a second once it has
+  been still for a quarter of a second. Ten a second throughout stepped
+  visibly under scrolling and video.
 - The dock is told only when the strip changed - an idle document behind it
   costs the grab and nothing else.
 - Not at all while the dock is down below the screen, so a full-screen game
@@ -55,8 +61,11 @@ from . import glass as _glass
 WDA_NONE = 0x00
 WDA_EXCLUDEFROMCAPTURE = 0x11
 
-INTERVAL = 0.1           # s between grabs: ten a second at most
-MARGIN = 24              # px grabbed round the strip, so the blur has context
+FAST = 1 / 60            # s between grabs while what's behind is moving...
+IDLE = 0.1               # ...and while it's still, ten a second to notice it move
+SETTLE = 0.25            # s without a change before it slows down again
+DUTY = 0.5               # never busier than half a core: rest as long as it worked
+MARGIN = 8               # px grabbed round the strip: liquid glass looks only inward
 CHANGED = 1.5            # mean difference, in 0..255 levels, that counts as a change
 
 _IGNORE = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
@@ -182,6 +191,7 @@ class Patch:
         self.image = image
         self.planes = planes
         self.generation = generation
+        self.bent = {}                     # (sx, sy, w, h, radius) -> QImage, bent ahead
 
     def holds(self, x: int, y: int, w: int, h: int) -> bool:
         return self.rect.contains(QRect(int(x), int(y), max(1, int(w)), max(1, int(h))))
@@ -203,17 +213,34 @@ def build(pixels, rect, liquid: bool, frost: Tuple[int, int], generation: int) -
         small = _glass._box_blur(small, _glass.BOX_RADIUS, _glass.BOX_PASSES)
         image = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
     else:
-        half = canvas.scaled(max(2, w // _glass.CLEAR_SCALE), max(2, h // _glass.CLEAR_SCALE),
-                             Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        radius, passes = frost
-        if radius and passes:
-            half = _glass._box_blur(half, radius, passes)
-        half = half.convertToFormat(QImage.Format_RGBA8888)
-        hw, hh = half.width(), half.height()
-        arr = np.frombuffer(half.constBits(), np.uint8,
-                            count=half.bytesPerLine() * hh).reshape(hh, half.bytesPerLine() // 4, 4)
-        planes = np.ascontiguousarray(arr[:, :hw, :3].transpose(2, 0, 1))
+        planes = _planes(pixels, frost)
     return Patch(rect, image, planes, generation)
+
+
+def _planes(pixels, frost: Tuple[int, int]):
+    """A grab halved and frosted into (3, H, W) uint8 red, green and blue, as
+    glass.compose_clear makes the wallpaper's - in numpy alone, on planes
+    from the start: through QImage it cost 5.8 ms."""
+    import numpy as np
+    assert _glass.CLEAR_SCALE == 2
+    h, w = pixels.shape[0] // 2 * 2, pixels.shape[1] // 2 * 2
+    p = pixels[:h, :w, :3].astype(np.uint16)          # blue, green, red
+    buf = (p[0::2, 0::2] + p[1::2, 0::2] + p[0::2, 1::2] + p[1::2, 1::2]).astype(np.float32)
+    buf *= 0.25
+    radius, passes = frost
+    if radius and passes:
+        k, (bh, bw) = radius * 2 + 1, buf.shape[:2]
+        for _ in range(passes):
+            pad = np.concatenate([buf[:, :1].repeat(radius + 1, 1), buf,
+                                  buf[:, -1:].repeat(radius, 1)], axis=1)
+            cs = np.cumsum(pad, axis=1)
+            buf = (cs[:, k:k + bw] - cs[:, :bw]) / k
+            pad = np.concatenate([buf[:1].repeat(radius + 1, 0), buf,
+                                  buf[-1:].repeat(radius, 0)], axis=0)
+            cs = np.cumsum(pad, axis=0)
+            buf = (cs[k:k + bh] - cs[:bh]) / k
+    out = np.clip(buf + 0.5, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(out[..., ::-1].transpose(2, 0, 1))   # red, green, blue planes
 
 
 class Behind(QObject):
@@ -234,6 +261,15 @@ class Behind(QObject):
         self._thread: Optional[threading.Thread] = None     # set and cleared under _lock
         self._count = 0
         self._style = None                 # (liquid, frost) the patch was built for
+        # The panes the dock last bent from a capture, by LiveGlass.bend: the
+        # next capture is bent for them here, off the GUI thread.
+        self._wanted: List[Tuple] = []
+
+    def want(self, key: Tuple) -> None:
+        """A pane (sx, sy, w, h, radius) the dock bends: bend it ahead."""
+        with self._lock:
+            if key not in self._wanted:
+                self._wanted = (self._wanted + [key])[-4:]
 
     def watch(self, rects: Sequence[QRect], skip: Sequence[int] = ()) -> None:
         """Capture the box round ``rects`` (virtual-screen px), skipping the
@@ -283,7 +319,9 @@ class Behind(QObject):
 
     def _run(self) -> None:
         last = None                        # the previous grab, to tell a change
+        moved = 0.0                        # when it last changed
         while True:
+            wait = IDLE
             with self._lock:
                 rect, skip = self._rect, list(self._skip)
                 if rect is None:
@@ -296,6 +334,7 @@ class Behind(QObject):
                 else:
                     started = time.perf_counter()
                     pixels = grab(rect)
+                    grabbed = time.perf_counter()
                     style = (bool(self.base.liquid),
                              _glass.FROSTS.get(self.base.frost, _glass.FROSTS["light"]))
                     if pixels is not None and (last is None or last.shape != pixels.shape or
@@ -304,16 +343,48 @@ class Behind(QObject):
                         last = pixels
                         self._count += 1
                         patch = build(pixels, rect, style[0], style[1], self._count)
-                        self.grab_ms = (time.perf_counter() - started) * 1000.0
+                        self._bend_ahead(patch)
                         with self._lock:
                             if self._rect == rect:
                                 self.patch, self._style = patch, style
                         self.changed.emit()
+                        moved = time.perf_counter()
+                    took = time.perf_counter() - started
+                    # The grab is mostly waiting on the compositor - 5 ms
+                    # long, 0.4 ms of CPU - so the work after it is what's
+                    # paced. (thread_time would say, but on Windows it moves
+                    # in 15.6 ms steps.)
+                    work = time.perf_counter() - grabbed
+                    self.grab_ms = took * 1000.0
+                    if time.perf_counter() - moved < SETTLE:
+                        # Moving: as often as 60 a second, but resting at
+                        # least (1 - DUTY) / DUTY of the work in between.
+                        wait = max(FAST - took, work * (1 - DUTY) / DUTY)
             except Exception:
                 last = None                # a failed grab: try again next time
-            self._wake.wait(INTERVAL)
+            if wait < IDLE:
+                # Short rests by time.sleep: since Python 3.11 it keeps to
+                # the millisecond, where Event.wait rounds up to Windows'
+                # 15.6 ms tick - which held 60 a second to 32.
+                time.sleep(wait)
+            else:
+                self._wake.wait(wait)
             self._wake.clear()
-            time.sleep(0.02)               # a burst of pokes still caps the rate
+
+    def _bend_ahead(self, patch: Patch) -> None:
+        """Bend a new capture for the panes the dock wants here, rather than
+        in its paint: about 3 ms a pane that would come off a 200 Hz frame."""
+        if patch.planes is None:
+            return
+        from . import lens
+        with self._lock:
+            wanted = list(self._wanted)
+        for key in wanted:
+            sx, sy, w, h, radius = key
+            if patch.holds(sx, sy, w, h):
+                patch.bent[key] = lens.bend(patch.planes, _glass.CLEAR_SCALE,
+                                            (patch.rect.x(), patch.rect.y()),
+                                            sx, sy, w, h, radius, lens.STEP)
 
 
 def _differs(a, b) -> bool:
@@ -364,6 +435,14 @@ class LiveGlass:
             return self.base.bend(sx, sy, w, h, radius, step)
         from . import lens
         w, h = int(round(w)), int(round(h))
+        if step is None:
+            # A pane at rest: bent ahead on the capture thread from the next
+            # capture on, and taken from there once it has been.
+            key = (int(sx), int(sy), w, h, float(radius))
+            self.behind.want(key)
+            done = patch.bent.get(key)
+            if done is not None:
+                return done
         step = int(step or lens.STEP)
         return lens.bend(patch.planes, _glass.CLEAR_SCALE, (patch.rect.x(), patch.rect.y()),
                          int(sx), int(sy), w, h, radius, step)

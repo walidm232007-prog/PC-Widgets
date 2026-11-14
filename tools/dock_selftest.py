@@ -1459,8 +1459,46 @@ def check_see_through(app, out):
     while w._thread is not None and time.monotonic() < end:
         time.sleep(0.01)
     assert w._thread is None, "the capture thread didn't stop"
+
+    # Pacing, on made-up grabs that take 5 ms like a real one: close to 60 a
+    # second while what's behind moves, ten while it's still, and each new
+    # capture already bent for the pane the dock asked for.
+    real = behind.grab, behind.covered
+    frames = {"n": 0, "moving": True}
+
+    def fake_grab(r):
+        time.sleep(0.005)
+        frames["n"] += 1
+        out = np.zeros((r[3] - r[1], r[2] - r[0], 4), np.uint8)
+        out[...] = (frames["n"] * 37 % 256) if frames["moving"] else 90
+        return out
+    behind.grab, behind.covered = fake_grab, (lambda r, skip=(): True)
+    try:
+        b.glass.liquid = True
+        w = behind.Behind(b.glass)
+        got = []
+        w.changed.connect(lambda: got.append(time.monotonic()))
+        w.watch([QRect(420, 700, 1100, 64)])
+        pump(app, 0.1)
+        w.want((444, 706, 1052, 52, 20.0))
+        got.clear()
+        pump(app, 1.0)
+        moving = len(got)
+        assert w.patch is not None and (444, 706, 1052, 52, 20.0) in w.patch.bent, \
+            "a new capture wasn't bent ahead for the pane the dock wants"
+        frames["moving"] = False
+        pump(app, 0.5)                          # settles
+        start = frames["n"]
+        pump(app, 1.0)
+        still = frames["n"] - start
+        w.stop()
+    finally:
+        behind.grab, behind.covered = real
+    assert moving >= 30, f"only {moving} captures a second while the window behind moved"
+    assert still <= 13, f"{still} grabs a second while nothing behind moved"
     print(f"PASS: with a window behind the dock its glass shows it, liquid {seen[0]} and frosted "
-          f"{seen[1]} over a magenta window, and the wallpaper returns when it goes")
+          f"{seen[1]} over a magenta window, and the wallpaper returns when it goes; "
+          f"{moving} captures a second while it moves, bent ahead, {still} grabs while it's still")
 
 
 def main():
