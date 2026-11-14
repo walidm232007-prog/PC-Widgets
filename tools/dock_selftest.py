@@ -1473,6 +1473,8 @@ def check_see_through(app, out):
         out[...] = (frames["n"] * 37 % 256) if frames["moving"] else 90
         return out
     behind.grab, behind.covered = fake_grab, (lambda r, skip=(): True)
+    logs = tempfile.TemporaryDirectory()
+    original_dir, store._dir = store._dir, (lambda: logs.name)      # never the board's log
     try:
         b.glass.liquid = True
         w = behind.Behind(b.glass)
@@ -1492,8 +1494,13 @@ def check_see_through(app, out):
         pump(app, 1.0)
         still = frames["n"] - start
         w.stop()
+        report = w.last_report
+        logged = open(store.log_path(), encoding="utf-8").read() if             os.path.exists(store.log_path()) else ""
     finally:
         behind.grab, behind.covered = real
+        store._dir = original_dir
+        logs.cleanup()
+    assert report and report in logged, f"the stretch of movement wasn't logged: {report!r}"
     assert moving >= 30, f"only {moving} captures a second while the window behind moved"
     assert still <= 13, f"{still} grabs a second while nothing behind moved"
     print(f"PASS: with a window behind the dock its glass shows it, liquid {seen[0]} and frosted "

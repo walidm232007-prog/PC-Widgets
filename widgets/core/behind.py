@@ -66,7 +66,8 @@ IDLE = 0.1               # ...and while it's still, ten a second to notice it mo
 SETTLE = 0.25            # s without a change before it slows down again
 DUTY = 0.5               # never busier than half a core: rest as long as it worked
 MARGIN = 8               # px grabbed round the strip: liquid glass looks only inward
-CHANGED = 1.5            # mean difference, in 0..255 levels, that counts as a change
+CHANGED = 8              # levels (0..255) a pixel must move by to count as changed...
+CHANGED_SHARE = 0.0005   # ...in this share of the pixels looked at, four at least
 
 _IGNORE = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
 
@@ -254,6 +255,7 @@ class Behind(QObject):
         self.base = base                   # the board's GlassBackdrop
         self.patch: Optional[Patch] = None
         self.grab_ms = 0.0                 # what the last grab and build cost
+        self.last_report = ""              # the last line written to the log
         self._rect: Optional[Tuple[int, int, int, int]] = None
         self._skip: List[int] = []
         self._lock = threading.Lock()
@@ -320,6 +322,7 @@ class Behind(QObject):
     def _run(self) -> None:
         last = None                        # the previous grab, to tell a change
         moved = 0.0                        # when it last changed
+        burst = None                       # while moving: what it took, for the log
         while True:
             wait = IDLE
             with self._lock:
@@ -360,8 +363,18 @@ class Behind(QObject):
                         # Moving: as often as 60 a second, but resting at
                         # least (1 - DUTY) / DUTY of the work in between.
                         wait = max(FAST - took, work * (1 - DUTY) / DUTY)
+                        if burst is None:
+                            burst = {"start": started, "grabs": 0, "new": 0,
+                                     "grab": 0.0, "work": 0.0}
+                        burst["grabs"] += 1
+                        burst["new"] += moved >= started
+                        burst["grab"] += grabbed - started
+                        burst["work"] += work
             except Exception:
                 last = None                # a failed grab: try again next time
+            if wait >= IDLE and burst is not None:
+                self._report(burst)
+                burst = None
             if wait < IDLE:
                 # Short rests by time.sleep: since Python 3.11 it keeps to
                 # the millisecond, where Event.wait rounds up to Windows'
@@ -370,6 +383,24 @@ class Behind(QObject):
             else:
                 self._wake.wait(wait)
             self._wake.clear()
+
+    def _report(self, burst) -> None:
+        """One line in the board's log for each stretch of movement behind
+        the dock that lasted a second or more: how often it kept up, and
+        what a grab and its work cost there."""
+        seconds = time.perf_counter() - burst["start"]
+        if seconds < 1.0 or not burst["grabs"]:
+            return
+        n = burst["grabs"]
+        self.last_report = (f"dock glass: {seconds:.1f} s moving, {n / seconds:.0f} grabs/s, "
+                            f"{burst['new'] / seconds:.0f} new/s, grab "
+                            f"{burst['grab'] / n * 1000:.1f} ms, work "
+                            f"{burst['work'] / n * 1000:.1f} ms")
+        try:
+            from .store import _log
+            _log(self.last_report)
+        except Exception:
+            pass
 
     def _bend_ahead(self, patch: Patch) -> None:
         """Bend a new capture for the panes the dock wants here, rather than
@@ -388,12 +419,15 @@ class Behind(QObject):
 
 
 def _differs(a, b) -> bool:
-    """Whether two grabs differ enough to rebuild: every fourth pixel each
-    way, a sixteenth of the work, is plenty for glass this blurred."""
+    """Whether two grabs differ enough to rebuild, from every other pixel each
+    way. Counted pixel by pixel: an average over the strip let a little
+    movement on a plain page - a cursor, one line of text - pass as no
+    change, and the glass stood still while the page moved."""
     import numpy as np
-    sa = a[::4, ::4, :3].astype(np.int16)
-    sb = b[::4, ::4, :3].astype(np.int16)
-    return float(np.abs(sa - sb).mean()) > CHANGED
+    sa = a[::2, ::2, :3].astype(np.int16)
+    sb = b[::2, ::2, :3].astype(np.int16)
+    moved = np.count_nonzero(np.abs(sa - sb).max(axis=2) > CHANGED)
+    return moved >= max(4, int(sa.shape[0] * sa.shape[1] * CHANGED_SHARE))
 
 
 class LiveGlass:
