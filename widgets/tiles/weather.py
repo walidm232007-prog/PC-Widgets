@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -358,6 +358,25 @@ def next_hour_summary(fc: Forecast) -> str:
     return f"{word} starting in {(start - 1) * 15 or 15} min"
 
 
+def spoken(fc: Forecast) -> str:
+    """The forecast as one sentence for a screen reader."""
+    if fc.error:
+        return fc.error
+    if fc.temp is None:
+        return "Loading"
+    place = (fc.place or "").split(",")[0]
+    parts = [f"{place + ', ' if place else ''}{_deg(fc.temp)}, {describe(fc.code)[1]}"]
+    if fc.hi is not None and fc.lo is not None:
+        parts.append(f"high {_deg(fc.hi)}, low {_deg(fc.lo)}")
+    hour = next_hour_summary(fc)
+    if hour:
+        parts.append(hour)
+    nxt = fc.sunset_next if fc.is_day else fc.sunrise_next
+    if nxt:
+        parts.append(f"{'sunset' if fc.is_day else 'sunrise'} at {nxt}")
+    return ". ".join(p[0].upper() + p[1:] for p in parts) + "."
+
+
 def _deg(t: Optional[float]) -> str:
     """'21°'. Rounded first, so -0.3 reads 0° and never '-0°'."""
     return "—" if t is None else f"{int(round(t))}°"
@@ -390,6 +409,57 @@ def precip_summary(fc: Forecast) -> str:
             when = "today" if i == 0 else ("tomorrow" if i == 1 else day.label[:3])
             return f"{_amount(day.precip, fc.rain_unit)} {when}"
     return f"None for {len(fc.days)}d" if fc.days else "—"
+
+
+# The faces' sky, top to bottom, by condition: blue for a clear day, slate for
+# cloud and rain, darker for storms, navy at night. Laid over the glass at
+# SKY_ALPHA, so the wallpaper still shows faintly. Picked so that even over a
+# white wallpaper, at the gradient's lightest end, white and 85% white
+# (secondary text, SKY_DIM) both keep 4.5:1 and the rain bars 3:1; the
+# selftest recomputes all three.
+SKY_ALPHA = 0.92
+SKY_DIM = "#d9ffffff"
+SKY_BAR = "#8fdcff"          # the rain bars' lower, darker end on the sky
+_SKY = {
+    CLEAR: ("#245ba8", "#18478a"),
+    PARTLY: ("#355a84", "#274a6f"),
+    CLOUD: ("#4f5864", "#3b444f"),
+    OVERCAST: ("#4f5864", "#3b444f"),
+    FOG: ("#4f5864", "#3b444f"),
+    RAIN: ("#4f5967", "#343e4a"),
+    SLEET: ("#4f5967", "#343e4a"),
+    STORM: ("#414856", "#272c38"),
+    SNOW: ("#525c66", "#3e4854"),
+}
+_SKY_NIGHT = ("#1d2843", "#0d1426")
+_SKY_NIGHT_CLOUD = ("#2a3241", "#151b26")
+
+
+# How strongly the sky colour covers each photograph, by day and by night.
+# Measured, not picked by eye: each is the least that keeps white text and
+# 90% white (secondary text over a photo) at 4.5:1 over the brightest 2% of
+# that photo, at card size. The storm photo is dark already and needs little;
+# the bright clouds of the partly cloudy one need most. The photos are daytime
+# skies, so night never goes under NIGHT_FLOOR, or night would read as dusk.
+# The selftest measures the real composites again.
+_PHOTO_SKY = {
+    "clear": (0.76, 0.56), "partly": (0.82, 0.64), "cloud": (0.74, 0.58),
+    "rain": (0.82, 0.66), "storm": (0.50, 0.42), "snow": (0.70, 0.52),
+    "fog": (0.68, 0.48),
+}
+NIGHT_FLOOR = 0.72
+PHOTO_DIM = "#e6ffffff"      # secondary text on a photo face: 90% white
+
+
+def photo_sky_alpha(shape: int, is_day: bool) -> float:
+    day, night = _PHOTO_SKY.get(SHAPE_FILES.get(shape, "cloud"), (0.82, 0.66))
+    return day if is_day else max(night, NIGHT_FLOOR)
+
+
+def sky_tint(shape: int, is_day: bool):
+    if is_day:
+        return _SKY.get(shape, _SKY[CLOUD])
+    return _SKY_NIGHT if shape in (CLEAR, PARTLY) else _SKY_NIGHT_CLOUD
 
 
 # Apple's temperature scale for the range bars, in °C: cold blue through
@@ -471,6 +541,13 @@ class WeatherWidget(WidgetCard):
         # so scaling and fading it on every repaint would be pure waste.
         self._band_cache: dict = {}
         self.data_ready.connect(self.update)
+        self.data_ready.connect(self.speak)
+        self.setAccessibleName("Weather")
+
+    def speak(self) -> None:
+        """What a screen reader says for the card: everything it shows is
+        painted, so without this it would hear nothing at all."""
+        self.setAccessibleDescription(spoken(self.data))
 
     def on_start(self) -> None:
         self._refresh()
@@ -617,7 +694,72 @@ class WeatherWidget(WidgetCard):
             self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Weather")
             self.text(p, r, "loading…", 10, pal.text_faint, align=Qt.AlignCenter)
             return
-        self._face_painters()[self.face](p, r)
+        if not self.tinted:
+            self._face_painters()[self.face](p, r)
+            return
+        # On the sky tint, text and icons are white whatever the theme, the
+        # way Apple's weather widgets are.
+        base = self.palette_
+        on_photo = backdrop(describe(self.data.code)[0]) is not None
+        self.palette_ = replace(base, dark=True, text="#ffffff",
+                                text_dim=PHOTO_DIM if on_photo else SKY_DIM,
+                                text_faint="#70ffffff")
+        try:
+            self._face_painters()[self.face](p, r)
+        finally:
+            self.palette_ = base
+
+    # ------------------------------------------------------------------ #
+    #  Sky background
+    # ------------------------------------------------------------------ #
+    @property
+    def tinted(self) -> bool:
+        """The new faces sit on the condition's sky. Classic keeps its photo
+        band, and a colour or picture someone chose for the card keeps theirs."""
+        c = self.config
+        return (self.face != "classic" and not c.get("image")
+                and not c.get("bg") and not c.get("fg")
+                and c.get("fill") != "solid")
+
+    def paint_tint(self, p, path: QPainterPath, r: QRectF) -> None:
+        """The condition's photograph across the whole card, under its sky
+        colour - just enough of it to keep the text readable on that photo
+        (PHOTO_SKY). Without the photo on disk, the sky colour alone."""
+        if not self.tinted:
+            return
+        d = self.data
+        shape = describe(d.code)[0]
+        photo = self._full_photo(shape, int(r.width()), int(r.height()))
+        alpha = SKY_ALPHA
+        p.save()
+        p.setClipPath(path)
+        if photo is not None:
+            p.drawImage(r.topLeft(), photo)
+            alpha = photo_sky_alpha(shape, d.is_day)
+        top, bottom = sky_tint(shape, d.is_day)
+        grad = QLinearGradient(0, r.top(), 0, r.bottom())
+        grad.setColorAt(0.0, QColor(top))
+        grad.setColorAt(1.0, QColor(bottom))
+        p.setOpacity(p.opacity() * alpha)
+        p.setPen(Qt.NoPen)
+        p.setBrush(grad)
+        p.drawRect(r)
+        p.restore()
+
+    def _full_photo(self, shape: int, w: int, h: int) -> Optional[QImage]:
+        """The photo cropped to fill the card, scaled once per size."""
+        img = backdrop(shape)
+        if img is None or w < 4 or h < 4:
+            return None
+        key = ("full", shape, w, h)
+        hit = self._band_cache.get(key)
+        if hit is None:
+            scaled = img.scaled(w, h, Qt.KeepAspectRatioByExpanding,
+                                Qt.SmoothTransformation)
+            hit = scaled.copy((scaled.width() - w) // 2,
+                              (scaled.height() - h) // 2, w, h)
+            self._band_cache[key] = hit
+        return hit
 
     def _paint_classic(self, p, r: QRectF) -> None:
         pal = self.palette_
@@ -784,8 +926,8 @@ class WeatherWidget(WidgetCard):
 
         bw = (chart.width() - gap * (n - 1)) / n
         grad = QLinearGradient(0, chart.top(), 0, chart.bottom())
-        grad.setColorAt(0.0, QColor("#a8e6ff" if dark else "#1c9ddb"))
-        grad.setColorAt(1.0, QColor("#5ac8fa" if dark else "#62c4f0"))
+        grad.setColorAt(0.0, QColor("#c4f0ff" if dark else "#1c9ddb"))
+        grad.setColorAt(1.0, QColor(SKY_BAR if dark else "#62c4f0"))
         p.save()
         p.setPen(Qt.NoPen)
         for i, level in enumerate(rain_levels(self.data, n)):

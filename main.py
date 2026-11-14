@@ -1339,6 +1339,31 @@ def _check_app_window() -> None:
                 win.desktop.select(board.cards[-1])
                 assert not win.desktop.inspector.where_row.isHidden()
 
+            # Weather faces in the gallery: dots page through the size's faces,
+            # the preview changes with them, a size change starts again on
+            # Classic, and Add brings the face that was showing.
+            wt = next(t for t in win.gallery.tiles if t.kind == "weather")
+            wt._size_changed("large")
+            wt.render_preview()
+            assert len(wt.dot_rects()) == 3 and wt.face() == "classic"
+            before = wt._preview.cacheKey()
+            wt.set_face(1)
+            assert wt.face() == "daily" and wt._preview.cacheKey() != before
+            wt.set_face(5)
+            assert wt.face() == "nexthour", "paging past the end did not wrap"
+            n_cards = len(board.cards)
+            wt._add()
+            added = board.cards[-1]
+            assert len(board.cards) == n_cards + 1 and added.size_class == "large"
+            assert added.config.get("faces") == {"large": "nexthour"}, added.config
+            assert added.face == "nexthour", "Add left the face behind"
+            board.remove(added)
+            wt._size_changed("small")
+            assert wt.face() == "classic" and len(wt.dot_rects()) == 5
+            plain = next(t for t in win.gallery.tiles if t.kind == "clock")
+            assert plain.dot_rects() == [] and plain.face() == ""
+            wt._size_changed(wt.sizes.current)       # back in step with the size control
+
             # Presets: saving one starts naming it, Apply puts it back, Undo
             # puts back what it replaced.
             pp = win.presets
@@ -2013,6 +2038,69 @@ def _check_weather_faces(out: str) -> None:
     fc2.next_hour = [9, 9, 9, 9, 9]
     assert max(w.rain_levels(fc2, 15)) == 1.0, "a downpour overflowed the chart"
     assert w._deg(-0.3) == "0°" and w._clock_min(973) == "4:13 PM"
+    assert w.spoken(fc) == ("London, 21°, Partly cloudy. High 22°, low 14°. "
+                            "Rain starting in 15 min. Sunset at 4:13 PM."), w.spoken(fc)
+
+    # The sky tint: worst case is a white wallpaper showing through it.
+    def lum(c):
+        def ch(v):
+            v /= 255.0
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+
+    def over(fg, bg, a):
+        return QColor(*(round(f * a + b * (1 - a)) for f, b in
+                        ((fg.red(), bg.red()), (fg.green(), bg.green()),
+                         (fg.blue(), bg.blue()))))
+
+    def ratio(a, b):
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    white = QColor("#ffffff")
+    dim_alpha = QColor(w.SKY_DIM).alphaF()
+    skies = list(w._SKY.values()) + [w._SKY_NIGHT, w._SKY_NIGHT_CLOUD]
+    worst = {"text": 99.0, "secondary": 99.0, "bars": 99.0}
+    for pair in skies:
+        for hexc in pair:
+            bg = over(QColor(hexc), white, w.SKY_ALPHA)
+            worst["text"] = min(worst["text"], ratio(white, bg))
+            worst["secondary"] = min(worst["secondary"],
+                                     ratio(over(white, bg, dim_alpha), bg))
+            worst["bars"] = min(worst["bars"], ratio(QColor(w.SKY_BAR), bg))
+    assert worst["text"] >= 4.5 and worst["secondary"] >= 4.5 and worst["bars"] >= 3.0, worst
+
+    # The sky photographs under their sky colour, as the faces draw them at
+    # large size: measured over the brightest 2% of each composite.
+    from PySide6.QtCore import QRectF as _R
+    from PySide6.QtGui import QLinearGradient
+    photo_worst = 99.0
+    photo_dim = QColor(w.PHOTO_DIM).alphaF()
+    for shape, name in w.SHAPE_FILES.items():
+        if w.backdrop(shape) is None:
+            continue
+        for day in (True, False):
+            probe = w.WeatherWidget(pal_mod.build("dark", "blue"), "large",
+                                    {"faces": {"large": "daily"}})
+            img = QImage(312, 312, QImage.Format_ARGB32)
+            img.fill(QColor("#ffffff"))
+            p = QPainter(img)
+            p.drawImage(0, 0, probe._full_photo(shape, 312, 312))
+            top, bottom = w.sky_tint(shape, day)
+            grad = QLinearGradient(0, 0, 0, 312)
+            grad.setColorAt(0, QColor(top))
+            grad.setColorAt(1, QColor(bottom))
+            p.setOpacity(w.photo_sky_alpha(shape, day))
+            p.fillRect(_R(0, 0, 312, 312), grad)
+            p.end()
+            probe.deleteLater()
+            ls = sorted(lum(img.pixelColor(x, y)) for y in range(0, 312, 4)
+                        for x in range(0, 312, 4))
+            hi = ls[int(0.98 * (len(ls) - 1))]
+            text = 1.05 / (hi + 0.05)
+            second = (photo_dim + (1 - photo_dim) * hi + 0.05) / (hi + 0.05)
+            assert text >= 4.5 and second >= 4.4, (name, day, round(text, 2), round(second, 2))
+            photo_worst = min(photo_worst, text, second)
 
     def broken(f):
         f.next_hour, f.sunrise_min, f.sunset_min, f.days = [], None, None, []
@@ -2063,7 +2151,11 @@ def _check_weather_faces(out: str) -> None:
             card.deleteLater()
     print(f"  weather faces: every face paints in both themes, at night and with "
           f"no next hour, sun or daily data; precipitation 'None for 7d', bars "
-          f"capped; {wrote} renders in _selftest/*_weather_*_<face>.png")
+          f"capped; text on every sky photo at least {photo_worst:.1f}:1 over its "
+          f"brightest 2%, and without photos over a white wallpaper text "
+          f"{worst['text']:.1f}:1, secondary {worst['secondary']:.1f}:1, bars "
+          f"{worst['bars']:.1f}:1; screen readers get a sentence; {wrote} renders "
+          f"in _selftest/*_weather_*_<face>.png")
 
 
 def _check_persistence(pal) -> None:

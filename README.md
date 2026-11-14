@@ -238,7 +238,7 @@ at runtime with `QPainter` — there are no image assets.
 | widget | sizes | what it shows |
 |---|---|---|
 | **Clock** | S, M | analog face; big digital readout with seconds at medium |
-| **Weather** | S, M, L | current temp and conditions; 4-day forecast at large |
+| **Weather** | S, M, L | conditions now; faces for the hours and days ahead, next-hour rain, sunrise and sunset |
 | **Stocks** | S, M, L | 1 / 3 / 6 symbols with intraday sparklines and change pills |
 | **System** | S, M | live CPU with a sparkline, RAM used/total, uptime |
 | **Storage** | S, M | disk usage ring, turning amber past 75% and red past 90% |
@@ -604,6 +604,32 @@ and nothing needs an account.
   show the temperature. Fetching happens on a worker thread and hands the result
   back through a Qt signal, because a blocked network call must never freeze the
   board and a repaint must never be triggered off the GUI thread.
+
+  **Faces.** Right-click → Face, or the dots under the preview in the gallery,
+  picks how a weather card looks, separately for each size. Classic is the
+  original design. The others follow Apple's Weather widgets for the Mac:
+  Conditions, Forecast, Next hour and Sunrise and sunset at small; Hourly and
+  Next hour at medium; Hourly and daily and Next hour at large. Three things
+  about them are worth knowing:
+
+  - *Everything runs on the forecast place's clock.* Open-Meteo answers in the
+    place's own time zone, and the hourly row, the sun's position and "sunset at
+    4:13 PM" are all worked out from that answer, never from the PC's clock, so
+    a card set to a town eight hours away still puts the sunset in the right
+    slot.
+  - *Next-hour rain comes in quarters, not minutes.* Open-Meteo's finest step
+    is 15 minutes, so an hour is four readings. Each sits at the middle of its
+    quarter and the bars between follow the straight line joining them; the
+    sentence above the chart ("Rain starting in 15 min") is worked out from the
+    readings themselves, not from the smoothed bars.
+  - *The sky behind each face is measured, not picked by eye.* The condition's
+    photograph fills the card under a layer of its sky colour, and how strong
+    that layer is was measured for each photo: the least that keeps white text
+    and the 90% white of secondary text at 4.5:1 over the brightest 2% of that
+    photo. The storm photo is dark already and needs half; the bright clouds of
+    the partly cloudy one need 82%. Night uses the same photos under navy. The
+    selftest measures every composite again, so a new photo can't quietly make
+    a face unreadable.
 
 **Every fetch trusts Windows' root certificates and nothing else**
 (`widgets/core/net.py`). Python on Windows also trusts the intermediate

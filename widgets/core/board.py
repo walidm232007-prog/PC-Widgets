@@ -528,14 +528,17 @@ class Board(QObject):
         return best[0] - m, best[1] - m
 
     def add(self, kind: str, size: str = "small",
-            display: Optional[str] = None) -> Optional[WidgetCard]:
+            display: Optional[str] = None,
+            config: Optional[dict] = None) -> Optional[WidgetCard]:
         """A new card in the first clear spot on a display - the main one
-        unless another is named."""
+        unless another is named. ``config`` starts it with settings, such as
+        the face picked in the gallery."""
         d = displays.find(display, self.screens) if display else None
         d = d or displays.primary(self.screens)
         cw, ch = card_size(size)
         x, y = self._free_spot(cw, ch, d.work)
-        c = self._make(Placement(kind, size, x, y, display=d.key, area=list(d.work)))
+        c = self._make(Placement(kind, size, x, y, dict(config or {}),
+                                 display=d.key, area=list(d.work)))
         if c is None:
             return None
         self._show(c)

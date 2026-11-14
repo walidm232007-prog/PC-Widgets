@@ -63,12 +63,17 @@ def sample_spot(size: str) -> Tuple[int, int]:
     return (int((wl + wr - cw) / 2 - MARGIN), int((wt + wb - ch) / 2 - MARGIN))
 
 
-def sample(kind: str, size: str, palette, glass=None) -> Optional[WidgetCard]:
-    """A throwaway tile filled with sample data. Never shown, never started."""
+def sample(kind: str, size: str, palette, glass=None,
+           face: str = "") -> Optional[WidgetCard]:
+    """A throwaway tile filled with sample data. Never shown, never started.
+    ``face`` picks one of a tile's faces (the weather tile's) for this size."""
     cls = REGISTRY.get(kind)
     if cls is None:
         return None
-    card = cls(palette, size, dict(SAMPLE_CONFIG.get(kind, {})))
+    config = dict(SAMPLE_CONFIG.get(kind, {}))
+    if face:
+        config["faces"] = {size: face}
+    card = cls(palette, size, config)
     card.glass = glass
     card.move(*sample_spot(card.size_class))
     samples.prepare(card)
@@ -79,14 +84,14 @@ _gallery: Dict[tuple, QImage] = {}
 
 
 def gallery_image(kind: str, size: str, palette, glass, opacity: float,
-                  glass_tint: int, w: int, h: int) -> QImage:
+                  glass_tint: int, w: int, h: int, face: str = "") -> QImage:
     """A sample tile, composed for the gallery. Cached until the look changes."""
-    key = (kind, size, palette, glass is not None, opacity, glass_tint, w, h,
+    key = (kind, size, face, palette, glass is not None, opacity, glass_tint, w, h,
            getattr(glass, "_signature", None), getattr(glass, "ready", False))
     hit = _gallery.get(key)
     if hit is not None:
         return hit
-    card = sample(kind, size, palette, glass)
+    card = sample(kind, size, palette, glass, face)
     if card is None:
         return QImage()
     card.opacity_ = opacity

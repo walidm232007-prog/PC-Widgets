@@ -606,6 +606,7 @@ class WidgetCard(QWidget):
                 fill.setAlpha(224 if pal.dark else 232)
             p.setBrush(fill)
             p.drawPath(path)
+            self.paint_tint(p, path, r)
 
         if image:
             self._draw_image_layer(p, r, layer[0])
@@ -650,6 +651,11 @@ class WidgetCard(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setPen(Qt.NoPen)
         self.paint_content(p, inner)
+
+    def paint_tint(self, p: QPainter, path: QPainterPath, r: QRectF) -> None:
+        """Colour laid over the card's glass, under liquid glass's lit rim and
+        under the content. Nothing by default; the weather faces use it for
+        Apple's sky-coloured background. Skipped when a picture fills the card."""
 
     def _paint_liquid(self, p: QPainter, r: QRectF) -> bool:
         """Paint the card's slice of desktop through liquid glass (lens.py).
