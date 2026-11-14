@@ -2165,6 +2165,11 @@ def _check_town_search() -> None:
         card = weather.WeatherWidget(pal, "medium", {})
         card._refresh()
         assert card.needs_town, "a card with no town didn't ask for one"
+        assert "town" in card.accessibleDescription().lower(), card.accessibleDescription()
+        card.config["faces"] = {"medium": "hourly"}
+        assert card.face == "hourly" and not card.tinted, \
+            "a card waiting for its town put its button on a sky photo"
+        del card.config["faces"]
         img = QImage(card.width(), card.height(), QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         card.render(img)
@@ -2352,10 +2357,13 @@ def _check_setup_steps() -> None:
     assert got[0][2:] == (1920 - 372, 24), "a new card didn't take the free half beside one"
     got = ss.pack([("weather", "medium")] * 7, area)
     assert {x for _k, _s, x, _y in got} == {1548, 1188}, "a full column didn't carry on leftwards"
-    hot = weather.Forecast(place="x", temp=10.0, feels=0.0,
-                           days=[weather.Day("Mon", 0, 20.0, -5.0)])
+    hot = weather.Forecast(place="x", temp=10.0, feels=0.0, hi=20.0, lo=-5.0,
+                           days=[weather.Day("Mon", 0, 20.0, -5.0, precip=1.5, pop=40)],
+                           hours=[weather.Hour("1 PM", 0, 10.0)])
     f = ss.in_unit(hot, "F")
     assert (f.temp, f.feels, f.days[0].hi, f.days[0].lo) == (50.0, 32.0, 68.0, 23.0)
+    assert (f.hi, f.lo, f.hours[0].temp) == (68.0, 23.0, 50.0), "a face's temperatures stayed °C"
+    assert (f.days[0].precip, f.days[0].pop) == (1.5, 40), "°F lost the day's rain"
 
     geo = {"results": [
         {"name": "Chicago", "admin1": "Illinois", "country": "United States",

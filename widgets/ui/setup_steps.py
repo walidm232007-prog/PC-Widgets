@@ -156,15 +156,23 @@ def town_key(town) -> Optional[tuple]:
 
 
 def in_unit(forecast, unit: str):
-    """A forecast fetched in Celsius, in ``unit``: one fetch serves both."""
+    """A forecast fetched in Celsius, in ``unit``: one fetch serves both. Every
+    temperature moves - now, feels-like, today's range, each day and each hour
+    - and nothing else does; the wind and rain stay in the units they came in,
+    which the preview's Classic face doesn't show."""
     if unit != "F" or forecast is None:
         return forecast
-    from ..tiles.weather import Day
 
     def f(v):
         return None if v is None else v * 9.0 / 5.0 + 32.0
-    return replace(forecast, temp=f(forecast.temp), feels=f(forecast.feels),
-                   days=[Day(d.label, d.code, f(d.hi), f(d.lo)) for d in forecast.days])
+    changes = {"temp": f(forecast.temp), "feels": f(forecast.feels),
+               "days": [replace(d, hi=f(d.hi), lo=f(d.lo)) for d in forecast.days]}
+    for name in ("hi", "lo"):
+        if hasattr(forecast, name):
+            changes[name] = f(getattr(forecast, name))
+    if hasattr(forecast, "hours"):
+        changes["hours"] = [replace(h, temp=f(h.temp)) for h in forecast.hours]
+    return replace(forecast, **changes)
 
 
 @dataclass
