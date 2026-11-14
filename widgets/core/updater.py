@@ -2,8 +2,8 @@
 updater.py
 ==========
 Keeping an installed PC Widgets up to date by itself. AUTO-UPDATE.md has the
-design; this is the part that finds an update, decides whether to trust it,
-and downloads it. Installing what it downloaded comes with M2.
+design: this finds an update, decides whether to trust it, downloads it, and
+hands over to its installer at the next start (or on "Restart to update").
 
 The release workflow attaches ``update.json`` to every release:
 
@@ -25,6 +25,13 @@ manifest pointing anywhere else is still refused.
 
 Only an installed copy updates itself. A copy run from a checkout - git owns
 that folder - reports itself as off and never fetches anything.
+
+Installing: the app starts the downloaded installer silently - /RELAUNCH says
+how to reopen the app afterwards - and quits. Setup waits for it to have gone,
+upgrades in place (packaging/pc-widgets.iss) and reopens it. The reopened app
+settles the record: its own version is the new one, or the update didn't
+take, and then that version isn't tried again by itself - so a failing update
+can never loop on every start.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -59,6 +67,10 @@ INSTALLER_MIN = 1024 * 1024             # an installer smaller than this is wron
 INSTALLER_LIMIT = 300 * 1024 * 1024     # and one bigger than this too
 CHECK_EVERY = 24 * 3600                 # a successful check holds for a day
 RETRY_AFTER = 3 * 3600                  # after a failed one, try again sooner
+# How Setup reopens the app after an update: as it was running, at sign-in or
+# with its window; selftest is the build's own test of an update.
+RELAUNCH = ("background", "window", "selftest")
+SETUP_ARGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS")
 
 
 class UpdateError(Exception):
@@ -144,12 +156,14 @@ class Updater(QObject):
 
     ``status``: off (a checkout, or switched off), idle, checking,
     downloading, up_to_date, ready (an installer for ``version`` is on disk,
-    checked), offline (GitHub couldn't be reached) or failed (``detail`` says
-    why). ``changed`` fires on the GUI thread whenever it moves on.
+    checked), installing (Setup started; the app is quitting), updated (this
+    run is the update that just installed), offline (GitHub couldn't be
+    reached) or failed (``detail`` says why). ``changed`` fires on the GUI
+    thread whenever it moves on.
 
-    The network calls, the clock, the key and the folder can be swapped for
-    the selftest's; by default they are the real ones and the app's own
-    updates folder.
+    The network calls, starting Setup, the clock, the key and the folder can
+    be swapped for the selftest's; by default they are the real ones and the
+    app's own updates folder.
     """
 
     changed = Signal()
@@ -159,6 +173,7 @@ class Updater(QObject):
     def __init__(self, parent=None, enabled: Optional[bool] = None, folder: Optional[str] = None,
                  current: str = VERSION, public_key: Optional[str] = None,
                  fetch: Optional[Callable] = None, download: Optional[Callable] = None,
+                 spawn: Optional[Callable] = None,
                  clock: Callable[[], float] = time.time, threaded: bool = True) -> None:
         super().__init__(parent)
         self.enabled = paths.FROZEN if enabled is None else enabled
@@ -167,6 +182,7 @@ class Updater(QObject):
         self.key = PUBLIC_KEY if public_key is None else public_key
         self._fetch = fetch or net.fetch
         self._download = download or net.download
+        self._spawn = spawn or start_detached
         self.clock = clock
         self.threaded = threaded
         self.status = "idle" if self.enabled else "off"
@@ -184,6 +200,20 @@ class Updater(QObject):
         if self.enabled and ready and newer(ready.get("version", ""), current):
             # Downloaded on an earlier run: ready still, if the file is.
             self.status, self.version, self.path = "ready", ready["version"], ready.get("path", "")
+        updated = self._state.get("updated") or {}
+        if self.enabled and updated.get("version") == current and not ready:
+            self.status, self.version = "updated", current
+
+    # -- preferences ------------------------------------------------------------ #
+    @property
+    def auto(self) -> bool:
+        """Automatic updates: checked daily and installed at the next start."""
+        return bool(self._state.get("auto", True))
+
+    def set_auto(self, on: bool) -> None:
+        self._state["auto"] = bool(on)
+        self._write_state()
+        self.changed.emit()
 
     # -- what's kept between runs ------------------------------------------ #
     def _state_file(self) -> str:
@@ -318,7 +348,62 @@ class Updater(QObject):
                 except OSError:
                     pass
 
-    # -- for the installer step (M2) ----------------------------------------- #
+    # -- installing ------------------------------------------------------------ #
+    def apply(self, relaunch: str = "window", manual: bool = False) -> bool:
+        """Start installing the downloaded update; True if Setup started, and
+        then the caller quits at once so Setup can replace the files. A version
+        that failed to install isn't started by itself again, only ``manual``ly
+        (Restart to update)."""
+        if relaunch not in RELAUNCH:
+            raise ValueError(f"relaunch must be one of {RELAUNCH}")
+        ready = self.ready_installer()
+        if ready is None:
+            return False
+        version, path = ready
+        if not manual and self._state.get("skip") == version:
+            return False
+        args = [path, *SETUP_ARGS, f"/RELAUNCH={relaunch}",
+                f"/LOG={os.path.join(self.folder, f'install-{version}.log')}"]
+        self._state["installing"] = {"version": version, "from": self.current, "at": self.clock()}
+        self._write_state()
+        try:
+            self._spawn(args)
+        except OSError as exc:
+            self._state.pop("installing", None)
+            self._state["failed"] = {"reason": f"Setup didn't start ({exc}).", "at": self.clock()}
+            self._write_state()
+            self.status, self.detail = "failed", f"The update's Setup didn't start ({exc})."
+            self.changed.emit()
+            return False
+        self.status, self.version, self.detail = "installing", version, ""
+        self.changed.emit()
+        return True
+
+    def finish_install(self) -> None:
+        """At start: settle the record of an update this app handed over to.
+        Its version is now this copy's, so it took; or this copy is still the
+        old one, so it didn't - and that version is then left alone until it's
+        asked for again or a newer one comes out."""
+        inst = self._state.get("installing")
+        if not isinstance(inst, dict):
+            return
+        target = str(inst.get("version", ""))
+        self._state.pop("installing", None)
+        if not newer(target, self.current):
+            self._state["updated"] = {"version": self.current, "from": inst.get("from", ""),
+                                      "at": self.clock()}
+            for key in ("ready", "skip", "failed"):
+                self._state.pop(key, None)
+            self._tidy(keep=None)
+            self.status, self.version, self.detail = "updated", self.current, ""
+        else:
+            reason = f"The update to {target} didn't install."
+            self._state["skip"] = target
+            self._state["failed"] = {"reason": reason, "at": self.clock()}
+            self.status, self.version, self.detail = "failed", target, reason
+        self._write_state()
+        self.changed.emit()
+
     def ready_installer(self) -> Optional[Tuple[str, str]]:
         """(version, path) of a downloaded update that still checks out - the
         file re-hashed against what was verified - or None."""
@@ -337,3 +422,54 @@ class Updater(QObject):
                 self.changed.emit()
             return None
         return version, path
+
+
+# --------------------------------------------------------------------------- #
+#  Around the app
+# --------------------------------------------------------------------------- #
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def start_detached(args) -> None:
+    """Start Setup so it outlives the app: its own process group, no console,
+    no inherited handles (the single-instance mutex above all, which Setup
+    waits to see released), and out of any job the app runs in where the job
+    allows it - a job that ends its processes with the app would end Setup."""
+    flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(list(args), close_fds=True, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB)
+    except OSError:
+        subprocess.Popen(list(args), close_fds=True, creationflags=flags)
+
+
+def install_at_start(background: bool, updater: Optional[Updater] = None) -> bool:
+    """At startup, before the board exists: settle an update that just ran,
+    then start installing one that is ready. True means Setup has started and
+    the app should quit now; it reopens the way it was starting - at sign-in
+    (background) or with its window."""
+    u = updater if updater is not None else Updater()
+    if not u.enabled:
+        return False
+    u.finish_install()
+    if not u.auto:
+        return False
+    return u.apply("background" if background else "window")
+
+
+def schedule(u: Updater, first_ms: int = 120_000, every_ms: int = 3_600_000) -> None:
+    """The daily check in a running app: a couple of minutes after it starts,
+    out of the way of the board coming up, then whenever one is due."""
+    from PySide6.QtCore import QTimer
+
+    def tick() -> None:
+        if u.auto and u.due():
+            u.check()
+
+    QTimer.singleShot(first_ms, tick)
+    timer = QTimer(u)
+    timer.setInterval(every_ms)
+    timer.timeout.connect(tick)
+    timer.start()
+    u._schedule = timer

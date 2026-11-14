@@ -46,6 +46,9 @@
 
 #define AppName "PC Widgets"
 #define AppExe "PC Widgets.exe"
+; The running app's single-instance mutex (main.py's MUTEX_NAME). An update
+; the app started waits for it to go: the app quits as it starts Setup.
+#define AppMutex "Local\PCWidgetsSingleInstance"
 
 [Setup]
 ; Never change AppId: it is how an update finds the copy it replaces.
@@ -129,9 +132,12 @@ Type: filesandordirs; Name: "{app}\licenses"
 Type: files; Name: "{app}\{#AppName}.lnk"
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Desktop widgets"
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--background"; WorkingDir: "{app}"; Comment: "Desktop widgets"; Tasks: startup
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Desktop widgets"; Tasks: desktopicon
+; Not in an update the app started: Setup would bring back the choices made at
+; install - a Startup or Desktop shortcut the person has since removed in
+; Settings - and the ones there already open this same exe.
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Desktop widgets"; Check: not UpdateMode
+Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--background"; WorkingDir: "{app}"; Comment: "Desktop widgets"; Tasks: startup; Check: not UpdateMode
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Desktop widgets"; Tasks: desktopicon; Check: not UpdateMode
 
 [Run]
 ; Runs on Finish, when the first page's "Open PC Widgets when it's installed" is
@@ -139,6 +145,10 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Desktop
 ; screen to itself. The last page's own tick box for it is hidden (CurPageChanged
 ; below): the choice was already made. Never in a silent install.
 Filename: "{app}\{#AppExe}"; Description: "Open PC Widgets"; Flags: nowait postinstall skipifsilent; Tasks: launch
+; An update the app started (AUTO-UPDATE.md) is silent, and reopens the app
+; the way it was running: /RELAUNCH=background or window (or selftest, for the
+; build's own test of an update).
+Filename: "{app}\{#AppExe}"; Parameters: "{code:RelaunchParams}"; Flags: nowait; Check: UpdateMode
 
 [Messages]
 ; Plain words instead of installer jargon ("Completing the ... Setup Wizard",
@@ -161,6 +171,47 @@ ClickFinish=
 FinishedOpens=It's in the Start menu, and it opens when you select Finish.
 
 [Code]
+{ An update the app started passes /RELAUNCH=<how to reopen it>; a person
+  running Setup doesn't. }
+function UpdateMode: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|}') <> '';
+end;
+
+{ The app's arguments for reopening, from a fixed list: nothing else that is
+  passed reaches its command line. }
+function RelaunchParams(Param: String): String;
+var
+  Mode: String;
+begin
+  Mode := Lowercase(ExpandConstant('{param:relaunch|}'));
+  if Mode = 'background' then
+    Result := '--background'
+  else if Mode = 'selftest' then
+    Result := '--selftest'
+  else
+    Result := '';
+end;
+
+function InitializeSetup: Boolean;
+var
+  Waited: Integer;
+begin
+  { The app quits as it starts an update; wait, up to half a minute, for it to
+    have gone - its mutex released - so none of its files is in use. Restart
+    Manager (CloseApplications) closes anything still holding one after that. }
+  if UpdateMode then
+  begin
+    Waited := 0;
+    while CheckForMutexes('{#AppMutex}') and (Waited < 30000) do
+    begin
+      Sleep(250);
+      Waited := Waited + 250;
+    end;
+  end;
+  Result := True;
+end;
+
 procedure InitializeWizard;
 begin
   { While copying, the progress bar and "Copying files..." say enough; the

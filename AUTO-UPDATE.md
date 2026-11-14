@@ -6,7 +6,7 @@ building it. Agreed with the developer on 2026-11-14, to land before 1.0.3.
 | milestone | state |
 |---|---|
 | M1 – find, trust and download an update | done |
-| M2 – install it: a silent upgrade that reopens the app, tested end to end | next |
+| M2 – install it: a silent upgrade that reopens the app, tested end to end | built; the full build's update test is next |
 | M3 – Settings › App and the tray: the switch, Check now, the status, one tip | not started |
 | M4 – release: the signing key, the workflow signs and attaches the update file, a CI dry run | not started |
 
@@ -71,3 +71,39 @@ installer once, over the top; from 1.0.3 on, updates come by themselves.
   finished. `net.fetch` and `net.download` share one opener (HTTPS only,
   Windows' roots, redirects only to HTTPS).
 - Selftest: `_check_updater`, with GitHub canned - no network.
+
+## What M2 laid down
+
+- The installer has a silent update mode, `/RELAUNCH=background|window`
+  (packaging/pc-widgets.iss). It waits up to half a minute for the app's
+  single-instance mutex to go - the app quits as it starts Setup - and Restart
+  Manager closes anything still holding a file after that. It upgrades in
+  place, replacing `_internal` whole as before, and reopens the app the way it
+  was running, with arguments from a fixed list only. It makes no shortcuts:
+  without that, an update would bring back a Startup or Desktop shortcut the
+  person had since removed in Settings.
+- `Updater.apply()` starts the checked installer - re-hashed first, so one
+  changed on disk since is never run - with `/VERYSILENT /SUPPRESSMSGBOXES
+  /NORESTART /CLOSEAPPLICATIONS`, the relaunch mode and a log in the updates
+  folder, detached so it outlives the app and inherits none of its handles,
+  and records that it did. The caller then quits.
+- `Updater.finish_install()`, at the next start, settles that record: this
+  copy is the new version, so the update took (the installer is removed), or
+  it's still the old one, so it didn't - and that version isn't started again
+  by itself, only from Restart to update. A failing update can't loop.
+- `updater.install_at_start()` runs in `main.py` right after the
+  single-instance check and before anything is on screen: an installed copy
+  with a checked update waiting installs it and quits; Setup reopens it.
+  `updater.schedule()` runs the daily check a couple of minutes after start,
+  then whenever one is due. Automatic updates are a preference in the
+  updater's own `state.json` (on unless switched off; the switch is M3).
+- `PC Widgets.exe --install-update <how>` installs a waiting, checked update
+  at once: the build's own test of an update.
+- `tools/build_exe.py --installer` now runs a real update: the build
+  installed as version N, the same build packaged as N+1 left where the
+  updater leaves a checked download, the installed exe told to install it.
+  It must hand over and quit; Setup must upgrade in place (Settings -> Apps
+  reads N+1) without making shortcuts and reopen the app - as its self test,
+  which shows nothing and leaves a log. Then it all uninstalls.
+- Selftest: `_check_update_install`, with Setup's start recorded instead of
+  run.

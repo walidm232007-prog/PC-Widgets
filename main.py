@@ -160,6 +160,7 @@ def selftest() -> int:
     _check_setup_steps()
     _check_button_shades()
     _check_updater()
+    _check_update_install()
     _check_ticks(pal_mod.build("dark", "blue"))
     _check_quiet(pal_mod.build("dark", "blue"))
     _check_session_pick()
@@ -3042,6 +3043,112 @@ def _check_updater() -> None:
           "changed or doesn't match, checks daily and three hours after a failure")
 
 
+def _check_update_install() -> None:
+    """Handing over to Setup, and settling up afterwards, with Setup's start
+    recorded instead of run. The installer that was checked starts silently,
+    told how to reopen the app, and nothing else is ever started; at the next
+    start the app knows whether it's now the new version. A version that
+    didn't install isn't started again by itself - only from Restart to update
+    - so a failing update can't loop; and none of it happens in a checkout or
+    with automatic updates off. (tools/build_exe.py runs a real update.)"""
+    import hashlib
+    import json
+    import tempfile
+
+    from widgets.core import updater as up
+
+    folder = tempfile.mkdtemp(prefix="pcwidgets-install-")
+    started = []
+    now = [5_000_000.0]
+    try:
+        updates = os.path.join(folder, "updates")
+        os.makedirs(updates)
+        setup = os.path.join(updates, "PC-Widgets-Setup-1.0.4.exe")
+        body = b"MZ" + bytes(4096)
+        with open(setup, "wb") as fh:
+            fh.write(body)
+
+        def ready(**extra):
+            state = {"ready": {"version": "1.0.4", "path": setup,
+                               "sha256": hashlib.sha256(body).hexdigest()}}
+            state.update(extra)
+            with open(os.path.join(updates, "state.json"), "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+
+        def updater(current="1.0.3", spawn=None, **kw):
+            return up.Updater(enabled=kw.pop("enabled", True), folder=updates, current=current,
+                              public_key="unused", spawn=spawn or started.append,
+                              clock=lambda: now[0], threaded=False, **kw)
+
+        def state():
+            with open(os.path.join(updates, "state.json"), encoding="utf-8") as fh:
+                return json.load(fh)
+
+        ready()
+        u = updater()
+        assert u.status == "ready" and u.auto
+        try:
+            u.apply("--anything")
+            raise AssertionError("an unknown way to reopen was accepted")
+        except ValueError:
+            pass
+        assert up.install_at_start(True, u) and u.status == "installing"
+        args = started[-1]
+        assert args[0] == setup and args[1:5] == list(up.SETUP_ARGS), args
+        assert args[5] == "/RELAUNCH=background" and args[6].startswith("/LOG=")
+        assert len(args) == 7, "Setup got something more on its command line"
+        assert state()["installing"]["version"] == "1.0.4"
+
+        took = updater(current="1.0.4")             # Setup reopened the new version
+        took.finish_install()
+        assert took.status == "updated" and took.version == "1.0.4"
+        assert "installing" not in state() and "ready" not in state()
+        assert not os.path.exists(setup), "the installer that ran was kept"
+        assert updater(current="1.0.4").status == "updated"
+
+        with open(setup, "wb") as fh:
+            fh.write(body)
+        ready(installing={"version": "1.0.4", "from": "1.0.3", "at": now[0]})
+        stuck = updater()                           # reopened, and still the old one
+        assert not up.install_at_start(False, stuck), "a failed update was started again by itself"
+        assert stuck.status == "failed" and "didn't install" in stuck.detail
+        assert state()["skip"] == "1.0.4" and len(started) == 1
+        assert updater().apply("window", manual=True), "Restart to update couldn't try again"
+        assert started[-1][5] == "/RELAUNCH=window"
+
+        ready()
+        with open(setup, "r+b") as fh:
+            fh.write(b"XX")                         # changed since it was checked
+        count = len(started)
+        assert not updater().apply("window") and len(started) == count, \
+            "an installer that changed on disk was started"
+
+        with open(setup, "wb") as fh:
+            fh.write(body)
+        ready()
+
+        def refuse(_args):
+            raise OSError("access denied")
+        broke = updater(spawn=refuse)
+        assert not broke.apply("window") and broke.status == "failed"
+        assert "installing" not in state(), "a Setup that never started was recorded as running"
+
+        ready()
+        off = updater()
+        off.set_auto(False)
+        count = len(started)
+        assert not up.install_at_start(True, updater()) and len(started) == count, \
+            "it installed with automatic updates off"
+        assert not up.install_at_start(True, updater(enabled=False)), "a checkout installed"
+        assert up.Updater(threaded=False).enabled is False
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    print("  update install: the checked installer starts silently, told how to reopen and "
+          "nothing more; the next start knows whether it took; a failed version isn't "
+          "started again by itself, only from Restart to update; a changed installer, a "
+          "Setup that won't start, automatic updates off and a checkout all start nothing")
+
+
 def _check_persistence(pal) -> None:
     """The layout has to actually reach the disk, and keep reaching it.
 
@@ -3158,6 +3265,11 @@ def run(open_window: bool = True) -> int:
     tray = WidgetTray(board, app)
     tray.install_hotkey(HOTKEY_ID, winapi.MOD_CONTROL | winapi.MOD_ALT, VK_W)
     app.aboutToQuit.connect(board.persist)
+    # The daily look for an update, in an installed copy only.
+    from widgets.core.updater import Updater, schedule
+    tray.updater = Updater(app)
+    if tray.updater.enabled:
+        schedule(tray.updater)
     if open_window:
         QTimer.singleShot(0, tray.show_window)
 
@@ -3236,6 +3348,13 @@ def _logged_selftest() -> int:
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] in HELPER_MODES:
         return _helper(sys.argv[1])
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-update":
+        # Install the update that's downloaded and checked, now, then reopen
+        # as asked (background, window or selftest): the build's own test of
+        # an update. Only ever the installer the updater verified.
+        from widgets.core import updater
+        how = sys.argv[2] if len(sys.argv) > 2 else "window"
+        return 0 if how in updater.RELAUNCH and updater.Updater().apply(how, manual=True) else 1
     args = set(sys.argv[1:])
     if "--selftest" in args:
         from widgets.core import paths
@@ -3282,6 +3401,12 @@ def main() -> int:
             print("PC Widgets is already running - opened its window.")
         else:
             print("PC Widgets is already running.")
+        return 0
+    # An installed copy with a checked update waiting installs it now, before
+    # anything is on screen; Setup reopens it the same way (AUTO-UPDATE.md).
+    from widgets.core import updater
+    if updater.install_at_start(background):
+        print("Installing an update - PC Widgets reopens when it's done.")
         return 0
     return run(open_window=not background)
 

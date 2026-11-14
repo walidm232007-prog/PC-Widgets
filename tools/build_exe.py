@@ -32,7 +32,11 @@ Output: ``<out>/dist/PC Widgets/``, the folder the installer packs.
 With ``--installer``: ``<out>/PC-Widgets-Setup-<version>.exe``, its own
 properties checked the same way, then installed silently into
 ``<out>/test-install``, its exe, Start menu shortcut and the publisher Settings
--> Apps shows checked, and uninstalled again. The Start menu, Startup and Desktop shortcuts called
+-> Apps shows checked, and uninstalled again. Then an update, end to end: the
+same build installed as this version, an installer numbered one patch higher
+waiting where the updater leaves a checked download, the installed exe told to
+install it, and Setup upgrading in place and reopening it (check_update). The
+Start menu, Startup and Desktop shortcuts called
 "PC Widgets" are put back as they were afterwards: on a developer's machine
 they are the checkout's own, and the test install replaces the Start menu one.
 """
@@ -41,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes as C
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -275,9 +280,49 @@ def uninstall_key(src: str) -> str:
 
 
 def listed_publisher(key: str) -> str:
+    return listed(key, "Publisher")
+
+
+def listed(key: str, value: str) -> str:
+    """One value of the app's entry in Settings -> Apps, or "" if there's none."""
     import winreg
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
-        return winreg.QueryValueEx(k, "Publisher")[0]
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            return str(winreg.QueryValueEx(k, value)[0])
+    except OSError:
+        return ""
+
+
+def uninstall_silently(target: str) -> None:
+    """Uninstall the test copy in ``target`` and check nothing is left."""
+    exe = os.path.join(target, "PC Widgets.exe")
+    uninstaller = os.path.join(target, "unins000.exe")
+    subprocess.run([uninstaller, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                   check=True, timeout=300)
+    # The uninstaller hands over to a copy of itself in %TEMP% and returns.
+    deadline = time.monotonic() + 60
+    while os.path.exists(exe) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert not os.path.exists(exe), "the uninstaller left the exe behind"
+    time.sleep(2)
+    assert not os.path.exists(shortcuts()[0]), "the uninstaller left the Start menu shortcut"
+    left = [n for n in os.listdir(target)] if os.path.isdir(target) else []
+    assert not left, f"the uninstaller left {left}"
+
+
+def restore_shortcuts(saved: dict) -> None:
+    """Put the developer's own "PC Widgets" shortcuts back as they were."""
+    for path, data in saved.items():
+        try:
+            if open(path, "rb").read() == data:
+                continue
+        except OSError:
+            pass
+        # Rewritten in place: Windows refuses to replace a hidden file, and
+        # a person may well have hidden a desktop shortcut.
+        with open(path, "r+b" if os.path.exists(path) else "wb") as fh:
+            fh.write(data)
+            fh.truncate()
 
 
 def check_installer(setup: str, out: str, src: str, meta: dict) -> None:
@@ -304,31 +349,89 @@ def check_installer(setup: str, out: str, src: str, meta: dict) -> None:
         print(f"  ok    Settings -> Apps lists it as published by {listed}")
         check_media_helper(exe)
 
-        uninstaller = os.path.join(target, "unins000.exe")
-        subprocess.run([uninstaller, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
-                       check=True, timeout=300)
-        # The uninstaller hands over to a copy of itself in %TEMP% and returns.
-        deadline = time.monotonic() + 60
-        while os.path.exists(exe) and time.monotonic() < deadline:
-            time.sleep(0.5)
-        assert not os.path.exists(exe), "the uninstaller left the exe behind"
-        time.sleep(2)
-        assert not os.path.exists(menu), "the uninstaller left the Start menu shortcut"
-        left = [n for n in os.listdir(target)] if os.path.isdir(target) else []
-        assert not left, f"the uninstaller left {left}"
+        uninstall_silently(target)
         print("  ok    installs, its Start menu shortcut opens it, and it uninstalls cleanly")
     finally:
-        for path, data in saved.items():
-            try:
-                if open(path, "rb").read() == data:
-                    continue
-            except OSError:
-                pass
-            # Rewritten in place: Windows refuses to replace a hidden file, and
-            # a person may well have hidden a desktop shortcut.
-            with open(path, "r+b" if os.path.exists(path) else "wb") as fh:
-                fh.write(data)
-                fh.truncate()
+        restore_shortcuts(saved)
+
+
+def bump(version: str) -> str:
+    """The next patch version: 1.0.2 -> 1.0.3."""
+    parts = version.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
+def check_update(setup: str, app: str, out: str, src: str, meta: dict) -> None:
+    """An update the app installs itself, end to end (AUTO-UPDATE.md).
+
+    This build installed silently as version N; an installer made from the
+    same build but numbered N+1 waits in the copy's updates folder as the
+    updater leaves one it has downloaded and checked; then the installed exe
+    is told to install it (``--install-update selftest``). It must hand over
+    and quit; Setup must wait for it, upgrade in place - Settings -> Apps
+    reads N+1 - without making the Startup or Desktop shortcuts the first
+    install was told not to, and reopen the app, here as its self test, which
+    shows nothing and leaves a log to find. Then it all uninstalls.
+    """
+    newer = dict(meta, VERSION=bump(meta["VERSION"]))
+    staging = os.path.join(out, "update-test")
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
+    later = build_installer(src, app, staging, newer)
+    target = os.path.join(out, "test-install")
+    local = os.path.join(out, "test-localappdata-update")
+    for folder in (target, local):
+        shutil.rmtree(folder, ignore_errors=True)
+    key = uninstall_key(src)
+    saved = {p: open(p, "rb").read() for p in shortcuts() if os.path.exists(p)}
+    try:
+        subprocess.run([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                        f"/DIR={target}", "/TASKS=", f"/LOG={out}\\install-n.log"],
+                       check=True, timeout=300)
+        exe = os.path.join(target, "PC Widgets.exe")
+        assert listed(key, "DisplayVersion") == meta["VERSION"], "version N isn't installed"
+
+        updates = os.path.join(local, "PCWidgets", "updates")
+        os.makedirs(updates)
+        staged = os.path.join(updates, os.path.basename(later))
+        shutil.copyfile(later, staged)
+        digest = hashlib.sha256(open(staged, "rb").read()).hexdigest()
+        with open(os.path.join(updates, "state.json"), "w", encoding="utf-8") as fh:
+            json.dump({"ready": {"version": newer["VERSION"], "path": staged,
+                                 "sha256": digest}}, fh)
+
+        env = dict(os.environ, LOCALAPPDATA=local)
+        started = time.perf_counter()
+        code = subprocess.run([exe, "--install-update", "selftest"], env=env, timeout=60).returncode
+        assert code == 0, f"the installed app didn't hand over to Setup (exit {code})"
+        with open(os.path.join(updates, "state.json"), encoding="utf-8") as fh:
+            assert json.load(fh).get("installing", {}).get("version") == newer["VERSION"]
+
+        deadline = time.monotonic() + 240
+        while listed(key, "DisplayVersion") != newer["VERSION"] and time.monotonic() < deadline:
+            time.sleep(1)
+        assert listed(key, "DisplayVersion") == newer["VERSION"], (
+            f"Setup didn't upgrade the copy to {newer['VERSION']} (see {updates})")
+        log = os.path.join(local, "PCWidgets", "_selftest", "selftest.log")
+        deadline = time.monotonic() + 600
+        text = ""
+        while time.monotonic() < deadline:
+            text = open(log, encoding="utf-8").read() if os.path.exists(log) else ""
+            if "all good." in text or "Traceback" in text:
+                break
+            time.sleep(2)
+        assert "all good." in text, f"the reopened app didn't pass its self test:\n{text[-2000:]}"
+        took = time.perf_counter() - started
+        for path in shortcuts()[1:]:
+            assert (open(path, "rb").read() if os.path.exists(path) else None) == saved.get(path), (
+                f"the update made a shortcut it wasn't asked to: {path}")
+        time.sleep(3)           # the self test's process has written its last line; let it go
+        uninstall_silently(target)
+        print(f"  ok    an update installs itself: the app hands over and quits, Setup upgrades "
+              f"{meta['VERSION']} to {newer['VERSION']} in place and reopens it ({took:.0f} s)")
+    finally:
+        restore_shortcuts(saved)
 
 
 # --------------------------------------------------------------------------- #
@@ -376,6 +479,7 @@ def main() -> int:
         if not args.no_test:
             check_details(setup, meta, "the installer")
             check_installer(setup, out, src, meta)
+            check_update(setup, app, out, src, meta)
     print("done.")
     return 0
 

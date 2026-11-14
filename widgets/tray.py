@@ -71,6 +71,7 @@ class WidgetTray(QSystemTrayIcon):
         self._window = None
         self._welcome = None             # the first-run welcome while it's open
         self._menu: QMenu | None = None
+        self.updater = None              # widgets/core/updater.Updater, set by main.run()
 
         self.setToolTip("PC Widgets — click to open · Ctrl+Alt+W to peek")
         self.activated.connect(self._activated)
