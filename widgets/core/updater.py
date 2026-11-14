@@ -57,10 +57,13 @@ REPO = HOMEPAGE.removeprefix("https://github.com/").strip("/")
 UPDATE_URL = f"https://github.com/{REPO}/releases/latest/download/update.json"
 DOWNLOAD_PREFIX = f"https://github.com/{REPO}/releases/download/"
 
-# The public half of the release key, as signature.py's base64 blob. Empty
-# until the release key is made (AUTO-UPDATE.md, M4): with no key, no update
-# is trusted, so a build without one can never install anything.
-PUBLIC_KEY = ""
+# The public half of the release key (tools/update_key.py, 2026-11-14), as
+# signature.py's base64 blob. Its private half is the repository's
+# UPDATE_SIGNING_KEY secret, which signs each release's update.json; nothing
+# else is trusted. Never change it: copies carrying it can only take updates
+# signed by its partner.
+PUBLIC_KEY = ("RUNTMSAAAACq7PF9HayOHv5Q0TP96YfV25HfcgNAGpuqQ+W7a+fpw7r23E3nLiHOaHi3fbWi"
+              "cZzwR1UMBh45nCXuiLW9/8jn")
 
 MANIFEST_LIMIT = 64 * 1024              # update.json is a few hundred bytes
 INSTALLER_MIN = 1024 * 1024             # an installer smaller than this is wrong
@@ -141,6 +144,18 @@ def read_update(raw: bytes, public_key: Optional[str] = None) -> Update:
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise UpdateError("the update's checksum isn't a SHA-256")
     return Update(version, url, size, digest)
+
+
+def make_update_file(installer: str, version: str, private_key: str) -> bytes:
+    """A release's update.json, signed: what tools/sign_update.py writes in
+    the release workflow, with the private key from the repository's secrets.
+    Laid out readably; the signature is over ``canonical(manifest)``."""
+    if parse_version(version) is None:
+        raise ValueError(f"not a version: {version!r}")
+    manifest = {"version": version, "url": installer_url(version),
+                "size": os.path.getsize(installer), "sha256": sha256_of(installer)}
+    doc = {"manifest": manifest, "signature": signature.sign(private_key, canonical(manifest))}
+    return (json.dumps(doc, indent=2) + "\n").encode("utf-8")
 
 
 def sha256_of(path: str) -> str:

@@ -6,6 +6,11 @@
 #   the installer kept as a workflow artifact for a week. Do this before
 #   tagging, to see a build pass on a clean machine.
 #
+# Either way it writes update.json, signed with the release key - the
+# UPDATE_SIGNING_KEY secret, made by tools/update_key.py - and checked against
+# the public key built into the app; a release attaches it, and installed
+# copies find it there each day (AUTO-UPDATE.md).
+#
 # packaging/README.md explains the build itself.
 
 name: Release
@@ -72,6 +77,13 @@ jobs:
       - name: Build and test
         run: python tools/build_exe.py --out build --installer
 
+      - name: Update file
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python tools/sign_update.py --installer "build/PC-Widgets-Setup-$env:VERSION.exe" --version $env:VERSION --out build/update.json
+
       - name: Self-test log
         if: always()
         uses: actions/upload-artifact@v6
@@ -85,7 +97,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: PC-Widgets-Setup-${{ steps.version.outputs.version }}
-          path: build/PC-Widgets-Setup-${{ steps.version.outputs.version }}.exe
+          path: |
+            build/PC-Widgets-Setup-${{ steps.version.outputs.version }}.exe
+            build/update.json
           retention-days: 7
 
       - name: Release
@@ -103,8 +117,8 @@ jobs:
 
           The installer isn't signed yet, so the first time Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
 
-          To update, run a newer installer over this one; your widgets and settings stay. Uninstall from Settings -> Apps.
+          It keeps itself up to date: once a day it looks for a newer release, downloads it, and installs it the next time it starts (Settings -> Updates). Copies of 1.0.2 or earlier update by running this installer over them once; your widgets and settings stay. Uninstall from Settings -> Apps.
 
           SHA-256: ``$hash``
           "@
-          gh release create $env:GITHUB_REF_NAME $setup --title "PC Widgets $v" --notes $notes
+          gh release create $env:GITHUB_REF_NAME $setup build/update.json --title "PC Widgets $v" --notes $notes

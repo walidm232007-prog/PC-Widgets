@@ -8,7 +8,7 @@ building it. Agreed with the developer on 2026-11-14, to land before 1.0.3.
 | M1 – find, trust and download an update | done |
 | M2 – install it: a silent upgrade that reopens the app, tested end to end | done |
 | M3 – Settings › App and the tray: the switch, Check now, the status, one tip | done |
-| M4 – release: the signing key, the workflow signs and attaches the update file, a CI dry run | next |
+| M4 – release: the signing key, the workflow signs and attaches the update file, a CI dry run | key and workflow done; the CI dry run waits on a push |
 
 ## Why
 
@@ -137,3 +137,26 @@ installer once, over the top; from 1.0.3 on, updates come by themselves.
   updates with git.
 - Selftest: `_check_update_ui`, rendering the group to
   `_selftest/_app_updates_*.png`.
+
+## What M4 laid down
+
+- The release key exists. The developer made it on 2026-11-14 with
+  `tools/update_key.py new --set-secret`, which handed the private half
+  straight to the repository's `UPDATE_SIGNING_KEY` secret and saved a backup
+  for a password manager; it was never printed or seen by anyone else. The
+  public half is `updater.PUBLIC_KEY`. Never make a new one: installed copies
+  only trust the key they carry.
+- `updater.make_update_file()` writes a release's update file - version,
+  installer address, size, SHA-256 and the signature over them - laid out
+  readably; `tools/sign_update.py` runs it in the release workflow with the
+  secret, and checks the result against the app's own public key before
+  writing it. A secret that doesn't match the app fails the run, instead of
+  every copy quietly refusing the update.
+- `.github/workflows/release.yml` signs `update.json` after the build on every
+  run; a tag attaches it to the release beside the installer, and a dry run
+  keeps it with the installer artifact. The release notes say the app updates
+  itself and that 1.0.2 copies need the new installer once.
+- packaging/README.md's release steps cover the update file and the secret.
+- Selftest: `_check_updater` now builds an update file and reads it back the
+  way a copy does, checks the app's key is a real ECDSA P-256 public key, and
+  that it refuses an update signed by any other key.

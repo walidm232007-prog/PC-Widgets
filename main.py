@@ -2958,6 +2958,22 @@ def _check_updater() -> None:
         except OSError:
             assert not os.path.exists(dest + ".part")
 
+        # What the release workflow writes (tools/sign_update.py), read back
+        # the way an installed copy reads it.
+        installer = os.path.join(folder, "PC-Widgets-Setup-1.0.4.exe")
+        with open(installer, "wb") as fh:
+            fh.write(payload)
+        made = up.read_update(up.make_update_file(installer, "1.0.4", private), public)
+        assert made == good, (made, good)
+        if up.PUBLIC_KEY:
+            assert signature.public_of(private) != up.PUBLIC_KEY
+            signature._blob(up.PUBLIC_KEY, signature.PUBLIC_MAGIC, 2)   # raises if it isn't one
+            try:
+                up.read_update(up.make_update_file(installer, "1.0.4", private))
+                raise AssertionError("the app's own key accepted another key's update")
+            except up.UpdateError:
+                pass
+
         now = [1_000_000.0]
         served = {"file": update_file(), "body": payload, "fetches": 0, "downloads": 0}
 

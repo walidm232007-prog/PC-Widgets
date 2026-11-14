@@ -122,6 +122,16 @@ manifest lists for it.
    Release with the installer and its SHA-256. A tag that doesn't match
    `widgets/version.py` fails before anything is built.
 
+Each run also writes `update.json` (`tools/sign_update.py`): the version,
+the installer's address, size and SHA-256, signed with the release key's
+private half - the repository's `UPDATE_SIGNING_KEY` secret, made once by
+`tools/update_key.py` - and checked against the public half built into the
+app (`widgets/core/updater.py`), so a secret that doesn't match fails the run.
+A release attaches it beside the installer; installed copies look for it there
+each day and update themselves (AUTO-UPDATE.md). The dry run keeps it with
+the installer artifact. Never make a new key: copies already installed only
+trust the one they carry.
+
 The README's download link points at the latest release, so it needs no
 change. If a test fails, the self test's log is attached to the run.
 
