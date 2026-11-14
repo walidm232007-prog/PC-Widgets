@@ -580,11 +580,14 @@ class WeatherWidget(WidgetCard):
         self._search = None
         self.data_ready.connect(self.speak)
         self.setAccessibleName("Weather")
+        self.speak()
 
     def speak(self) -> None:
         """What a screen reader says for the card: everything it shows is
         painted, so without this it would hear nothing at all."""
-        self.setAccessibleDescription(spoken(self.data))
+        self.setAccessibleDescription(
+            "No town yet: Set your town to see the weather." if self.needs_town
+            else spoken(self.data))
 
     @classmethod
     def new_config(cls) -> dict:
@@ -665,6 +668,7 @@ class WeatherWidget(WidgetCard):
         self.config.update({"lat": town.lat, "lon": town.lon, "place": town.label})
         self.needs_town = False
         self.data = Forecast(place=town.label)       # "loading…" until it lands
+        self.speak()
         self.changed.emit()
         self._refresh()
         self.update()
@@ -840,11 +844,17 @@ class WeatherWidget(WidgetCard):
     @property
     def tinted(self) -> bool:
         """The new faces sit on the condition's sky. Classic keeps its photo
-        band, and a colour or picture someone chose for the card keeps theirs."""
+        band, and a colour or picture someone chose for the card keeps theirs.
+        A card with no forecast to show - waiting for its town, loading, or
+        failed - stays plain: its few words are in the palette's own colours,
+        which a sky photo behind them would make hard to read."""
         c = self.config
+        d = getattr(self, "data", None)
         return (self.face != "classic" and not c.get("image")
                 and not c.get("bg") and not c.get("fg")
-                and c.get("fill") != "solid")
+                and c.get("fill") != "solid"
+                and not getattr(self, "needs_town", False)
+                and d is not None and d.temp is not None and not d.error)
 
     def paint_tint(self, p, path: QPainterPath, r: QRectF) -> None:
         """The condition's photograph across the whole card, under its sky
