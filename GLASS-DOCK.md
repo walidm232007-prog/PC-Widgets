@@ -38,21 +38,36 @@ is that they leave every other capture too: **with See through windows on, the
 dock doesn't appear in screenshots, recordings or screen sharing.** Turning it
 off puts them back.
 
-A grab of the 1100 by 64 px strip costs about 5 ms on a Ryzen 5 5600G at 1080p.
-That is too slow for a 200 Hz frame, so it never runs per frame:
+A grab of the strip takes about 5 ms on a Ryzen 5 5600G at 1080p, but only
+0.4 ms of that is CPU: the rest is waiting on the compositor. All the work
+happens on a thread of its own, never in the dock's 200 Hz frame:
 
 - **Only while a window covers the strip.** With just the desktop behind it,
   the dock uses the wallpaper glass, which is the same picture for nothing. A
   quick look through the window list, about half a millisecond, decides.
-- **At most ten times a second, on a thread of its own.** That thread also
-  builds the glass: the half-size frosted planes liquid glass bends, or the
-  blur for frosted glass, never both. About 10 ms in all.
+- **About 50 a second while what's behind moves, ten while it's still.** The
+  first version grabbed ten a second, and scrolling or a video behind the
+  dock stepped visibly. Now each grab is compared with the last; while they
+  keep changing it grabs again as soon as the thread has rested as long as
+  it worked, so it never takes more than half a core. A quarter of a second
+  with no change drops it back to ten a second, just to notice the next one.
+- **The thread builds the glass too:** the half-size frosted planes liquid
+  glass bends (3 ms in numpy; 5.8 ms through QImage), or the blur for frosted
+  glass, never both. It also bends each new capture for the panes the dock
+  last drew (3 ms), so the dock's own redraw is only drawing, about 2.3 ms,
+  where bending there cost 4.9.
 - **The dock redraws only when the strip changed.** An idle page behind it
-  costs the grab and nothing else; a video costs a redraw (one bend, 1.5 ms)
-  each time.
+  costs ten grabs a second, about 1% of a core.
 - **Nothing while the dock is down**, so a maximised window or a full-screen
   game pays nothing. Sliding up, the dock starts with the last capture, as it
   does with the last bend, and a new one lands within a tenth of a second.
+
+So a video playing behind the dock costs about half a core in all, a few
+percent of a 12-thread CPU, and only while it plays there. Two Windows timer
+details set the rate: `Event.wait` sleeps in 15.6 ms steps, so short rests use
+`time.sleep`, which keeps to the millisecond from Python 3.11; and
+`thread_time` moves in the same 15.6 ms steps, so the work is timed by the
+clock from the end of the grab instead.
 
 The window previews keep the wallpaper glass: they are opaque, and Windows
 draws their edge.
