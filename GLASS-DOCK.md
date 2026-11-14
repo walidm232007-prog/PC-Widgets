@@ -62,18 +62,6 @@ happens on a thread of its own, never in the dock's 200 Hz frame:
   game pays nothing. Sliding up, the dock starts with the last capture, as it
   does with the last bend, and a new one lands within a tenth of a second.
 
-**Liquid glass blurs more while things move behind it.** On the live board the
-capture kept up at 57 grabs and 45-51 new frames a second, measured from the
-board's log while a page scrolled behind the dock, and that was still visibly
-steppy. The screen moves the page every 5 ms; the glass moves every 20, a frame
-or two late, and liquid glass is clear enough to show each jump. Faster would
-take the graphics card (DXGI desktop duplication, or Windows' own acrylic,
-which can't bend). So, the way a moving scene smears behind real frosted
-glass, each new frame frosts the glass two steps harder, up to about 13 px of
-blur, which hides the jumps; once nothing has moved for a quarter of a second
-it eases back to the chosen Blur in six steps, one each 1/30 s. Frosted glass
-is blurred enough already and stays as it is.
-
 So a video playing behind the dock costs about half a core in all, a few
 percent of a 12-thread CPU, and only while it plays there. Two Windows timer
 details set the rate: `Event.wait` sleeps in 15.6 ms steps, so short rests use
