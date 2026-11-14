@@ -58,7 +58,7 @@ from .theme import (
 # card itself, which is right there and ambiguous here, hence "Agenda".
 CATALOG = {
     "clock": ("Clock", "An analog face, or the time set large."),
-    "weather": ("Weather", "Conditions now, and the week ahead at larger sizes."),
+    "weather": ("Weather", "Now, the hours and days ahead, next-hour rain, sunrise."),
     "calendar": ("Calendar", "Today's date, or the whole month at a glance."),
     "outlook": ("Agenda", "What's coming up, from Outlook or your Windows calendar."),
     "notes": ("Notes", "A sticky note you can type in. Saved as you go."),
@@ -664,10 +664,15 @@ class GalleryTile(Cached, QWidget):
         super().__init__()
         self.win = win
         self.kind = cls.kind
+        self.cls = cls
         self.count = 0
         self._preview = None
         sizes = list(cls.supported_sizes)
         self.size_key = "medium" if "medium" in sizes else sizes[0]
+        # A tile with faces (weather) shows one at a time, with page dots under
+        # it the way Apple's widget gallery pages through a widget's styles.
+        self.face_i = 0
+        self.setMouseTracking(True)
         self.setFixedHeight(self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._hover = eased(self, 160)
@@ -692,6 +697,54 @@ class GalleryTile(Cached, QWidget):
     def well(self) -> QRectF:
         c, g = self.card(), self.WELL_INSET
         return QRectF(c.left() + g, c.top() + g, c.width() - 2 * g, self.WELL_H)
+
+    # -- faces ----------------------------------------------------------- #
+    FACE_STRIP = 34          # the face's name and the dots, under the preview
+
+    def faces(self) -> list:
+        return list(getattr(self.cls, "FACES", {}).get(self.size_key, ()))
+
+    def face(self) -> str:
+        faces = self.faces()
+        return faces[self.face_i][0] if faces else ""
+
+    def preview_area(self) -> QRectF:
+        w = self.well()
+        if len(self.faces()) > 1:
+            return QRectF(w.left(), w.top(), w.width(), w.height() - self.FACE_STRIP)
+        return w
+
+    def dot_rects(self) -> List[QRectF]:
+        n = len(self.faces())
+        if n < 2:
+            return []
+        w, step, d = self.well(), 16.0, 7.0
+        x0 = w.center().x() - step * (n - 1) / 2.0
+        y = w.bottom() - 12
+        return [QRectF(x0 + i * step - d / 2, y - d / 2, d, d) for i in range(n)]
+
+    def set_face(self, i: int) -> None:
+        n = len(self.faces())
+        if n and i % n != self.face_i:
+            self.face_i = i % n
+            self.render_preview()
+
+    def mouseMoveEvent(self, ev) -> None:
+        hot = len(self.faces()) > 1 and self.well().contains(ev.position())
+        self.setCursor(Qt.PointingHandCursor if hot else Qt.ArrowCursor)
+        super().mouseMoveEvent(ev)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton and len(self.faces()) > 1:
+            pos = ev.position()
+            for i, dot in enumerate(self.dot_rects()):
+                if dot.adjusted(-5, -7, 5, 7).contains(pos):
+                    self.set_face(i)
+                    return
+            if self.well().contains(pos):
+                self.set_face(self.face_i + 1)
+                return
+        super().mousePressEvent(ev)
 
     def _place(self) -> None:
         c = self.card()
@@ -729,17 +782,18 @@ class GalleryTile(Cached, QWidget):
     # -- content --------------------------------------------------------- #
     def _size_changed(self, key: str) -> None:
         self.size_key = key
+        self.face_i = 0
         self.render_preview()
 
     def render_preview(self) -> None:
-        well = self.well()
-        w, h = int(well.width()), int(well.height())
+        area = self.preview_area()
+        w, h = int(area.width()), int(area.height())
         if w < 40 or h < 40:
             return
         b = self.win.board
         self._preview = previews.gallery_image(
             self.kind, self.size_key, b.palette, b.glass if b.state.glass else None,
-            b.state.opacity, b.state.glass_tint, w, h)
+            b.state.opacity, b.state.glass_tint, w, h, self.face())
         self.update()
 
     def set_count(self, n: int) -> None:
@@ -753,7 +807,9 @@ class GalleryTile(Cached, QWidget):
     def _add(self) -> None:
         board = self.win.board
         where = self.win.gallery.target()
-        card = board.add(self.kind, self.size_key, display=where)
+        face = self.face()
+        config = {"faces": {self.size_key: face}} if face and face != "classic" else None
+        card = board.add(self.kind, self.size_key, display=where, config=config)
         name = name_of(self.kind)
         if card is None:
             self.win.toast(f"Couldn't add {name}.")
@@ -777,11 +833,23 @@ class GalleryTile(Cached, QWidget):
         p.save()
         p.setClipPath(path)
         p.fillRect(well, QColor(ui.well))
+        area = self.preview_area()
         if self._preview is not None and not self._preview.isNull():
-            p.drawImage(QPointF(well.left() + (well.width() - self._preview.width()) / 2.0,
-                                well.top() + (well.height() - self._preview.height()) / 2.0),
+            p.drawImage(QPointF(area.left() + (area.width() - self._preview.width()) / 2.0,
+                                area.top() + (area.height() - self._preview.height()) / 2.0),
                         self._preview)
         p.restore()
+
+        dots = self.dot_rects()
+        if dots:
+            p.setFont(theme.font(9, QFont.DemiBold))
+            p.setPen(QColor(ui.text_dim))
+            p.drawText(QRectF(well.left(), well.bottom() - self.FACE_STRIP, well.width(), 16),
+                       Qt.AlignCenter, self.faces()[self.face_i][1])
+            p.setPen(Qt.NoPen)
+            for i, dot in enumerate(dots):
+                p.setBrush(QColor(ui.text if i == self.face_i else ui.text_faint))
+                p.drawEllipse(dot)
 
         if self.count:
             text = "On desktop" if self.count == 1 else f"{self.count} on desktop"
