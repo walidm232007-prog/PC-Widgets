@@ -2,7 +2,7 @@
 and the app read them from here. Raise VERSION before tagging a release
 (packaging/README.md)."""
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 # The publisher in the exe's properties, the installer's, and Settings -> Apps.
 # Until now all three said "PC Widgets", which is the product, not who made it.
