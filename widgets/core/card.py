@@ -45,6 +45,10 @@ STEP = CELL + GAP        # one grid cell and its gap; layout arithmetic elsewher
 # nudge, a little longer for a real pull, never sluggish.
 GLIDE_MIN_MS = 170.0
 GLIDE_MAX_MS = 300.0
+# The drop outline fades in when a card comes close enough to line up, and out
+# when it leaves or is let go - never popping on and off under the cursor.
+FADE_IN_MS = 140.0
+FADE_OUT_MS = 180.0
 
 SIZES: Dict[str, Tuple[int, int]] = {
     "small":  (2, 2),
@@ -242,6 +246,10 @@ class DropOutline(QWidget):
         self._card = QRectF()
         self._dark = True
         self._native = False
+        # Faded rather than popped: 0 gone, 1 fully drawn.
+        self._alpha = 0.0
+        self._fade = None
+        self._fading_out = False
 
     def show_for(self, card: "WidgetCard", x: int, y: int) -> None:
         if self.size() != card.size():
@@ -250,27 +258,93 @@ class DropOutline(QWidget):
         self._dark = card.palette_.dark
         self.move(x, y)
         if not self.isVisible():
+            self._alpha = 0.0
             self.show()
             if not self._native:
                 winapi.make_desktop_window(int(self.winId()), no_activate=True)
                 self._native = True
         # Re-asserted every time: the card can be restacked while it's dragged.
         winapi.place_below(int(self.winId()), int(card.winId()))
+        if self._fading_out or (self._fade is None and self._alpha < 1.0):
+            self._fade_to(1.0, FADE_IN_MS)
         self.update()
+
+    def fade_out(self, ms: float = None) -> None:
+        """Fade away, then hide. Safe to call when already hidden."""
+        if not self.isVisible() or self._fading_out:
+            return
+        self._fade_to(0.0, FADE_OUT_MS if ms is None else ms)
+
+    def hide_now(self) -> None:
+        self._stop_fade()
+        self._alpha = 0.0
+        self.hide()
+
+    def _stop_fade(self) -> None:
+        if self._fade is not None:
+            self._fade.stop()
+            self._fade.deleteLater()
+            self._fade = None
+        self._fading_out = False
+
+    def _fade_to(self, target: float, ms: float) -> None:
+        self._stop_fade()
+        start = self._alpha
+        if not winapi.animations_enabled() or abs(target - start) < 0.01:
+            self._alpha = target
+            if target <= 0.0:
+                self.hide()
+            self.update()
+            return
+        from .frameclock import Tween
+        t = Tween(self)
+        t.setStartValue(start)
+        t.setEndValue(target)
+        # Scaled by how far there is to go, so a reversal mid-fade isn't slow.
+        t.setDuration(max(40.0, ms * abs(target - start)))
+        t.setEasingCurve(QEasingCurve.OutCubic if target > start else QEasingCurve.InOutQuad)
+
+        def step(v) -> None:
+            self._alpha = float(v)
+            self.update()
+
+        def done() -> None:
+            self._stop_fade()
+            self._alpha = target
+            if target <= 0.0:
+                self.hide()
+
+        t.valueChanged.connect(step)
+        t.finished.connect(done)
+        self._fade = t
+        self._fading_out = target <= 0.0
+        t.start()
 
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        path = squircle(self._card.adjusted(0.75, 0.75, -0.75, -0.75), RADIUS)
-        # A pale wash and a soft rim - the Mac's placeholder reads as a hollow
-        # in the desktop, not a second widget.
-        p.setBrush(QColor(255, 255, 255, 34 if self._dark else 70))
-        p.setPen(QPen(QColor(255, 255, 255, 120 if self._dark else 190), 1.5))
-        p.drawPath(path)
+        # The Mac's placeholder is only a line: a crisp, light grey hairline in
+        # the widget's own shape, with the desktop showing straight through -
+        # no wash, no blur, no shadow. Under it, one pixel out, a faint dark
+        # line so it still reads over a white wallpaper.
+        a = max(0.0, min(1.0, self._alpha))
+        if a <= 0.0:
+            p.end()
+            return
+        r = self._card.adjusted(1.0, 1.0, -1.0, -1.0)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(0, 0, 0, int(40 * a)), 3.6))
+        p.drawPath(squircle(r, RADIUS - 1.0))
+        p.setPen(QPen(QColor(232, 232, 236, int(235 * a)), 2.0))
+        p.drawPath(squircle(r, RADIUS - 1.0))
         p.end()
 
 
 _outline: Optional[DropOutline] = None
+# The card being dragged or gliding into place, if any. While there is one,
+# every card on the board wears the light rim, as the Mac's widgets all do the
+# moment one of them is picked up.
+_moving: Optional["WidgetCard"] = None
 
 
 def drop_outline() -> DropOutline:
@@ -709,7 +783,15 @@ class WidgetCard(QWidget):
             p.drawRect(r)
             p.restore()
 
-        if self._hover and not self.locked:
+        if _moving is not None:
+            # Moving: the same light hairline as the drop outline, the way the
+            # Mac rims its widgets while one is moved - brightest on the one in
+            # hand, so card and outline read as one shape and its landing place.
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(232, 232, 236, 200 if _moving is self else 120), 1.6))
+            p.drawPath(squircle(r.adjusted(0.8, 0.8, -0.8, -0.8), RADIUS - 0.8))
+            p.setPen(Qt.NoPen)
+        elif self._hover and not self.locked:
             ring = QColor(pal.accent)
             ring.setAlpha(110)
             p.setBrush(Qt.NoBrush)
@@ -895,6 +977,7 @@ class WidgetCard(QWidget):
                 self._stop_glide()
                 self._drag_from = ev.globalPosition().toPoint() - self.pos()
                 self._target = None
+                self._set_moving(True)      # rim the board at once
             ev.accept()
 
     def mouseMoveEvent(self, ev) -> None:
@@ -918,7 +1001,7 @@ class WidgetCard(QWidget):
         target = self._target
         self._target = None
         if _outline is not None:
-            _outline.hide()
+            _outline.fade_out()         # fades as the card glides into it
         x, y = target if target is not None else (self.x(), self.y())
         self._glide_to(*self._clamped(x, y))
         ev.accept()
@@ -958,7 +1041,7 @@ class WidgetCard(QWidget):
         self._target = target
         if target is None:
             if _outline is not None:
-                _outline.hide()
+                _outline.fade_out()
         else:
             drop_outline().show_for(self, *target)
 
@@ -1011,12 +1094,26 @@ class WidgetCard(QWidget):
         # A card removed mid-glide must not leave the frame clock stepping it.
         self._stop_glide()
         if self._drag_from is not None and _outline is not None:
-            _outline.hide()
+            _outline.hide_now()
         self._drag_from = None
+        self._set_moving(False)
         super().closeEvent(ev)
+
+    def _set_moving(self, on: bool) -> None:
+        global _moving
+        if on:
+            _moving = self
+        elif _moving is self:
+            _moving = None
+        else:
+            return
+        for c in [self] + [o for o in (self.peers() if self.peers else ())
+                           if o is not self]:
+            c.update()
 
     def _landed(self) -> None:
         self._stop_glide()
+        self._set_moving(False)
         self.moved.emit()
         # Where it landed, liquid glass is bent in full for the exact spot: the
         # drag bent it on a coarser grid, or not at all on a slow PC.
