@@ -61,11 +61,14 @@ def main() -> int:
               magnet.suggest(rect(600 + 168 + GAP + 30, 300), [a], WORK, GAP,
                              held=(600 + 168 + GAP, 300)),
               (600 + 168 + GAP, 300)),
-        # ...but not a real move away.
+        # ...but not a real move away: out of range, so no outline at all.
         check("lets go",
               magnet.suggest(rect(600 + 168 + GAP + 60, 300), [a], WORK, GAP,
                              held=(600 + 168 + GAP, 300)),
-              (600 + 168 + GAP + 60, 300)),
+              None),
+
+        # Lined up in the same column but far below: too far to count.
+        check("too far to pull", magnet.suggest(rect(605, 300 + 168 + 90), [a], WORK, GAP), None),
 
         # Between two cards in a row: slots in with an even gap either side.
         check("fills a gap in a row",

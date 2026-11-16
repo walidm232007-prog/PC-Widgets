@@ -59,18 +59,20 @@ def _near(lo1: int, len1: int, lo2: int, len2: int, reach: int) -> bool:
 def _axis_candidates(pos: int, size: int, cross_pos: int, cross_size: int,
                      others: Sequence[Tuple[int, int, int, int]],
                      lo: int, hi: int, gap: int, reach: int,
-                     inset: int) -> List[int]:
+                     inset: int, close: int) -> List[int]:
     """Every place along one axis this card could be pulled to.
 
     ``others`` are given as (pos, size, cross_pos, cross_size) on this axis.
     """
     out: List[int] = []
     for opos, osize, ocross, ocsize in others:
-        # Only widgets that are actually near count - one at the far side of
-        # the screen shouldn't tug at a card being placed over here.
-        if not _near(cross_pos, cross_size, ocross, ocsize, reach * 3):
+        # Only a widget the card is genuinely close to counts: within
+        # ``close`` of it on both axes. Further off - even lined up in the
+        # same column across the screen - nothing is suggested and no outline
+        # appears; the card goes where it's dropped.
+        if not _near(cross_pos, cross_size, ocross, ocsize, close):
             continue
-        if not _near(pos, size, opos, osize, reach * 3):
+        if not _near(pos, size, opos, osize, close):
             continue
         beside = _near(cross_pos, cross_size, ocross, ocsize, 0)
         out += [opos, opos + osize - size]                  # align the edges
@@ -113,10 +115,13 @@ def suggest(moving: Rect, others: Sequence[Rect], work: Rect, gap: int,
     x, y, w, h = moving
     wl, wt, wr, wb = work
 
+    # One gap and REACH away from a neighbour; a little further while an
+    # outline is already showing, so it holds through a wobble.
+    close = int(gap + reach * (STICKY if held is not None else 1.0))
     xs = _axis_candidates(x, w, y, h, [(ox, ow, oy, oh) for ox, oy, ow, oh in others],
-                          wl, wr, gap, reach, inset)
+                          wl, wr, gap, reach, inset, close)
     ys = _axis_candidates(y, h, x, w, [(oy, oh, ox, ow) for ox, oy, ow, oh in others],
-                          wt, wb, gap, reach, inset)
+                          wt, wb, gap, reach, inset, close)
 
     hx, hy = held if held is not None else (None, None)
     rx = _ranked(x, xs, reach, hx)
