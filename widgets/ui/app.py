@@ -1651,7 +1651,7 @@ class SettingsPage(QWidget):
         self.snap = Switch()
         self.snap.toggled.connect(board.set_snap)
         desk.add(setting_row("grid", "#ff9f0a", "Snap to grid",
-                             "Line widgets up on a grid as you drop them.", self.snap),
+                             "Line widgets up with each other as you drag, like a Mac. Hold Alt to place freely.", self.snap),
                  self.INSET)
         self.lock = Switch()
         self.lock.toggled.connect(board.set_locked)

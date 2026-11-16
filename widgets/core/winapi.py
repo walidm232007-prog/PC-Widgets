@@ -394,6 +394,17 @@ def bring_to_front(hwnd: int, topmost: bool) -> None:
         pass
 
 
+def place_below(hwnd: int, above: int) -> None:
+    """Put ``hwnd`` directly underneath ``above`` in the stacking order -
+    the drop outline sitting under the card being dragged, whatever layer
+    the board is in."""
+    try:
+        user32.SetWindowPos(wt.HWND(hwnd), wt.HWND(above), 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    except Exception:
+        pass
+
+
 def find_wallpaper_host() -> Optional[int]:
     """The WorkerW that sits between the wallpaper and the desktop icons.
 
