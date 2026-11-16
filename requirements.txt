@@ -5,6 +5,11 @@
 
 PySide6>=6.6
 
+# The world clock faces read time zones through zoneinfo, which on Windows
+# has no zone database of its own. Without this they fall back to fixed
+# offsets that ignore daylight saving.
+tzdata>=2024.1
+
 # --- optional -------------------------------------------------------------- #
 # The media widget reads the system media session through the WinRT projection.
 # A copy already ships in vendor/ and is used ahead of anything installed, so

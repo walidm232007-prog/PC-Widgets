@@ -57,7 +57,7 @@ from .theme import (
 # Gallery names and one-liners. Two tiles are both titled "Calendar" on the
 # card itself, which is right there and ambiguous here, hence "Agenda".
 CATALOG = {
-    "clock": ("Clock", "An analog face, or the time set large."),
+    "clock": ("Clock", "Analog, digital, flip and world clock faces."),
     "weather": ("Weather", "Now, the hours and days ahead, next-hour rain, sunrise."),
     "calendar": ("Calendar", "Today's date, or the whole month at a glance."),
     "outlook": ("Agenda", "What's coming up, from Outlook or your Windows calendar."),

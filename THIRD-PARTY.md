@@ -22,6 +22,9 @@ copy of this file:
 | `winrt\` | the Python/WinRT packages (MIT) |
 | `typing_extensions\` | typing_extensions (PSF) |
 | `Inter\` | the Inter typeface (SIL OFL 1.1) |
+| `Oswald\` | the Oswald typeface, the clock's Digital face (SIL OFL 1.1) |
+| `fonts\` | the typefaces a widget can be set in from its Font menu (SIL OFL 1.1) |
+| `tzdata\` | the time zone database the world clocks read (Apache 2.0) |
 | `weather-photos\` | credits for the Unsplash photographs |
 
 `packaging/pc-widgets.spec` copies them in, and `tools/build_exe.py` refuses a
@@ -183,6 +186,57 @@ The OFL allows the fonts to be bundled with software, redistributed and used
 commercially, as long as the licence goes with them and the fonts aren't sold on
 their own. They are loaded per-process with `addApplicationFont`, so nothing is
 ever installed system-wide.
+
+## Oswald typeface — SIL Open Font License 1.1
+
+The clock's small Digital face is set in [Oswald](https://github.com/googlefonts/OswaldFont)
+Bold, by the Oswald Project Authors - the closest free match for the tall,
+compressed numerals of Apple's own Digital clock widget (SF Pro at its
+compressed width, which can't be shipped; see below). `fonts/Oswald-Variable.ttf`
+is the variable font from Google Fonts, unmodified, with its licence beside it
+in `fonts/LICENSE-Oswald.txt`, under the same terms as Inter.
+
+## Widget fonts — SIL Open Font License 1.1
+
+Any widget can be set in one of these from its right-click **Font** menu. Each
+is the file published in the Google Fonts repository, unmodified, with its
+licence beside it as `fonts/LICENSE-<name>.txt`; the build copies those into
+`licenses\fonts\`. Same terms as Inter: they may be bundled and redistributed
+with software, but not sold on their own.
+
+| Typeface | File |
+|---|---|
+| Manrope | `fonts/Manrope-Variable.ttf` |
+| DM Sans | `fonts/DMSans-Variable.ttf` |
+| Outfit | `fonts/Outfit-Variable.ttf` |
+| Plus Jakarta Sans | `fonts/PlusJakartaSans-Variable.ttf` |
+| Space Grotesk | `fonts/SpaceGrotesk-Variable.ttf` |
+| Sora | `fonts/Sora-Variable.ttf` |
+| Nunito | `fonts/Nunito-Variable.ttf` |
+| Quicksand | `fonts/Quicksand-Variable.ttf` |
+| Playfair Display | `fonts/PlayfairDisplay-Variable.ttf` |
+| Lora | `fonts/Lora-Variable.ttf` |
+| DM Serif Display | `fonts/DMSerifDisplay-Regular.ttf` |
+| Bebas Neue | `fonts/BebasNeue-Regular.ttf` |
+| JetBrains Mono | `fonts/JetBrainsMono-Variable.ttf` |
+| Caveat | `fonts/Caveat-Variable.ttf` |
+| Hanken Grotesk | `fonts/HankenGrotesk-Variable.ttf` |
+| Schibsted Grotesk | `fonts/SchibstedGrotesk-Variable.ttf` |
+| Familjen Grotesk | `fonts/FamiljenGrotesk-Variable.ttf` |
+| Bricolage Grotesque | `fonts/BricolageGrotesque-Variable.ttf` |
+| Darker Grotesque | `fonts/DarkerGrotesque-Variable.ttf` |
+| Host Grotesk | `fonts/HostGrotesk-Variable.ttf` |
+| Instrument Sans | `fonts/InstrumentSans-Variable.ttf` |
+| Archivo | `fonts/Archivo-Variable.ttf` |
+| Geist | `fonts/Geist-Variable.ttf` |
+| Albert Sans | `fonts/AlbertSans-Variable.ttf` |
+| Public Sans | `fonts/PublicSans-Variable.ttf` |
+
+## tzdata — Apache License 2.0
+
+The world clock faces read time zones through Python's `zoneinfo`, which on
+Windows gets its zone database from the `tzdata` package, bundled in the build.
+Its licence is copied into `licenses\tzdata\`.
 
 **Apple's SF Pro is not used.** The board was first designed around it, but
 Apple's licence covers designing user interfaces for Apple platforms and does not
