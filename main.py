@@ -1462,7 +1462,9 @@ def _check_app_window() -> None:
             board.remove(added)
             wt._size_changed("small")
             assert wt.face() == "classic" and len(wt.dot_rects()) == 5
-            plain = next(t for t in win.gallery.tiles if t.kind == "clock")
+            # A widget with one look shows no dots. Notes, not Clock, which
+            # has faces of its own now.
+            plain = next(t for t in win.gallery.tiles if t.kind == "notes")
             assert plain.dot_rects() == [] and plain.face() == ""
             wt._size_changed(wt.sizes.current)       # back in step with the size control
 
