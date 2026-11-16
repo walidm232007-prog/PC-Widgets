@@ -703,8 +703,63 @@ class WidgetCard(QWidget):
         """Apple-set type in Inter: optical size picked by point size, plus
         Apple's size-dependent tracking. See :mod:`widgets.core.typography`.
 
-        ``italic`` and ``stretch`` pass through for the clock's time styling."""
-        return typography.font(size, weight, italic=italic, stretch=stretch)
+        ``italic`` and ``stretch`` pass through for the clock's time styling.
+        A font picked from the card's Font menu (``config["font"]``) replaces
+        Inter for everything the tile draws."""
+        return typography.font(size, weight, italic=italic, stretch=stretch,
+                               choice=self.config.get("font"))
+
+    def set_font_choice(self, key: Optional[str]) -> None:
+        """Set the card in one of typography.FONT_CHOICES, or back to the
+        default with None."""
+        if key is not None and key not in typography.FONT_CHOICES:
+            return
+        if key == self.config.get("font"):
+            return
+        if key is None:
+            self.config.pop("font", None)
+        else:
+            self.config["font"] = key
+        self.on_appearance_changed()
+        self.changed.emit()
+        self.update()
+
+    def _font_menu(self, menu: QMenu) -> None:
+        """Font: the default, then every bundled face by group, each name
+        shown in its own typeface so the menu is its own preview."""
+        from PySide6.QtGui import QActionGroup
+        sub = menu.addMenu("Font")
+        group = QActionGroup(sub)
+        current = self.config.get("font")
+        default = QAction("Default (Inter)", sub, checkable=True)
+        default.setChecked(current not in typography.FONT_CHOICES)
+        default.triggered.connect(lambda _c=False: self.set_font_choice(None))
+        group.addAction(default)
+        sub.addAction(default)
+        sub.addSeparator()
+        # A submenu per group: with every face in one list the menu ran taller
+        # than a laptop screen. The group holding the current font is ticked.
+        for heading in typography.FONT_GROUPS:
+            keys = [k for k, v in typography.FONT_CHOICES.items()
+                    if v[2] == heading and typography.choice_available(k)]
+            if not keys:
+                continue
+            gm = sub.addMenu(heading)
+            if current in keys:
+                gm.setTitle(f"{heading}  \u2713")
+            for key in keys:
+                label, family = typography.FONT_CHOICES[key][:2]
+                a = QAction(label, gm, checkable=True)
+                preview = QFont(family)
+                preview.setPointSizeF(12.0 if key == "caveat" else 10.5)
+                if typography.FONT_CHOICES[key][3]:
+                    # A variable file's default can be its thinnest weight.
+                    preview.setVariableAxis(QFont.Tag("wght"), 400.0)
+                a.setFont(preview)
+                a.setChecked(key == current)
+                a.triggered.connect(lambda _c=False, k=key: self.set_font_choice(k))
+                group.addAction(a)
+                gm.addAction(a)
 
     def text(self, p: QPainter, rect: QRectF, s: str, size: int,
              color: str, weight: int = QFont.Normal,
@@ -829,6 +884,7 @@ class WidgetCard(QWidget):
             m.addSeparator()
 
         self.context_actions(m)
+        self._font_menu(m)
         if self.customizable:
             from . import appearance
             appearance.add_menu(self, m)

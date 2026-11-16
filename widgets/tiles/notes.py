@@ -78,7 +78,8 @@ class NotesWidget(WidgetCard):
     # ------------------------------------------------------------------ #
     def _restyle(self) -> None:
         pal = self.palette_
-        f = QFont("Segoe UI", 10)
+        # Segoe UI unless the card has been given a font from its Font menu.
+        f = self.font(11) if self.config.get("font") else QFont("Segoe UI", 10)
         self.edit.setFont(f)
         # The one tile where the text colour is not the user's to set: notes are
         # for reading back, so they stay in contrast with the background no

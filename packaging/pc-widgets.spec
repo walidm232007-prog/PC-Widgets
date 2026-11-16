@@ -48,6 +48,7 @@ datas = (tree("fonts") + tree("assets") + tree("vendor")
 hiddenimports = [
     "asyncio", "array", "inspect", "keyword", "locale", "socket", "tempfile",
     "uuid", "typing", "numpy",
+    "zoneinfo", "tzdata",          # the world clock faces
 ]
 
 
@@ -99,12 +100,39 @@ NOTICES = {
     "licenses/Python/LICENSE.txt": os.path.join(sys.base_prefix, "LICENSE.txt"),
     "licenses/winrt/LICENSE.txt": os.path.join(ROOT, "vendor", "LICENSE-winrt.txt"),
     "licenses/Inter/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Inter.txt"),
+    "licenses/Oswald/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Oswald.txt"),
+    "licenses/fonts/Manrope/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Manrope.txt"),
+    "licenses/fonts/DMSans/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-DMSans.txt"),
+    "licenses/fonts/Outfit/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Outfit.txt"),
+    "licenses/fonts/PlusJakartaSans/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-PlusJakartaSans.txt"),
+    "licenses/fonts/SpaceGrotesk/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-SpaceGrotesk.txt"),
+    "licenses/fonts/Sora/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Sora.txt"),
+    "licenses/fonts/Nunito/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Nunito.txt"),
+    "licenses/fonts/Quicksand/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Quicksand.txt"),
+    "licenses/fonts/PlayfairDisplay/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-PlayfairDisplay.txt"),
+    "licenses/fonts/Lora/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Lora.txt"),
+    "licenses/fonts/DMSerifDisplay/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-DMSerifDisplay.txt"),
+    "licenses/fonts/BebasNeue/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-BebasNeue.txt"),
+    "licenses/fonts/JetBrainsMono/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-JetBrainsMono.txt"),
+    "licenses/fonts/Caveat/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Caveat.txt"),
+    "licenses/fonts/HankenGrotesk/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-HankenGrotesk.txt"),
+    "licenses/fonts/SchibstedGrotesk/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-SchibstedGrotesk.txt"),
+    "licenses/fonts/FamiljenGrotesk/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-FamiljenGrotesk.txt"),
+    "licenses/fonts/BricolageGrotesque/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-BricolageGrotesque.txt"),
+    "licenses/fonts/DarkerGrotesque/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-DarkerGrotesque.txt"),
+    "licenses/fonts/HostGrotesk/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-HostGrotesk.txt"),
+    "licenses/fonts/InstrumentSans/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-InstrumentSans.txt"),
+    "licenses/fonts/Archivo/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Archivo.txt"),
+    "licenses/fonts/Geist/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-Geist.txt"),
+    "licenses/fonts/AlbertSans/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-AlbertSans.txt"),
+    "licenses/fonts/PublicSans/LICENSE.txt": os.path.join(ROOT, "fonts", "LICENSE-PublicSans.txt"),
     "licenses/weather-photos/CREDITS.md": os.path.join(ROOT, "assets", "weather", "CREDITS.md"),
 }
 # numpy's covers the OpenBLAS, LAPACK and GCC runtime inside numpy.libs too;
 # PyInstaller's covers the run-time hooks it puts in the exe (Apache 2.0).
 NOTICES.update(installed_licences("numpy", "numpy"))
 NOTICES.update(installed_licences("pyinstaller", "PyInstaller"))
+NOTICES.update(installed_licences("tzdata", "tzdata"))
 NOTICES.update(vendored_licences("pyaudiowpatch-*.dist-info", "PyAudioWPatch"))
 NOTICES.update(vendored_licences("typing_extensions-*.dist-info", "typing_extensions"))
 missing = sorted(src for src in NOTICES.values() if not os.path.isfile(src))
