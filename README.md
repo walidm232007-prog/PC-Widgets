@@ -1,7 +1,8 @@
 # PC Widgets
 
 iPhone/Mac-style widgets for the Windows desktop. Rounded translucent cards that
-live *on* your desktop, snap to a grid, and come to the front on a hotkey.
+live *on* your desktop, line up with each other as you drag them (the way macOS
+widgets do), and come to the front on a hotkey.
 
 ## From a fresh clone
 

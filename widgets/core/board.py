@@ -202,6 +202,7 @@ class Board(QObject):
         c.opacity_ = self.state.opacity
         c.locked = self.state.locked
         c.snap_to_grid = self.state.snap
+        c.peers = lambda: self.cards          # what a dragged card lines up with
         c.glass = self.glass if self.state.glass else None
         c.glass_tint = self.state.glass_tint
         c.anchor = self._anchor_for(pl, c)
@@ -263,7 +264,7 @@ class Board(QObject):
 
     def _sync_anchor(self, c: WidgetCard) -> None:
         """Follow a card that has moved on its own display without being
-        dragged - clamped after growing, snapped to the grid, resized from its
+        dragged - clamped after growing, or resized from its
         grip.
 
         Only on its *own* display, and only while that display is here. A card
@@ -275,7 +276,7 @@ class Board(QObject):
         if a is None:
             self._anchor_here(c)
             return
-        if c.displaced or c._drag_from is not None:
+        if c.displaced or c._drag_from is not None or c._gliding:
             return
         r = c.card_rect()
         d = displays.at(c.x() + r.center().x(), c.y() + r.center().y(), self.screens)

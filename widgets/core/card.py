@@ -2,7 +2,8 @@
 card.py
 =======
 The base widget card: a frameless, translucent, rounded panel that lives on the
-desktop, snaps to a grid when dragged, and knows its own size class.
+desktop, lines itself up with its neighbours when dragged (the way macOS
+desktop widgets do - see magnet.py), and knows its own size class.
 
 Sizing follows the phone convention rather than free resizing - a widget is
 small (2x2), medium (4x2) or large (4x4). Fixed sizes are what make a board of
@@ -20,7 +21,9 @@ import os
 
 from typing import Dict, Optional, Tuple
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal,
+)
 from PySide6.QtGui import (
     QImage,
     QAction, QBrush, QColor, QFont, QFontMetrics, QLinearGradient, QPainter,
@@ -28,7 +31,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QMenu, QWidget
 
-from . import displays, imagefit, typography, winapi
+from . import displays, imagefit, magnet, typography, winapi
 from .palette import Palette
 
 # --------------------------------------------------------------------------- #
@@ -36,7 +39,12 @@ from .palette import Palette
 # --------------------------------------------------------------------------- #
 CELL = 78
 GAP = 12
-STEP = CELL + GAP        # snap increment, only used when snapping is switched on
+STEP = CELL + GAP        # one grid cell and its gap; layout arithmetic elsewhere
+
+# The glide into place when a card is dropped onto an outline: quick for a
+# nudge, a little longer for a real pull, never sluggish.
+GLIDE_MIN_MS = 170.0
+GLIDE_MAX_MS = 300.0
 
 SIZES: Dict[str, Tuple[int, int]] = {
     "small":  (2, 2),
@@ -213,6 +221,65 @@ def squircle(rect: QRectF, radius: float) -> QPainterPath:
     return p
 
 
+class DropOutline(QWidget):
+    """The rounded placeholder showing where a dragged card will settle.
+
+    Its own little window, the size of a card's window, kept directly under
+    the card being dragged. It never takes the mouse or focus - the drag
+    carries on straight through it. One is shared by every card; only one
+    card is ever dragged at a time.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool
+                            | Qt.WindowDoesNotAcceptFocus
+                            | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setWindowTitle("PC Widget - drop outline")
+        self._card = QRectF()
+        self._dark = True
+        self._native = False
+
+    def show_for(self, card: "WidgetCard", x: int, y: int) -> None:
+        if self.size() != card.size():
+            self.resize(card.size())
+        self._card = card.card_rect()
+        self._dark = card.palette_.dark
+        self.move(x, y)
+        if not self.isVisible():
+            self.show()
+            if not self._native:
+                winapi.make_desktop_window(int(self.winId()), no_activate=True)
+                self._native = True
+        # Re-asserted every time: the card can be restacked while it's dragged.
+        winapi.place_below(int(self.winId()), int(card.winId()))
+        self.update()
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        path = squircle(self._card.adjusted(0.75, 0.75, -0.75, -0.75), RADIUS)
+        # A pale wash and a soft rim - the Mac's placeholder reads as a hollow
+        # in the desktop, not a second widget.
+        p.setBrush(QColor(255, 255, 255, 34 if self._dark else 70))
+        p.setPen(QPen(QColor(255, 255, 255, 120 if self._dark else 190), 1.5))
+        p.drawPath(path)
+        p.end()
+
+
+_outline: Optional[DropOutline] = None
+
+
+def drop_outline() -> DropOutline:
+    global _outline
+    if _outline is None:
+        _outline = DropOutline()
+    return _outline
+
+
 class WidgetCard(QWidget):
     """One widget on the board."""
 
@@ -245,6 +312,9 @@ class WidgetCard(QWidget):
     anchor = None
     displaced = False
     quiet = False
+    # The other cards on the board, for lining up against. Set by the board
+    # to a callable; None means a card on its own (the gallery's previews).
+    peers = None
 
     moved = Signal()
     changed = Signal()          # size or config changed; board should persist
@@ -263,13 +333,16 @@ class WidgetCard(QWidget):
         self._img_cache: dict = {}      # see _image_layer
         self.spotlit = False             # ringed while the app points it out
         self.locked = False
-        self.snap_to_grid = False        # free placement by default
+        self.snap_to_grid = False        # align to neighbours while dragging (magnet.py)
         self.opacity_ = 1.0
         self.glass = None                # a shared GlassBackdrop, set by Board
         self.glass_tint = 112            # alpha of the tint over the blur
         self._bent = None                # (key, image): the liquid glass, kept
         self._drag_ms = 0.0              # what bending it at a step of a drag costs
         self._drag_from: Optional[QPoint] = None
+        self._target: Optional[Tuple[int, int]] = None   # window pos the outline shows
+        self._glide = None               # the Tween easing a dropped card into place
+        self._gliding = False
         self._hover = False
 
         flags = Qt.FramelessWindowHint | Qt.Tool
@@ -679,7 +752,7 @@ class WidgetCard(QWidget):
             return False
         sx, sy = self.x() + int(MARGIN), self.y() + int(MARGIN)
         w, h = int(round(r.width())), int(round(r.height()))
-        moving = self._drag_from is not None
+        moving = self._drag_from is not None or self._gliding
         key = (id(g), g.generation, sx, sy, w, h, moving)
         kept = self._bent
         if kept is None or kept[0] != key:
@@ -763,13 +836,19 @@ class WidgetCard(QWidget):
                 self.activateWindow()
                 self.on_focus_click(ev)
             if not self.locked:
+                # Caught mid-glide: stop where it is and pick it up from there.
+                self._stop_glide()
                 self._drag_from = ev.globalPosition().toPoint() - self.pos()
+                self._target = None
             ev.accept()
 
     def mouseMoveEvent(self, ev) -> None:
         if self._drag_from is None:
             return
+        # The card always follows the mouse exactly - nothing snaps under the
+        # cursor. Only the outline jumps to where it will land.
         self.move(ev.globalPosition().toPoint() - self._drag_from)
+        self._update_target(bool(ev.modifiers() & Qt.AltModifier))
         # The frosted slice is sampled by screen position, so it has to be
         # repainted as the card travels or the blur would slide with it.
         self.update()
@@ -779,38 +858,124 @@ class WidgetCard(QWidget):
         if self._drag_from is None:
             return
         self._drag_from = None
-        self.settle()
+        if ev.modifiers() & Qt.AltModifier:
+            self._target = None                 # Alt held: exactly where let go
+        target = self._target
+        self._target = None
+        if _outline is not None:
+            _outline.hide()
+        x, y = target if target is not None else (self.x(), self.y())
+        self._glide_to(*self._clamped(x, y))
+        ev.accept()
+
+    # -- lining up ------------------------------------------------------- #
+    def _screen_card(self, x: Optional[int] = None,
+                     y: Optional[int] = None) -> Tuple[int, int, int, int]:
+        """The visible card as (x, y, w, h) on screen - the window minus its
+        shadow gutter - with the window at (x, y), or where it is now."""
+        m = int(MARGIN)
+        r = self.card_rect()
+        return ((self.x() if x is None else x) + m,
+                (self.y() if y is None else y) + m,
+                int(round(r.width())), int(round(r.height())))
+
+    def _update_target(self, free: bool) -> None:
+        """Work out where the card would settle and move the outline there.
+
+        Holding Alt places freely, as Command does on a Mac."""
+        target = None
+        if self.snap_to_grid and not free:
+            cx, cy, cw, ch = self._screen_card()
+            work = displays.work_area_at(cx + cw // 2, cy + ch // 2)
+            others = [o._screen_card() for o in (self.peers() if self.peers else ())
+                      if o is not self and o.isVisible()]
+            m = int(MARGIN)
+            held = None
+            if self._target is not None:
+                held = (self._target[0] + m, self._target[1] + m)
+            hit = magnet.suggest((cx, cy, cw, ch), others, work, GAP, held=held)
+            if hit is not None:
+                target = self._clamped(hit[0] - m, hit[1] - m)
+                # Already sitting on it: an outline exactly under the card
+                # tells you nothing.
+                if target == (self.x(), self.y()) and self._target is None:
+                    target = None
+        self._target = target
+        if target is None:
+            if _outline is not None:
+                _outline.hide()
+        else:
+            drop_outline().show_for(self, *target)
+
+    def _clamped(self, x: int, y: int) -> Tuple[int, int]:
+        """A window position for this card at (x, y), pulled back so the card
+        stays on the monitor it's over. Bounds are the *card*, not the window,
+        so the shadow gutter may hang off the edge and the card sit flush."""
+        m = int(MARGIN)
+        cx, cy, cw, ch = self._screen_card(x, y)
+        wl, wt, wr, wb = displays.work_area_at(cx + cw // 2, cy + ch // 2)
+        cx = max(wl, min(cx, wr - cw))
+        cy = max(wt, min(cy, wb - ch))
+        return (int(cx - m), int(cy - m))
+
+    # -- the glide into place -------------------------------------------- #
+    def _glide_to(self, x: int, y: int) -> None:
+        """Ease the card from where it was let go to (x, y), then report the
+        move. A cut instead when there's nowhere to go or Windows' animation
+        effects are off."""
+        sx, sy = self.x(), self.y()
+        dist = math.hypot(x - sx, y - sy)
+        if dist < 1.0 or not winapi.animations_enabled():
+            self.move(x, y)
+            self._landed()
+            return
+        from .frameclock import Tween
+        t = Tween(self)
+        t.setStartValue(0.0)
+        t.setEndValue(1.0)
+        # Ease-out: fast off the mark, then settling softly into the outline,
+        # which is what makes it feel pulled in rather than teleported.
+        t.setDuration(max(GLIDE_MIN_MS, min(GLIDE_MAX_MS, 150.0 + dist * 1.2)))
+        t.setEasingCurve(QEasingCurve.OutCubic)
+        t.valueChanged.connect(lambda v: (
+            self.move(int(round(sx + (x - sx) * v)), int(round(sy + (y - sy) * v))),
+            self.update()))
+        t.finished.connect(self._landed)
+        self._glide = t
+        self._gliding = True
+        t.start()
+
+    def _stop_glide(self) -> None:
+        if self._glide is not None:
+            self._glide.stop()
+            self._glide.deleteLater()
+            self._glide = None
+        self._gliding = False
+
+    def closeEvent(self, ev) -> None:
+        # A card removed mid-glide must not leave the frame clock stepping it.
+        self._stop_glide()
+        if self._drag_from is not None and _outline is not None:
+            _outline.hide()
+        self._drag_from = None
+        super().closeEvent(ev)
+
+    def _landed(self) -> None:
+        self._stop_glide()
         self.moved.emit()
         # Where it landed, liquid glass is bent in full for the exact spot: the
         # drag bent it on a coarser grid, or not at all on a slow PC.
         self.update()
-        ev.accept()
 
     def settle(self) -> None:
-        """Drop the card where it was let go.
+        """Keep the card reachable on a monitor - the one it's over.
 
-        Free placement is the default - grid snapping fights you when you're
-        trying to line something up against a wallpaper feature or another
-        window. Snapping is available, but opt-in via the tray menu.
-
-        The only thing always enforced is that the card stays reachable on a
-        monitor - the one it was let go on. Bounds are the *card*, not the
-        window, so its shadow gutter is allowed to hang off the screen edge and
-        the card can sit flush.
+        For a card put somewhere by the app rather than dragged: restored from
+        a saved layout, just added, or grown past the screen edge. Lining up
+        with neighbours happens only while dragging, where you can see it - a
+        card shifting by itself on launch would just look like a bug.
         """
-        m = int(MARGIN)
-        cw = self.width() - m * 2
-        ch = self.height() - m * 2 - int(self.extra_bottom)
-        cx, cy = self.x() + m, self.y() + m
-        wl, wt, wr, wb = displays.work_area_at(cx + cw // 2, cy + ch // 2)
-
-        if self.snap_to_grid:
-            cx = wl + round((cx - wl) / STEP) * STEP
-            cy = wt + round((cy - wt) / STEP) * STEP
-
-        cx = max(wl, min(cx, wr - cw))
-        cy = max(wt, min(cy, wb - ch))
-        self.move(int(cx - m), int(cy - m))
+        self.move(*self._clamped(self.x(), self.y()))
 
     # Kept so older callers and saved layouts keep working.
     snap = settle

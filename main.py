@@ -1916,30 +1916,25 @@ def _check_ticks(pal) -> None:
 
 
 def _check_placement(pal) -> None:
-    """Dropping a card must leave it exactly where it was let go.
+    """Putting a card somewhere must leave it exactly there.
 
-    Grid snapping was the default and fought you whenever you tried to line a
-    widget up against something on the wallpaper. It is opt-in now, and this
-    guards the regression.
+    Lining up with neighbours (magnet.py) happens only while a card is being
+    dragged, where the outline shows it coming. A card the app places -
+    restored, added, regrown - stays put with the snap setting on or off: one
+    that shifted by itself on launch would look like a bug. The alignment
+    arithmetic itself is checked by tools/magnet_selftest.py.
     """
-    from widgets.core.card import MARGIN, STEP
     from widgets.tiles.clock import ClockWidget
 
     card = ClockWidget(pal, "small")
-    off_grid = (417, 263)          # deliberately not a multiple of STEP
-    card.move(*off_grid)
-    card.settle()
-    assert (card.x(), card.y()) == off_grid, (
-        f"free drop moved the card to {(card.x(), card.y())}")
-
-    card.snap_to_grid = True
-    card.move(*off_grid)
-    card.settle()
-    assert (card.x(), card.y()) != off_grid, "snap mode did not snap"
-    cx = card.x() + int(MARGIN)
-    assert cx % STEP == 0 or True, "snapped position is on the grid"
-    print(f"  placement: free drop keeps {off_grid}; "
-          f"snap mode moves it to {(card.x(), card.y())}")
+    spot = (417, 263)              # deliberately off any grid
+    for snap in (False, True):
+        card.snap_to_grid = snap
+        card.move(*spot)
+        card.settle()
+        assert (card.x(), card.y()) == spot, (
+            f"settle (snap={snap}) moved the card to {(card.x(), card.y())}")
+    print(f"  placement: a placed card stays at {spot}, snap on or off")
     card.deleteLater()
 
 
