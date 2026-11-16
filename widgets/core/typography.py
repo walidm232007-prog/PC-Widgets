@@ -83,6 +83,59 @@ TEXT_STACK = [
     "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Arial",
 ]
 
+# --------------------------------------------------------------------------- #
+#  Fonts a card can be set in
+# --------------------------------------------------------------------------- #
+# Every one is free under the SIL Open Font License and ships in fonts/ with its
+# licence beside it (fonts/README.txt, THIRD-PARTY.md). A card stores the key in
+# its config as "font"; no key is the default, Inter set the Apple way.
+#
+# key: (menu label, family, group, variable weight, Apple tracking)
+#   variable weight - the file has a wght axis, so every weight a tile asks for
+#                     is real. False for a one-weight face, which is drawn at
+#                     its own weight rather than smeared into a fake bold.
+#   Apple tracking  - tighten big type along SF's curve. Right for a grotesque;
+#                     wrong for a monospace or a handwriting face.
+FONT_CHOICES: Dict[str, Tuple[str, str, str, bool, bool]] = {
+    "manrope":       ("Manrope",           "Manrope",           "Sans serif",  True,  True),
+    "dmsans":        ("DM Sans",           "DM Sans",           "Sans serif",  True,  True),
+    "outfit":        ("Outfit",            "Outfit",            "Sans serif",  True,  True),
+    "jakarta":       ("Plus Jakarta Sans", "Plus Jakarta Sans", "Sans serif",  True,  True),
+    "sora":          ("Sora",              "Sora",              "Sans serif",  True,  True),
+    "spacegrotesk":  ("Space Grotesk",     "Space Grotesk",     "Grotesk",     True,  True),
+    "hanken":        ("Hanken Grotesk",    "Hanken Grotesk",    "Grotesk",     True,  True),
+    "schibsted":     ("Schibsted Grotesk", "Schibsted Grotesk", "Grotesk",     True,  True),
+    "familjen":      ("Familjen Grotesk",  "Familjen Grotesk",  "Grotesk",     True,  True),
+    "bricolage":     ("Bricolage Grotesque", "Bricolage Grotesque", "Grotesk",   True,  True),
+    "darker":        ("Darker Grotesque",  "Darker Grotesque",  "Grotesk",     True,  True),
+    "host":          ("Host Grotesk",      "Host Grotesk",      "Grotesk",     True,  True),
+    "instrument":    ("Instrument Sans",   "Instrument Sans",   "Grotesk",     True,  True),
+    "archivo":       ("Archivo",           "Archivo",           "Grotesk",     True,  True),
+    "geist":         ("Geist",             "Geist",             "Grotesk",     True,  True),
+    "albert":        ("Albert Sans",       "Albert Sans",       "Grotesk",     True,  True),
+    "publicsans":    ("Public Sans",       "Public Sans",       "Grotesk",     True,  True),
+    "nunito":        ("Nunito",            "Nunito",            "Rounded",     True,  True),
+    "quicksand":     ("Quicksand",         "Quicksand",         "Rounded",     True,  True),
+    "playfair":      ("Playfair Display",  "Playfair Display",  "Serif",       True,  False),
+    "lora":          ("Lora",              "Lora",              "Serif",       True,  False),
+    "dmserif":       ("DM Serif Display",  "DM Serif Display",  "Serif",       False, False),
+    "oswald":        ("Oswald",            "Oswald",            "Condensed",   True,  False),
+    "bebas":         ("Bebas Neue",        "Bebas Neue",        "Condensed",   False, False),
+    "jetbrains":     ("JetBrains Mono",    "JetBrains Mono",    "Monospace",   True,  False),
+    "caveat":        ("Caveat",            "Caveat",            "Handwriting", True,  False),
+}
+FONT_GROUPS = ("Sans serif", "Grotesk", "Rounded", "Serif", "Condensed", "Monospace", "Handwriting")
+_WGHT = QFont.Tag("wght") if hasattr(QFont, "Tag") else None
+
+
+def choice_available(key: Optional[str]) -> bool:
+    """Whether a font choice can actually be drawn - its file loaded."""
+    if key not in FONT_CHOICES:
+        return False
+    load_bundled()
+    return FONT_CHOICES[key][1] in set(QFontDatabase.families())
+
+
 # Apple switches from the text cut to the display cut here.
 OPTICAL_BREAK = 20.0
 
@@ -144,7 +197,7 @@ def tracking_percent(size: float) -> float:
 
 def font(size: float, weight: int = QFont.Normal,
          tracking: bool = True, italic: bool = False,
-         stretch: int = 0) -> QFont:
+         stretch: int = 0, choice: Optional[str] = None) -> QFont:
     """A font set the way Apple would set it at this size.
 
     ``italic`` and ``stretch`` exist for the clock's customizable time. Inter
@@ -158,8 +211,35 @@ def font(size: float, weight: int = QFont.Normal,
     much as drawing the text it was for. A QFont copy is shared until changed,
     so a caller adjusting its copy cannot touch the cached one.
     """
+    if choice and choice_available(choice):
+        return QFont(_chosen(choice, float(size), int(weight), bool(tracking),
+                             bool(italic), int(stretch)))
     return QFont(_font(float(size), int(weight), bool(tracking), bool(italic),
                        int(stretch)))
+
+
+@functools.lru_cache(maxsize=512)
+def _chosen(key: str, size: float, weight: int, tracking: bool, italic: bool,
+            stretch: int) -> QFont:
+    """A card's chosen font (FONT_CHOICES) at this size and weight."""
+    _label, family, _group, variable, apple_tracking = FONT_CHOICES[key]
+    f = QFont(family)
+    f.setPointSizeF(float(size))
+    if variable:
+        f.setWeight(QFont.Weight(int(weight)))
+        # Also on the wght axis itself: some Qt builds draw a variable font at
+        # its default weight whatever QFont asks for.
+        if _WGHT is not None:
+            f.setVariableAxis(_WGHT, float(int(weight)))
+    if italic:
+        f.setItalic(True)
+    if stretch:
+        f.setStretch(int(stretch))
+    f.setHintingPreference(QFont.PreferNoHinting)
+    f.setStyleStrategy(QFont.StyleStrategy(QFont.PreferAntialias | QFont.PreferQuality))
+    if tracking and apple_tracking:
+        f.setLetterSpacing(QFont.PercentageSpacing, tracking_percent(size))
+    return f
 
 
 @functools.lru_cache(maxsize=512)

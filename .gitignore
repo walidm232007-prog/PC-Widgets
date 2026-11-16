@@ -1,8 +1,8 @@
 # --------------------------------------------------------------------------- #
 #  Fonts - the important one
 # --------------------------------------------------------------------------- #
-# Only a font whose licence allows redistribution may be committed. Inter is
-# under the SIL Open Font License and ships with the app, its licence beside it
+# Only a font whose licence allows redistribution may be committed. Inter, and
+# the faces a card can be set in (all listed below), are under the SIL Open Font License and ships with the app, its licence beside it
 # in fonts/LICENSE-Inter.txt. Everything else in fonts/ stays out - above all
 # Apple's SF Pro, whose licence covers designing for Apple platforms and does
 # not permit redistribution. fonts/README.txt explains, and is deliberately NOT
@@ -14,6 +14,32 @@ fonts/*.woff
 fonts/*.woff2
 !fonts/InterVariable.ttf
 !fonts/InterVariable-Italic.ttf
+!fonts/Oswald-Variable.ttf
+!fonts/Manrope-Variable.ttf
+!fonts/DMSans-Variable.ttf
+!fonts/Outfit-Variable.ttf
+!fonts/PlusJakartaSans-Variable.ttf
+!fonts/SpaceGrotesk-Variable.ttf
+!fonts/Sora-Variable.ttf
+!fonts/Nunito-Variable.ttf
+!fonts/Quicksand-Variable.ttf
+!fonts/PlayfairDisplay-Variable.ttf
+!fonts/Lora-Variable.ttf
+!fonts/DMSerifDisplay-Regular.ttf
+!fonts/BebasNeue-Regular.ttf
+!fonts/JetBrainsMono-Variable.ttf
+!fonts/Caveat-Variable.ttf
+!fonts/HankenGrotesk-Variable.ttf
+!fonts/SchibstedGrotesk-Variable.ttf
+!fonts/FamiljenGrotesk-Variable.ttf
+!fonts/BricolageGrotesque-Variable.ttf
+!fonts/DarkerGrotesque-Variable.ttf
+!fonts/HostGrotesk-Variable.ttf
+!fonts/InstrumentSans-Variable.ttf
+!fonts/Archivo-Variable.ttf
+!fonts/Geist-Variable.ttf
+!fonts/AlbertSans-Variable.ttf
+!fonts/PublicSans-Variable.ttf
 
 # --------------------------------------------------------------------------- #
 #  Apple design skill - local only, like SF Pro
