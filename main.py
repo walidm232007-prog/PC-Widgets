@@ -63,6 +63,10 @@ def selftest() -> int:
     # Offscreen renders must not open the sound card: three media cards
     # each opening their own capture is what segfaulted this.
     os.environ["PCWIDGETS_NO_AUDIO"] = "1"
+    # Nor follow a live wallpaper: the boards built here would each grab
+    # whatever this PC's desktop runs, and a frame landing mid-check would
+    # change what the glass checks see. _check_live_wallpaper covers it.
+    os.environ["PCWIDGETS_NO_LIVE_WALLPAPER"] = "1"
     from PySide6.QtCore import QRectF
     from PySide6.QtGui import QColor, QImage, QPainter
     from PySide6.QtWidgets import QApplication
@@ -179,6 +183,7 @@ def selftest() -> int:
     _check_glass_displays()
     _check_liquid_glass(pal_mod.build("dark", "blue"))
     _check_glass_settings(pal_mod.build("dark", "blue"))
+    _check_live_wallpaper()
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -1231,6 +1236,239 @@ def _check_glass_settings(pal) -> None:
     print(f"  glass settings: frosted drops the clear copy and cards blur; blur levels soften "
           f"in order (spread {spread['none']:.0f} / {spread['light']:.0f} / "
           f"{spread['more']:.0f}); a new blur swaps in without a frosted flash")
+
+
+def _check_live_wallpaper() -> None:
+    """The glass follows a live wallpaper (Wallpaper Engine and the like)
+    while one runs, and goes back to the wallpaper files when it quits.
+
+    Stand-ins play the wallpaper layer, its grabs, a full-screen game and the
+    desktop's wallpaper file, so this checks the same on every PC whatever its
+    desktop runs. A grab lands in both copies, a frame that hasn't changed is
+    skipped, a black grab is ignored, nothing is grabbed under a full-screen
+    window, Glass style and Blur rebuild a still frame, and the files' glass
+    can't overwrite a live frame. The pixel copy itself is checked on a real
+    GDI bitmap, and the real desktop is asked what it runs, for the log.
+    """
+    import ctypes as C
+    import ctypes.wintypes as W
+    import tempfile
+    import threading
+    import time
+
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from widgets.core import glass as glass_mod
+    from widgets.core import livewall, winapi
+    from widgets.core.displays import Display
+    from widgets.core.glass import GlassBackdrop
+
+    try:
+        import numpy  # noqa: F401
+        liquid = True
+    except ImportError:
+        liquid = False
+
+    # The pixel copy: a GDI bitmap of an odd width (rows padded) filled with
+    # one colour must read back as that colour, opaque.
+    gdi, user = C.WinDLL("gdi32"), C.WinDLL("user32")
+    user.GetDC.argtypes, user.GetDC.restype = [W.HWND], W.HDC
+    user.ReleaseDC.argtypes = [W.HWND, W.HDC]
+    user.FillRect.argtypes = [W.HDC, C.POINTER(W.RECT), W.HBRUSH]
+    gdi.CreateCompatibleDC.argtypes, gdi.CreateCompatibleDC.restype = [W.HDC], W.HDC
+    gdi.CreateCompatibleBitmap.argtypes = [W.HDC, C.c_int, C.c_int]
+    gdi.CreateCompatibleBitmap.restype = W.HBITMAP
+    gdi.SelectObject.argtypes, gdi.SelectObject.restype = [W.HDC, W.HGDIOBJ], W.HGDIOBJ
+    gdi.CreateSolidBrush.argtypes, gdi.CreateSolidBrush.restype = [W.COLORREF], W.HBRUSH
+    gdi.DeleteObject.argtypes = [W.HGDIOBJ]
+    gdi.DeleteDC.argtypes = [W.HDC]
+    screen_dc = user.GetDC(None)
+    dc = gdi.CreateCompatibleDC(screen_dc)
+    bmp = gdi.CreateCompatibleBitmap(screen_dc, 37, 5)
+    brush = gdi.CreateSolidBrush(200 | (40 << 8) | (120 << 16))
+    try:
+        old = gdi.SelectObject(dc, bmp)
+        user.FillRect(dc, C.byref(W.RECT(0, 0, 37, 5)), brush)
+        gdi.SelectObject(dc, old)
+        copied = livewall.read_bitmap(dc, bmp, 37, 5)
+    finally:
+        gdi.DeleteObject(brush)
+        gdi.DeleteObject(bmp)
+        gdi.DeleteDC(dc)
+        user.ReleaseDC(None, screen_dc)
+    assert copied is not None, "a GDI bitmap wouldn't read back"
+    px = copied.pixelColor(36, 4)
+    assert (px.red(), px.green(), px.blue(), px.alpha()) == (200, 40, 120, 255), (
+        f"the grab's pixels come back wrong: {px.getRgb()}")
+
+    # The fingerprint's verdicts.
+    def frame(rgb, size=(400, 300)) -> QImage:
+        img = QImage(size[0], size[1], QImage.Format_RGB32)
+        img.fill(QColor(*rgb))
+        p = QPainter(img)
+        p.fillRect(0, 0, 40, 40, QColor("#ffffff"))     # so it isn't one flat colour
+        p.end()
+        return img
+
+    red_mark = livewall.fingerprint(frame((220, 30, 40)))
+    flat = QImage(400, 300, QImage.Format_RGB32)
+    flat.fill(QColor(0, 0, 0))
+    assert livewall.blank(livewall.fingerprint(flat)), "a black grab didn't count as failed"
+    flat.fill(QColor(220, 30, 40))
+    assert livewall.blank(livewall.fingerprint(flat)), "a flat red grab didn't count as failed"
+    assert not livewall.blank(red_mark), "a real frame counted as failed"
+    assert not livewall.differs(red_mark, livewall.fingerprint(frame((220, 30, 40)))), (
+        "the same frame counted as new")
+    assert livewall.differs(red_mark, livewall.fingerprint(frame((30, 60, 220)))), (
+        "a new frame counted as the same")
+    assert livewall.differs(None, red_mark), "a first frame counted as seen"
+
+    # A grab off the virtual screen's corner is placed where it sits.
+    part = GlassBackdrop._place(frame((220, 30, 40), (200, 150)), (100, 50),
+                                (0, 0, 400, 300), QColor(0, 0, 0))
+    assert (part.width(), part.height()) == (400, 300)
+    assert part.pixelColor(250, 150).red() > 200 and part.pixelColor(20, 280).red() < 10, (
+        "a grab wasn't placed where it sits on the desktop")
+    whole = frame((220, 30, 40))
+    assert GlassBackdrop._place(whole, (0, 0), (0, 0, 400, 300), QColor(0, 0, 0)) is whole
+
+    tmp = tempfile.mkdtemp(prefix="pcwidgets-live-")
+    stand = {"layer": 0, "frame": frame((220, 30, 40)), "full": None, "grabs": 0}
+
+    def grab(layer):
+        stand["grabs"] += 1
+        return (stand["frame"], (0, 0)) if layer == stand["layer"] else None
+
+    saved = (livewall.find_layer, livewall.alive, livewall.grab, winapi.fullscreen_monitor,
+             winapi.virtual_screen, winapi.desktop_colour, glass_mod.LIVE_EVERY)
+    livewall.find_layer = lambda: stand["layer"]
+    livewall.alive = lambda layer: bool(layer) and layer == stand["layer"]
+    livewall.grab = grab
+    winapi.fullscreen_monitor = lambda: stand["full"]
+    winapi.virtual_screen = lambda: (0, 0, 400, 300)
+    winapi.desktop_colour = lambda: (0, 0, 0)
+    glass_mod.LIVE_EVERY = 0.05
+
+    def until(test, timeout=5.0) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if test():
+                return True
+            time.sleep(0.01)
+        return test()
+
+    def shows(img, rgb, tol=16) -> bool:
+        c = img.pixelColor(img.width() // 2, img.height() // 2)
+        return all(abs(a - b) <= tol for a, b in zip((c.red(), c.green(), c.blue()), rgb))
+
+    def bends(g, rgb, tol=16) -> bool:
+        planes = g.clear
+        if planes is None:
+            return False
+        h, w = planes.shape[1:]
+        return all(abs(int(planes[i, h // 2, w // 2]) - rgb[i]) <= tol for i in range(3))
+
+    def following() -> bool:
+        return any(t.name == "glass-live" and t.is_alive() for t in threading.enumerate())
+
+    RED, BLUE, GREEN = (220, 30, 40), (30, 60, 220), (40, 160, 60)
+    g = GlassBackdrop()
+    try:
+        green = os.path.join(tmp, "green.png")
+        frame(GREEN).save(green)
+        files = Display("A", "A", (0, 0, 400, 300), (0, 0, 400, 300), True)
+        g._read = lambda: (("files", green), winapi.WALL_STRETCH, [(files, green)])
+        assert g.refresh() and g.wait_clear() == liquid and shows(g.image, GREEN), (
+            "the files' glass wasn't built")
+
+        assert not g.check_live() and not g.live and not following(), (
+            "followed a live wallpaper with none running")
+
+        # One starts: its frame lands in both copies.
+        stand["layer"] = 0x5150
+        gen = g.generation
+        assert not g.check_live() and g.live == 0x5150
+        assert until(lambda: g.showing_live and shows(g.image, RED)), (
+            "the live wallpaper's frame didn't reach the glass")
+        assert g.generation > gen
+        if liquid:
+            assert until(lambda: bends(g, RED)), "the clear copy isn't the live frame"
+
+        # The same frame again is skipped; a new one is built.
+        gen, grabs = g.generation, stand["grabs"]
+        assert until(lambda: stand["grabs"] >= grabs + 4), "the live wallpaper isn't grabbed again"
+        assert g.generation == gen, "an unchanged frame was built again"
+        stand["frame"] = frame(BLUE)
+        assert until(lambda: shows(g.image, BLUE)), "a new frame didn't reach the glass"
+        if liquid:
+            assert bends(g, BLUE), "the clear copy kept the old frame"
+
+        # A black grab is a failed one, and changes nothing.
+        gen, grabs = g.generation, stand["grabs"]
+        stand["frame"] = flat.copy()
+        stand["frame"].fill(QColor(0, 0, 0))
+        assert until(lambda: stand["grabs"] >= grabs + 3)
+        assert g.generation == gen and shows(g.image, BLUE), "a black grab reached the glass"
+
+        # Under a full-screen game nothing is grabbed, and it catches up after.
+        stand["frame"] = frame(RED)
+        stand["full"] = (0, 0, 400, 300)
+        time.sleep(0.15)                    # one grab may already be under way
+        grabs = stand["grabs"]
+        time.sleep(0.4)
+        assert stand["grabs"] <= grabs + 1, (
+            f"grabbed {stand['grabs'] - grabs} times under a full-screen window")
+        stand["full"] = None
+        assert until(lambda: shows(g.image, RED)), "the glass didn't catch up after the game"
+
+        # The files' glass can't take over while the live frame shows.
+        image, clear = g.image, g.clear
+        g._signature = None
+        assert not g.refresh(), "the files' glass replaced the live frame"
+        g._start_clear(*g._last)
+        time.sleep(0.3)                     # long enough for a 400x300 build to land
+        assert g.image is image and g.clear is clear and shows(g.image, RED), (
+            "a build from the files replaced the live frame")
+
+        # Glass style and Blur rebuild a still frame.
+        if liquid:
+            before, gen = g.clear, g.generation
+            g.set_frost("more")
+            assert until(lambda: g.clear is not before and g.generation > gen), (
+                "a new Blur didn't rebuild the live frame's clear copy")
+            g.set_liquid(False)
+            assert g.clear is None and not g.ready, "frosted kept the live frame's clear copy"
+            g.set_liquid(True)
+            assert until(lambda: g.ready and bends(g, RED)), (
+                "back to liquid, the live frame wasn't bent again")
+
+        # It quits: the files' glass comes back and the thread ends.
+        stand["layer"] = 0
+        assert g.check_live(), "the glass didn't go back to the files"
+        assert not g.live and not g.showing_live and shows(g.image, GREEN)
+        assert g.wait_clear() == liquid and (not liquid or bends(g, GREEN)), (
+            "the files' clear copy wasn't built again")
+        assert until(lambda: not following()), "the live wallpaper's thread didn't end"
+    finally:
+        g.stop_live()
+        (livewall.find_layer, livewall.alive, livewall.grab, winapi.fullscreen_monitor,
+         winapi.virtual_screen, winapi.desktop_colour, glass_mod.LIVE_EVERY) = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # What this PC's desktop runs, for the log.
+    layer = livewall.find_layer()
+    if not layer:
+        here = "none running here"
+    else:
+        started = time.perf_counter()
+        got = livewall.grab(layer)
+        took = (time.perf_counter() - started) * 1000
+        here = ("one running here, but its grab failed" if got is None else
+                f"one running here, grabbed {got[0].width()}x{got[0].height()} in {took:.0f} ms"
+                f"{' (blank)' if livewall.blank(livewall.fingerprint(got[0])) else ''}")
+    print(f"  live wallpaper: followed into both copies, unchanged and black frames skipped, "
+          f"nothing grabbed under a full-screen window, back to the files when it quits; "
+          f"{here}")
 
 
 def _check_layout_mirror() -> None:

@@ -524,7 +524,9 @@ one.
 The blur is a heavy downscale, a few box passes at that small size, and a smooth
 upscale. At 1/14 scale a 3000×1920 desktop is a ~214×137 image, so it costs
 milliseconds and only reruns when the wallpaper or display layout actually
-changes (checked every 20s, rebuilt only on a real change).
+changes (checked every 20s, rebuilt only on a real change). A live wallpaper
+such as Wallpaper Engine draws over those files, and then the glass is built
+from what it shows instead (see [Live wallpapers](#live-wallpapers)).
 
 ⚠️ **The Windows 11 Mica/Acrylic backdrop is off by default and should stay off**
 — see above.
@@ -597,6 +599,43 @@ The Glass Dock, its music menu and its window previews are liquid glass too.
 Each is bent once for where it comes to rest, and its slide, rise or neon
 redraws that without bending it again. GLASS-DOCK.md has how. **Not liquid
 yet:** the app window's sidebar is still frosted.
+
+## Live wallpapers
+
+Wallpaper Engine, Lively Wallpaper and apps like them never change the
+wallpaper Windows has on record. They draw their own window in the desktop's
+wallpaper layer, under the icons, so the glass went on showing the picture set
+in Personalisation, which wasn't on screen at all.
+
+`livewall.py` finds that layer: a `WorkerW` window holding the app's window,
+inside `Progman` on Windows 11 24H2 and later, beside the icons' window before
+that. `PrintWindow` with `PW_RENDERFULLCONTENT` grabs it offscreen, DirectX and
+all. The grab has the live wallpaper where it draws and Windows' own wallpaper
+on any monitor it leaves alone, and never the icons or any window, the cards
+included. Nothing is shown and nothing moves.
+
+While one runs, both copies of the desktop, the blurred one and liquid glass's
+clear one, are built from that grab instead of the files:
+
+- **Every 15 s, on a thread of its own.** The glass trails an animated
+  wallpaper by up to that much, which its blur hides well enough.
+- **Only when the frame changed.** A 32×18 thumbnail of each grab is compared
+  with the last, so a still or paused wallpaper costs the grab and nothing else.
+- **Not at all while a full-screen window has the focus.** A game covers the
+  desktop, glass and all.
+- **A black grab is ignored.** An app that won't draw into one leaves the
+  glass showing what it did.
+
+On a Ryzen 5 5600G with a 3000×1920 desk, a grab takes about 55 ms, mostly
+waiting on the compositor. A new frame then takes about 20 ms to blur and
+210 ms more for the clear copy, so an animated wallpaper costs about 2% of one
+core and a still one about 0.4%. Measured there, a rebuild held up the
+board's own thread for 16.5 ms at most, about one frame. When the board
+starts, the first live frame lands about 0.3 s after the files' glass.
+
+The board looks for a live wallpaper every 3 s with a few window lookups, so
+the glass switches over soon after one starts. When it quits, the glass is
+built from the files again.
 
 ## Glass Dock
 
@@ -771,7 +810,10 @@ card ends up and what the saved layout says each one belongs to. The preset
 checks save, change, apply and undo a layout across both, apply one with a
 display missing, and fill the tray's Presets menu without a tray icon appearing.
 The glass check composites two made-up monitors with a solid picture each and
-reads back which colour landed where. The TLS check reads what the board's
+reads back which colour landed where. The live wallpaper check plays the
+wallpaper layer, its grabs and a full-screen game with stand-ins, so it checks
+the same on any PC whatever its desktop runs, and the boards the other checks
+build never follow a real one. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 
