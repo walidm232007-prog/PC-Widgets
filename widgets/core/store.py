@@ -101,6 +101,10 @@ class BoardState:
     dock_color: str = ""            # empty follows the board's light/dark theme
     dock_music_side: str = "left"
     dock_replace_taskbar: bool = True
+    # The dock turned Windows' "Automatically hide the taskbar" on, and it was off
+    # before: put it back off when the dock lets the taskbar go. Saved, so a board
+    # that crashed or lost power while replacing still puts it back next time.
+    dock_autohid_taskbar: bool = False
     dock_pins: List[str] = field(default_factory=list)
     dock_hidden: List[str] = field(default_factory=list)   # taskbar pins removed from the dock
     dock_neon: bool = False         # a glowing outline round the dock

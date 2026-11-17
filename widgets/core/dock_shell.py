@@ -101,12 +101,29 @@ class APPBARDATA(C.Structure):
 _shell.SHAppBarMessage.argtypes = [W.DWORD, C.POINTER(APPBARDATA)]
 _shell.SHAppBarMessage.restype = C.c_size_t
 ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS, ABM_GETSTATE = 0, 1, 2, 3, 4
+ABM_SETSTATE = 10
 ABE_BOTTOM, ABS_AUTOHIDE = 3, 1
 
 
 def taskbar() -> int:
     """Explorer's taskbar on the main display, or 0 while Explorer is restarting."""
     return u.FindWindowW("Shell_TrayWnd", None) or 0
+
+
+def taskbar_autohides() -> bool:
+    """Whether Windows' "Automatically hide the taskbar" is on (Settings ->
+    Personalization -> Taskbar)."""
+    data = APPBARDATA(cbSize=C.sizeof(APPBARDATA))
+    return bool(_shell.SHAppBarMessage(ABM_GETSTATE, C.byref(data)) & ABS_AUTOHIDE)
+
+
+def set_taskbar_autohide(on: bool, bar: int = 0) -> None:
+    """Turn that setting on or off, as its switch in Settings does. There is
+    one for every display: Windows has no per-display auto-hide."""
+    data = APPBARDATA(cbSize=C.sizeof(APPBARDATA), hWnd=bar or taskbar(),
+                      lParam=ABS_AUTOHIDE if on else 0)
+    _shell.SHAppBarMessage(ABM_SETSTATE, C.byref(data))
+    _edges.clear()          # the bar moves, and what it reserves with it
 
 
 _edges: dict = {}
@@ -1002,9 +1019,24 @@ def key(vk: int) -> None:
 
 
 class TaskbarLease:
+    """Hides the main display's taskbar while the dock stands in for it.
+
+    Hiding the bar alone doesn't give its strip of screen back: Explorer keeps
+    the bottom 48 px reserved for a hidden bar, so maximised windows stopped
+    short of the bottom with nothing where the bar had been. That is what most
+    people saw, as auto-hide is off by default; with it on, as here, the bar
+    reserves nothing. So the lease also turns Windows' own "Automatically hide
+    the taskbar" on, if it was off, and back off when it lets go - and so does
+    the guard, after a crash.
+    """
+
     def __init__(self):
         self.guard = None
         self.hwnd = None
+        # The lease turned auto-hide on, and it was off before. The dock seeds
+        # this from the board's saved state, so a setting left on by a crash or
+        # a power cut is still put back.
+        self.autohid = False
 
     def hide(self) -> bool:
         hwnd = taskbar()
@@ -1018,20 +1050,28 @@ class TaskbarLease:
                 self.restore()
                 return self.hide()
         elif u.IsWindowVisible(hwnd):
-            # The guard starts before hiding. If process creation fails, leave
-            # Explorer alone. All pipe handles close when the parent dies.
+            # The guard starts before hiding - and before auto-hide is turned on,
+            # knowing whether to turn it off again. If process creation fails,
+            # leave Explorer alone. All pipe handles close when the parent dies.
+            # Off now: turn it on, ours to put back. On already: the user's own
+            # setting - unless a lease before a crash turned it on (autohid).
+            turn_on = not taskbar_autohides()
+            undo = "1" if turn_on or self.autohid else "0"
             try:
                 executable = sys.executable
                 if os.path.basename(executable).lower() == "pythonw.exe":
                     executable = os.path.join(os.path.dirname(executable), "python.exe")
                 self.guard = subprocess.Popen(
-                    [executable, os.path.abspath(__file__), "--guard", str(hwnd)],
+                    [executable, os.path.abspath(__file__), "--guard", str(hwnd), undo],
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
                 self.hwnd = hwnd
             except OSError:
                 self.guard = None
                 return False
+            if turn_on:
+                set_taskbar_autohide(True, hwnd)
+                self.autohid = True
         else:
             return False  # do not take ownership of somebody else's hidden bar
         if u.IsWindowVisible(hwnd):
@@ -1054,6 +1094,9 @@ class TaskbarLease:
 
     def restore(self) -> None:
         self.reveal()
+        if self.autohid:
+            set_taskbar_autohide(False, self.hwnd or taskbar())
+            self.autohid = False
         guard, self.guard = self.guard, None
         self.hwnd = None
         if guard is not None:
@@ -1065,13 +1108,24 @@ class TaskbarLease:
                 pass
 
 
-def _guard(hwnd: int) -> None:
+def _guard(hwnd: int, autohide_off: bool = False) -> None:
+    """Wait for the board's pipe to close - turned off, quit or crashed - then
+    give the taskbar back: auto-hide off again if the lease turned it on, and
+    the bar shown."""
     try:
         sys.stdin.buffer.read()
     finally:
+        if autohide_off:
+            set_taskbar_autohide(False, hwnd if u.IsWindow(hwnd) else taskbar())
         if u.IsWindow(hwnd):
             u.ShowWindow(hwnd, SW_SHOWNA)
 
 
-if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--guard":
-    _guard(int(sys.argv[2]))
+def guard_args(argv) -> tuple:
+    """The guard's (hwnd, autohide_off) from its command line, however it was
+    started: ``... --guard HWND [1|0]``."""
+    return int(argv[2]), len(argv) > 3 and argv[3] == "1"
+
+
+if __name__ == "__main__" and len(sys.argv) in (3, 4) and sys.argv[1] == "--guard":
+    _guard(*guard_args(sys.argv))

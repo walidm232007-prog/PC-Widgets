@@ -671,6 +671,10 @@ class GlassDock(QWidget):
         self.setAttribute(Qt.WA_AlwaysShowToolTips)
         self.setMouseTracking(True)
         self.lease = shell.TaskbarLease()
+        if not preview:
+            # Auto-hide this lease (or one before a crash or a power cut) turned
+            # on: the first time the dock lets the taskbar go, it goes back off.
+            self.lease.autohid = bool(getattr(board.state, "dock_autohid_taskbar", False))
         self._reservation = None      # the hidden app-bar window, made on first use
         self._workarea = None
         self._watcher = None
@@ -843,6 +847,7 @@ class GlassDock(QWidget):
         if self._workarea is not None:
             self._workarea.release()
         self.lease.restore()
+        self._keep_autohid()
         if self._stop:
             self._stop.set()
         if self._watcher is not None:
@@ -980,6 +985,7 @@ class GlassDock(QWidget):
             self._conceal()
             self._workarea.release()
             self.lease.restore()
+            self._keep_autohid()
             return
         g = screen.geometry()
         if self._covered(g):
@@ -1077,6 +1083,19 @@ class GlassDock(QWidget):
                 self.lease.restore()        # fail open: the dock floats above the bar
         else:
             self.lease.restore()
+        self._keep_autohid()
+
+    def _keep_autohid(self):
+        """Save whether the lease has turned Windows' auto-hide on, so that a
+        crash or a power cut can't leave it on: the next start puts it back."""
+        state = self.board.state
+        autohid = bool(getattr(self.lease, "autohid", False))
+        if self.preview or getattr(state, "dock_autohid_taskbar", False) == autohid:
+            return
+        state.dock_autohid_taskbar = autohid
+        persist = getattr(self.board, "persist", None)
+        if persist is not None:
+            persist()
 
     def _covered(self, g):
         """A window maximised or fullscreen on the main display. Maximised

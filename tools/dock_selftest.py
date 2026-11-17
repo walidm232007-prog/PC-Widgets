@@ -12,6 +12,8 @@ itself and hides and restores the real taskbar.
 """
 from __future__ import annotations
 import argparse
+import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -1049,6 +1051,117 @@ def check_guard(app):
     print("PASS: taskbar guard restores a hidden window after its parent is killed")
 
 
+def check_autohide(app):
+    """Replacing the taskbar frees its strip of screen on every PC, not just one
+    with auto-hide on: the lease turns Windows' "Automatically hide the
+    taskbar" on if it was off, and the dock, the guard and the next start all
+    put it back. Windows' setting, the guard process and the taskbar are
+    stand-ins here - a tool window parked off every monitor - so the real
+    taskbar and its setting are never touched."""
+    from unittest.mock import patch
+
+    window = QWidget(None, Qt.Tool | Qt.FramelessWindowHint)
+    window.setAttribute(Qt.WA_ShowWithoutActivating)
+    window.setGeometry(-32000, -32000, 40, 40)
+    window.show()
+    pump(app, 0.1)
+    hwnd = int(window.winId())
+    setting = {"on": False}
+    sets, guards = [], []
+
+    class Guard:
+        def __init__(self, args, **_kw):
+            guards.append(list(args))
+            self.stdin = self
+
+        def poll(self):
+            return None
+
+        def close(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    def set_autohide(on, bar=0):
+        sets.append(on)
+        setting["on"] = on
+
+    visible = lambda: bool(shell.u.IsWindowVisible(hwnd))
+    try:
+        with patch.object(shell, "taskbar", lambda: hwnd), \
+                patch.object(shell, "taskbar_autohides", lambda: setting["on"]), \
+                patch.object(shell, "set_taskbar_autohide", set_autohide), \
+                patch.object(shell.subprocess, "Popen", Guard):
+            # Off, as on most PCs: on while the dock has the bar, off after.
+            lease = shell.TaskbarLease()
+            assert lease.hide() and setting["on"] and lease.autohid and not visible(), \
+                "replacing a taskbar that doesn't auto-hide left its strip reserved"
+            assert guards[-1][-1] == "1", "the guard won't turn auto-hide back off after a crash"
+            lease.restore()
+            assert not setting["on"] and not lease.autohid and visible(), \
+                "letting the taskbar go left auto-hide on"
+
+            # On already, as the user's own choice: left alone both ways.
+            setting["on"], sets[:] = True, []
+            lease = shell.TaskbarLease()
+            assert lease.hide() and not lease.autohid and guards[-1][-1] == "0"
+            lease.restore()
+            assert setting["on"] and sets == [], "the user's own auto-hide was changed"
+
+            # A power cut left it on: the next lease to let go turns it off.
+            lease = shell.TaskbarLease()
+            lease.autohid = True
+            lease.restore()
+            assert not setting["on"], "auto-hide a power cut left on stayed on"
+            # A crash, whose guard already turned it off: the next lease turns
+            # it on again, and still owns putting it back.
+            lease = shell.TaskbarLease()
+            lease.autohid = True
+            assert lease.hide() and setting["on"] and lease.autohid and guards[-1][-1] == "1"
+            lease.restore()
+            assert not setting["on"] and visible()
+
+            # The guard itself, after a crash.
+            class Pipe:
+                buffer = io.BytesIO(b"")
+            setting["on"], sets[:] = True, []
+            shell.u.ShowWindow(hwnd, 0)
+            with patch.object(sys, "stdin", Pipe()):
+                shell._guard(hwnd, True)
+            assert sets == [False] and visible(), "the guard didn't put auto-hide back"
+            sets[:] = []
+            with patch.object(sys, "stdin", Pipe()):
+                shell._guard(hwnd, False)
+            assert sets == [], "a guard with nothing to undo changed auto-hide"
+            assert shell.guard_args(["dock_shell.py", "--guard", "12", "1"]) == (12, True)
+            assert shell.guard_args(["PC Widgets.exe", "--guard", "12"]) == (12, False)
+
+            # The dock: what the lease turned on is saved, and a dock that
+            # starts with replacement off puts back what a crash left on.
+            b = TestBoard()
+            b.state.dock_enabled, b.state.dock_autohid_taskbar = False, True
+            setting["on"] = True
+            dock = GlassDock(b)
+            dock.setAttribute(Qt.WA_DontShowOnScreen)
+            try:
+                assert not setting["on"] and b.state.dock_autohid_taskbar is False, \
+                    "a crash's auto-hide outlived the next start"
+                dock.lease.hide()
+                dock._keep_autohid()
+                assert b.state.dock_autohid_taskbar is True, "what the lease turned on wasn't saved"
+                dock.shutdown()
+                assert not setting["on"] and b.state.dock_autohid_taskbar is False
+            finally:
+                dock.lease.restore()
+                dock.close()
+    finally:
+        window.close()
+    print("PASS: replacing the taskbar turns Windows' auto-hide on when it was off (its strip "
+          "is freed) and back off when the dock lets go, the guard after a crash, the next "
+          "start after a power cut; a user's own auto-hide is left alone")
+
+
 def check_store():
     with tempfile.TemporaryDirectory() as tmp:
         original = store._both_paths
@@ -1534,6 +1647,7 @@ def main():
     check_watcher(app)
     check_store()
     check_guard(app)
+    check_autohide(app)
     check_positions()
     check_listening()
     check_fullscreen(app)
