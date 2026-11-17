@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 os.environ["PCWIDGETS_NO_AUDIO"] = "1"
+os.environ["PCWIDGETS_NO_LIVE_WALLPAPER"] = "1"   # boards keep to the wallpaper files
 
 from PySide6.QtCore import QFileInfo, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap

@@ -18,6 +18,7 @@ each card back where it belongs on the screens there are now.
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import fields
@@ -133,6 +134,16 @@ class Board(QObject):
         self._glass_timer = QTimer(self)
         self._glass_timer.timeout.connect(self._refresh_glass)
         self._glass_timer.start(20_000)
+        # A live wallpaper (Wallpaper Engine and the like) covers the files:
+        # while one runs, the glass follows it from a thread (glass.py). Looked
+        # for now and every few seconds - a few window lookups - so the glass
+        # switches over soon after it starts or quits. The self-tests turn it
+        # off: what they check mustn't hang on what this PC's desktop runs.
+        self._live_timer = QTimer(self)
+        self._live_timer.timeout.connect(self._check_live)
+        if not os.environ.get("PCWIDGETS_NO_LIVE_WALLPAPER"):
+            self.glass.check_live()
+            self._live_timer.start(3_000)
 
         # In desktop mode another window can end up drawn over a widget when
         # focus changes; a slow re-assert keeps them parked without polling
@@ -977,8 +988,15 @@ class Board(QObject):
                 for c in self.cards:
                     c.update()
 
+    def _check_live(self) -> None:
+        # A live wallpaper's frames arrive through _glass_ready; going back to
+        # the wallpaper files when it quits repaints here.
+        if self.glass.check_live():
+            self._glass_ready()
+
     def _glass_ready(self) -> None:
-        """The clear desktop is built: frosted cards turn liquid."""
+        """The clear desktop is built, or a live wallpaper's new frame:
+        everything glass repaints, and frosted cards turn liquid."""
         self.glass_changed.emit()
         if self.state.glass:
             for c in getattr(self, "cards", []):
@@ -1081,6 +1099,8 @@ class Board(QObject):
             self.dock.shutdown()
         self._park.stop()
         self._glass_timer.stop()
+        self._live_timer.stop()
+        self.glass.stop_live()
         self._autosave.stop()
         self._watch.stop()
         self._redisplay.stop()
