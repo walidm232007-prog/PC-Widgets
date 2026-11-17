@@ -262,8 +262,23 @@ there is one.
 showing. Hiding Explorer's bar is temporary: no registry or Explorer patch is
 involved. A small guard process holds a pipe from the board and restores the
 taskbar when the pipe closes - when the dock is turned off, the board quits, or
-the board crashes. Other displays keep their own taskbars. Turning replacement
-off keeps the taskbar and floats the dock just above it.
+the board crashes. Turning replacement off keeps the taskbar and floats the
+dock just above it.
+
+Replacing it also turns on Windows' own **Automatically hide the taskbar** if
+it was off, which is the Windows default. Hiding the bar alone doesn't give its
+strip of screen back: Explorer keeps the bottom 48 px reserved for a hidden
+bar, so maximised windows stopped short of the bottom, and once the dock slid
+out of their way there was an empty band of wallpaper where the bar had been.
+That is what most people saw. A PC with auto-hide already on reserves nothing,
+which is why the PC this was built on never showed it. Auto-hide is put back
+the way it was when the dock lets the taskbar go: when the dock is turned off,
+replacement is switched off, or the board quits. After a crash, the guard puts
+it back. After a power cut, the next start does: whether the dock turned it on
+is saved with the board (`dock_autohid_taskbar`). Auto-hide that was already on
+is the user's own choice and is left alone. Windows has one auto-hide setting
+for every display, so taskbars on other displays auto-hide too while the dock
+replaces the main one.
 
 The dock works like an auto-hiding taskbar. A maximised or fullscreen window
 on the main display - most people's "full screen" is the maximise button -
@@ -277,11 +292,11 @@ dock is down.
 
 So the dock reserves no screen space. It did at first, and maximised windows
 stopped 64 px short of the bottom; a dock that moves out of their way is what
-an auto-hiding taskbar does instead. With replacement on and Windows' own
-taskbar not set to auto-hide, Explorer still keeps its own strip, so maximised
-windows stop at the top of the hidden bar. Widget coordinates do not move when
-only the work area changes: toggling the dock, changing taskbar height and
-restarting all keep the saved arrangement.
+an auto-hiding taskbar does instead, and turning auto-hide on (above) frees the
+strip Explorer kept for its own bar too, so maximised windows get the whole
+height. Widget coordinates do not move when only the work area changes:
+toggling the dock, changing taskbar height and restarting all keep the saved
+arrangement.
 
 The taskbar is left alone while something is fullscreen. The first version
 showed the hidden taskbar every second during a game with a call that also

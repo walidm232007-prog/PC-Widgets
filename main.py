@@ -3445,7 +3445,7 @@ def _helper(mode: str) -> int:
     # arguments.
     if mode == "--guard":
         from widgets.core import dock_shell
-        dock_shell._guard(int(sys.argv[2]))
+        dock_shell._guard(*dock_shell.guard_args(sys.argv))
         return 0
     from widgets.core import winrt_read
     return winrt_read._main()
