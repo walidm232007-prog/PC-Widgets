@@ -1691,10 +1691,14 @@ def _check_live_glass(pal) -> None:
         print("  live glass: no numpy, so no liquid glass to follow (skipped)")
         return
 
+    import time as _t
+
+    from PySide6.QtCore import QRect, Qt
+
     from widgets.core import glass as glass_mod
     from widgets.core import lens, livewall, winapi
     from widgets.core.board import REGISTRY
-    from widgets.core.card import DRAG_STEP, MARGIN, RADIUS
+    from widgets.core.card import DRAG_STEP, MARGIN, RADIUS, SHADOW_ALPHA, SHADOW_LAYERS, squircle
     from widgets.core.glass import GlassBackdrop
 
     # Patches of a GDI bitmap, red on the left and blue on the right, read
@@ -1827,9 +1831,11 @@ def _check_live_glass(pal) -> None:
 
         # Hidden behind a window: skipped; back in view, it catches up.
         stand["hidden"], stand["frame"], gen = {A}, scene(BLUE, BLUE), g.generation
+        g._hidden_kept = None               # read the windows again, not in a quarter second
         assert g._live_frame(LAYER, job) == (False, False) and g.generation == gen, (
             "the glass behind a hidden card was built")
         stand["hidden"] = set()
+        g._hidden_kept = None
         assert g._live_frame(LAYER, job) == (True, False) and g.changed_since(gen, A), (
             "a card back in view didn't catch up")
         assert near(glass_of(card_a), BLUE)
@@ -1843,6 +1849,78 @@ def _check_live_glass(pal) -> None:
         assert card_b._pane[0][2] == "live" and shown[1] > shown[0] + 40 and shown[1] > shown[2] + 40, (
             f"the frosted card doesn't show its live slice: {shown}")
 
+        # Windows' capture: frames read the same way, the first one whole.
+        class Frame:
+            def close(self):
+                pass
+
+        class Capture:
+            def __init__(self):
+                self.frames, self.reads, self.wholes = [], 0, 0
+
+            def latest(self):
+                return self.frames.pop(0) if self.frames else None
+
+            def origin(self):
+                return (0, 0)
+
+            def read(self, frame, rects, at=None):
+                self.reads += 1
+                return grab_parts(LAYER, rects)[0]
+
+            def whole(self, frame):
+                self.wholes += 1
+                return stand["frame"].copy()
+
+        cap, f = Capture(), GlassBackdrop()
+        f.regions, f.region_info = (A, B), {A: (0, RADIUS), B: (0, RADIUS)}
+        fjob, _ = f._prepare_live(LAYER)
+        assert f._live_capture(cap, LAYER, fjob, 0) == (False, False, False), (
+            "built from Windows' capture with no frame in it")
+        stand["frame"] = scene(RED, BLUE)
+        cap.frames.append(Frame())
+        assert f._live_capture(cap, LAYER, fjob, 0)[0] and cap.wholes == 1, (
+            "the first frame from Windows' capture wasn't taken whole")
+        gen = f.generation
+        stand["frame"] = scene(GREEN, BLUE)
+        cap.frames.append(Frame())
+        assert f._live_capture(cap, LAYER, fjob, 0) == (True, False, True) and cap.reads == 1
+        assert f.changed_since(gen, A) and not f.changed_since(gen, B), (
+            "a frame from Windows' capture reached the card nothing moved behind")
+        f.stop_live()
+
+        # Its change test reads Windows' pixels and PrintWindow's alike.
+        frame32 = scene(GREEN, BLUE)
+        area = QRect(50, 50, 200, 150)
+        assert glass_mod._mark_of(frame32, area) == glass_mod._mark_of(
+            frame32.convertToFormat(QImage.Format_BGR888), area), (
+            "the change test reads the two captures differently")
+
+        # Repaints: the shadow drawn once and kept, as drawn directly; the
+        # weather icons' curves built once.
+        r = card_a.card_rect()
+        kept = card_a._shadow(r, 1.0)
+        assert card_a._shadow(r, 1.0) is kept, "the shadow is drawn again at every repaint"
+        direct = QImage(card_a.size(), QImage.Format_ARGB32_Premultiplied)
+        direct.fill(QColor(0, 0, 0, 0))
+        p = QPainter(direct)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        for i in range(SHADOW_LAYERS, 0, -1):
+            grow = i * 1.7
+            p.setBrush(QColor(0, 0, 0, max(2, int(SHADOW_ALPHA / (i * 0.85)))))
+            p.drawPath(squircle(r.adjusted(-grow, -grow + 2.0, grow, grow + 3.0), RADIUS + grow))
+        p.end()
+        laid = QImage(card_a.size(), QImage.Format_ARGB32_Premultiplied)
+        laid.fill(QColor(0, 0, 0, 0))
+        p = QPainter(laid)
+        p.drawImage(0, 0, kept)
+        p.end()
+        assert laid == direct, "the kept shadow isn't the shadow"
+        from widgets.tiles import weather as weather_mod
+        assert weather_mod.icon_paths(weather_mod.PARTLY) is weather_mod.icon_paths(
+            weather_mod.PARTLY), "the weather icons' curves are built at every repaint"
+
         # And nothing was left out of captures: the cards stay in screenshots.
         affinity = W.DWORD()
         for card in (card_a, card_b):
@@ -1855,10 +1933,42 @@ def _check_live_glass(pal) -> None:
         for card in (card_a, card_b):
             card.close()
             card.deleteLater()
+    # Windows' capture on this PC's desktop, for the log: it's there, or why not.
+    here = "no live wallpaper here to capture"
+    layer = livewall.find_layer()
+    if layer:
+        import threading as _th
+        from widgets.core import wgc
+        seen = {}
+
+        def look():
+            wgc.join_apartment()
+            try:
+                capture = wgc.Capture(wgc.target(layer))
+                end, frames = _t.perf_counter() + 1.0, 0
+                while _t.perf_counter() < end:
+                    got = capture.latest()
+                    if got is None:
+                        _t.sleep(0.003)
+                        continue
+                    frames += 1
+                    got.close()
+                capture.close()
+                seen["text"] = f"Windows' capture of the desktop: {frames} frames in 1 s, borderless"
+            except Exception as e:
+                seen["text"] = f"Windows' capture unavailable here ({e}); PrintWindow instead"
+            finally:
+                wgc.leave_apartment()
+
+        worker = _th.Thread(target=look)
+        worker.start()
+        worker.join(10)
+        here = seen.get("text", "Windows' capture didn't answer")
     print("  live glass: patches read back clipped and right; a frame behind one card goes "
           "straight in, bent ahead on the drag grid, the other card untouched; at rest bent in "
-          "full and faded in; hidden cards skipped; frosted cards get live slices; cards stay "
-          "in screen captures")
+          "full and faded in; hidden cards skipped; frosted cards get live slices; Windows' "
+          "capture's frames read alike; shadows and weather icons kept; cards stay in screen "
+          f"captures; {here}")
 
 
 def _check_layout_mirror() -> None:
