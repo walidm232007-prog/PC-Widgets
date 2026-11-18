@@ -1028,7 +1028,7 @@ class Board(QObject):
         if self.state.glass:
             for c in getattr(self, "cards", []):
                 if c.glass_stale():
-                    c.update()
+                    c.glass_update()     # the glass alone: what's over it is kept
 
     def set_glass(self, on: bool) -> None:
         self.state.glass = on

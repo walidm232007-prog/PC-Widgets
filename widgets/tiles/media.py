@@ -113,6 +113,7 @@ class MediaWidget(WidgetCard):
         self._viz_rect: Optional[QRectF] = None
         self._viz_backing: Optional[QImage] = None
         self._dirty = True
+        self._glass_new = False     # new glass behind the card: compose again, keeping what's over it
         self._viz_timer = QTimer(self)
         self._viz_timer.setTimerType(Qt.PreciseTimer)
         self._viz_timer.setInterval(VIZ_FRAME_MS)
@@ -186,6 +187,15 @@ class MediaWidget(WidgetCard):
         """Recompose the whole card, not just a visualiser frame."""
         self._dirty = True
         self.update()
+
+    def glass_update(self) -> None:
+        """New glass behind the card: the buffer is composed again, so the
+        card and the discs' frost show it. Without this the board's repaint
+        found nothing dirty and drew the old buffer, and the glass behind Now
+        Playing moved only when a poll or the pointer happened to recompose
+        it, every few seconds."""
+        self._glass_new = True
+        super().glass_update()
 
     def _on_data(self) -> None:
         """A poll came back: check the cover and the tap, then repaint."""
@@ -711,7 +721,7 @@ class MediaWidget(WidgetCard):
         and the finished thing is blitted out in one go.
         """
         stale = (self._buf is None or self._buf.size() != self.size()
-                 or self._dirty or self._art_fade.active)
+                 or self._dirty or self._glass_new or self._art_fade.active)
 
         if stale:
             if self._buf is None or self._buf.size() != self.size():
@@ -722,7 +732,11 @@ class MediaWidget(WidgetCard):
             bp = QPainter(self._buf)
             # Full opacity into the buffer, faded once on the way out, so a
             # translucent board doesn't make the glass denser than the card.
-            self.paint_card(bp, 1.0)
+            # What's over the glass goes through the card's kept layer, so the
+            # type is greyscale like every other card's (WidgetCard.paint_card),
+            # and new glass alone lays that layer on it rather than drawing it.
+            glass_only = self._glass_new and not self._dirty and not self._art_fade.active
+            self.paint_card(bp, 1.0, over="reuse" if glass_only else "keep")
             bp.end()
 
             for name, centre, rad, _hit in self._discs:
@@ -732,7 +746,7 @@ class MediaWidget(WidgetCard):
             # frame can put it back without redoing any of the above.
             self._viz_backing = (self._buf.copy(self._viz_rect.toAlignedRect())
                                  if self._viz_rect is not None else None)
-            self._dirty = False
+            self._dirty = self._glass_new = False
 
         elif self._viz_backing is not None and self._viz_rect is not None:
             # Animation frame: erase the last bars by restoring the strip, then

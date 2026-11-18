@@ -430,6 +430,14 @@ class WidgetCard(QWidget):
         self._glass_fade = Fader(self)
         self._glass_fade.finish()        # nothing to fade from on the first paint
         self._shadow_kept = None         # (size and where, image): the shadow, drawn once
+        # What's drawn over the glass, kept as one image for live glass's
+        # frames (glass_update): (what it was drawn for, image), whether
+        # something has asked for a repaint since, whether the repaint asked
+        # for is for new glass alone, and whether a picture covers the glass.
+        self._over_kept = None
+        self._over_stale = True
+        self._glass_only = False
+        self._covered = False
         self._drag_ms = 0.0              # what bending it at a step of a drag costs
         self._drag_from: Optional[QPoint] = None
         self._target: Optional[Tuple[int, int]] = None   # window pos the outline shows
@@ -486,13 +494,32 @@ class WidgetCard(QWidget):
         route to a repaint is covered: timers, data arriving on a signal, hover,
         a fade stepping. One of those getting missed is how a "pauses while
         gaming" feature quietly does nothing.
+
+        Any of them may change what's drawn over the glass, so the layer of it
+        kept for glass_update() is drawn again at the next paint - noted even
+        while quiet, for the repaint that catches up.
         """
+        self._over_stale = True
         if _quiet or self.quiet:
             return
         super().update(*args)
 
+    def glass_update(self) -> None:
+        """Repaint for new glass behind the card and nothing else: live
+        glass's frames, up to sixty a second. What's drawn over the glass -
+        the tint, the lit rim, the content - is kept from the last paint as one
+        image and laid on the new glass rather than drawn again (paint_card's
+        ``over``). Drawing it was most of a repaint: a stocks card's took
+        1.7 ms, and live glass repaints every card behind a moving wallpaper
+        at its own pace. Quiet, like update()."""
+        if _quiet or self.quiet:
+            return
+        self._glass_only = True
+        QWidget.update(self)
+
     def force_update(self) -> None:
         """Repaint regardless of quiet mode, to catch up when it lifts."""
+        self._over_stale = True
         QWidget.update(self)
 
     # -- for subclasses -------------------------------------------------- #
@@ -701,12 +728,17 @@ class WidgetCard(QWidget):
                       self.height() - MARGIN * 2 - self.extra_bottom)
 
     def paintEvent(self, _ev) -> None:
+        # New glass alone (glass_update) lays the kept layer on it; any other
+        # repaint draws it all. Read before painting: a repaint asked for while
+        # this one paints is the next one's.
+        reuse = self._glass_only and not self._over_stale
+        self._glass_only = self._over_stale = False
         p = QPainter(self)
-        self.paint_card(p)
+        self.paint_card(p, over="reuse" if reuse else "keep")
         p.end()
 
     def paint_card(self, p: QPainter, opacity: Optional[float] = None,
-                   shadow: bool = True) -> None:
+                   shadow: bool = True, over: Optional[str] = None) -> None:
         """Draw the whole card onto ``p``: chrome, material, then the content.
 
         Split out of ``paintEvent`` so a tile can render itself into an offscreen
@@ -715,6 +747,11 @@ class WidgetCard(QWidget):
         it is what the media player's frosted transport needs. The app window and
         the crop editor draw cards through it too; the editor leaves the shadow
         off, since there the card sits inside a picture rather than on a desktop.
+
+        ``over``, from paintEvent: what's drawn over the glass is drawn into an
+        image and kept ("keep"), or the kept one is laid on the new glass
+        ("reuse") - if it was drawn for the same card, size and glass. Others
+        draw it all straight onto ``p``.
         """
         # Antialiasing alone only smooths *shapes*. Glyphs need TextAntialiasing
         # as well, and without it type is rendered with hard pixel edges - which
@@ -749,17 +786,56 @@ class WidgetCard(QWidget):
         image = layer is not None
         frosted = False
         liquid = False
-        if not (image and layer[1]):
+        self._covered = bool(image and layer[1])
+        if not self._covered and not self.solid_bg and self.glass is not None:
             # Glass: the desktop showing through, then a tint on top. Liquid
             # glass (lens.py) when it can be bent, frosted glass otherwise -
             # both clipped to the squircle, which is the whole reason it's done
             # in-process rather than handed to DWM.
-            if not self.solid_bg and self.glass is not None:
-                p.save()
-                p.setClipPath(path)
-                liquid, frosted = self._paint_glass(p, r)
-                p.restore()
+            p.save()
+            p.setClipPath(path)
+            liquid, frosted = self._paint_glass(p, r)
+            p.restore()
 
+        # Everything over the glass. From paintEvent it's drawn into an image
+        # and kept, and a repaint for new glass alone lays that on the new
+        # glass. Only at full opacity: a fading card's layers each fade, which
+        # one faded image wouldn't match.
+        if over is not None and p.opacity() == 1.0:
+            dpr = p.device().devicePixelRatioF()
+            key = (self.width(), self.height(), r.x(), r.y(), r.width(), r.height(), dpr,
+                   liquid, frosted, self._covered, id(pal), self._hover and not self.locked,
+                   _moving is not None, _moving is self, self.spotlit)
+            kept = self._over_kept
+            if over != "reuse" or kept is None or kept[0] != key:
+                # Drawn on a straight-alpha image, as the dock is, then
+                # converted once: on a premultiplied one Qt renders type with
+                # ClearType whatever the font asks, and over the glass every
+                # letter had red and blue edges. Greyscale, as Apple draws it.
+                img = QImage(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)),
+                             QImage.Format_ARGB32)
+                img.setDevicePixelRatio(dpr)
+                img.fill(Qt.transparent)
+                q = QPainter(img)
+                q.setRenderHints(p.renderHints())
+                q.setFont(p.font())
+                self._paint_over(q, r, path, layer, liquid, frosted)
+                q.end()
+                img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+                img.setDevicePixelRatio(dpr)
+                kept = self._over_kept = (key, img)
+            p.drawImage(QPointF(0, 0), kept[1])
+            return
+        self._paint_over(p, r, path, layer, liquid, frosted)
+
+    def _paint_over(self, p: QPainter, r: QRectF, path: QPainterPath, layer,
+                    liquid: bool, frosted: bool) -> None:
+        """What paint_card draws over the card's glass: the tint, a picture,
+        the lit rim or sheen, the rings, and the content."""
+        pal = self.palette_
+        image = layer is not None
+        p.setPen(Qt.NoPen)
+        if not (image and layer[1]):
             fill = QColor(pal.card)
             if self.solid_bg:
                 fill.setAlpha(255)
@@ -979,8 +1055,8 @@ class WidgetCard(QWidget):
         """Whether the glass behind this card changed since it was drawn - so
         the board repaints only the cards a live wallpaper moved behind."""
         g = self.glass
-        if g is None or self.solid_bg:
-            return False
+        if g is None or self.solid_bg or self._covered:
+            return False                 # no glass shows: a picture covers it, say
         if self._pane is None or self._pane_at is None:
             return True
         if bool(getattr(g, "ready", False)) != (self._pane[0][0] == "liquid"):
