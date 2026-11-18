@@ -112,9 +112,26 @@ except (AttributeError, OSError):          # not Windows, or too old a one
     _combase = _d3d11 = _user = None
 
 
+_prototypes: dict = {}
+_methods: dict = {}
+
+
 def _call(obj, index: int, argtypes, *args, restype=HRESULT):
-    table = C.cast(obj, C.POINTER(C.POINTER(C.c_void_p)))[0]
-    return C.WINFUNCTYPE(restype, C.c_void_p, *argtypes)(table[index])(obj, *args)
+    """Method ``index`` of a COM object's vtable. The callable for each kind
+    of object's method is made once and kept: made afresh at every call it
+    cost 9 microseconds, and live glass makes hundreds of calls a frame."""
+    address = obj.value if isinstance(obj, C.c_void_p) else obj
+    table = C.c_void_p.from_address(address).value
+    shape = (restype, tuple(argtypes))
+    key = (table, index, shape)
+    method = _methods.get(key)
+    if method is None:
+        prototype = _prototypes.get(shape)
+        if prototype is None:
+            prototype = _prototypes[shape] = C.WINFUNCTYPE(restype, C.c_void_p, *argtypes)
+        method = _methods[key] = prototype(C.c_void_p.from_address(
+            table + index * C.sizeof(C.c_void_p)).value)
+    return method(address, *args)
 
 
 def _ok(hr, what: str) -> None:
@@ -193,6 +210,12 @@ class Frame:
             size = _Size()
             _ok(_call(frame, 8, [C.POINTER(_Size)], C.byref(size)), "frame size")
             self.size = (size.Width, size.Height)
+            # When the compositor shows it, in s on time.perf_counter's clock:
+            # SystemRelativeTime counts the same QueryPerformanceCounter, in
+            # 100 ns steps.
+            span = C.c_int64()
+            self.time = (span.value / 1e7 if _call(frame, 7, [C.POINTER(C.c_int64)],
+                                                   C.byref(span)) >= 0 else None)
         except OSError:
             self.close()
             raise

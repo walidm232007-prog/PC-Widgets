@@ -617,9 +617,10 @@ built from the files again, and fades in like any other change.
 ### Live glass
 
 **Settings → Look → Live glass**, on by default, makes the glass follow the
-wallpaper as it moves, at the wallpaper's own pace: about 25 frames a second
-for Wallpaper Engine here, and up to 40. It's true glass that still shows up
-in screenshots. The see-through dock leaves itself out of screen captures,
+wallpaper as it moves, at the wallpaper's own pace, up to 60 frames a second.
+Wallpaper Engine draws 25 a second unless its own FPS limit (its Settings →
+Performance) is raised; the glass keeps to whatever it draws. It's true glass
+that still shows up in screenshots. The see-through dock leaves itself out of screen captures,
 because a capture of the screen behind it would otherwise contain the dock.
 Live glass never captures the screen. It captures the desktop window itself,
 which holds the wallpaper and the icons but no other window, the cards
@@ -642,23 +643,47 @@ the capture fails part-way.
   average changes or any one part of it changes clearly, so a light drifting
   across one corner counts and a scatter of sparkles doesn't. Cards with
   nothing new behind them aren't touched.
-- **Bent ahead.** Each moving card's liquid glass is bent on the background
-  thread, on the coarser grid a card uses while it's dragged. The card's
-  repaint is then only drawing. Once the wallpaper rests, each card is bent in
-  full and fades into it. Frosted cards get a freshly blurred slice instead.
+- **Bent on the graphics card.** The frame is already there, so the liquid
+  glass is made there too (`gpuglass.py`): three compute shaders halve and
+  frost the box round the cards' patches once a frame, then bend each card's
+  pane from it, with `lens.py`'s own field. The panes are bent side by side
+  into one texture and come back in one read: about a quarter of a millisecond
+  of CPU a frame for six cards, where bending one on the CPU took 4 to 6 ms.
+  They match the CPU's bend to within a level. Only a pane that came out
+  different is handed on, so a card over a still corner isn't repainted. No
+  package is needed: the shaders are compiled by `d3dcompiler_47`, part of
+  Windows. Where Direct3D 11 can't be had, the CPU bends as below.
+- **Bent ahead.** Without the graphics card, each moving card's liquid glass is
+  bent on the background thread, on the coarser grid a card uses while it's
+  dragged, and the card's repaint is then only drawing. Once the wallpaper
+  rests, each card is bent in full and fades into it. Frosted cards get a
+  freshly blurred slice instead.
 - **No fades between frames.** They follow each other too quickly.
-- **Paced.** Never more than 40 frames a second, and never building more than
-  half the time. While nothing is drawn, asking for a frame costs next to
-  nothing. Nothing at all while a full-screen window has the focus.
+- **Paced.** Never more than 60 frames a second, and never building more than
+  half the time. Nothing says a frame has come, so it's asked for just before
+  the next is due at the wallpaper's own pace, learnt from the frames' own
+  times, then every millisecond until it comes: each frame is taken a
+  millisecond or so after it arrives, asking two or three times a frame. The
+  waits keep to the millisecond. Python's `Event.wait` rounds a short one up
+  to Windows' 15.6 ms clock ticks, which had held live glass to about 32
+  frames a second whatever the wallpaper drew. While nothing is drawn, asking
+  costs next to nothing. Nothing at all while a full-screen window has the
+  focus.
+- **Whole looks beside the frames.** Every 3 s of motion the whole frame is
+  taken for the blurred copy and the glass behind no card. Building that takes
+  about 30 ms, two frames at 60 a second, so while the graphics card bends the
+  cards it's built on a thread of its own and the cards' frames go on.
 - **Cheaper repaints.** Each card's shadow is drawn once a size and kept;
   its nine curves were half of a plain card's repaint. The weather card's
   icons are built once each too. A plain card now repaints in about 0.6 ms,
   the weather card in 1.4.
 
-Measured on a Ryzen 5 5600G with a 3000×1920 desk and Wallpaper Engine at 25
-frames a second, moving behind six cards: the background thread takes about a
-third of one core, and the six cards' repaints about another tenth. Fewer or
-smaller cards cost less, and a wallpaper that rests costs almost nothing.
+Measured on a Ryzen 5 5600G with a 3000×1920 desk and Wallpaper Engine at
+about 30 frames a second, moving behind six cards, with the glass bent on the
+graphics card: the background thread took about a tenth of one core, before
+the cards shared one frost, and the six cards' repaints about another tenth.
+On the CPU it was a third of a core at 25 frames. Fewer or smaller cards cost
+less, and a wallpaper that rests costs almost nothing.
 
 Desktop icons behind a card show through its glass, as they would through
 glass. Shown over apps (see [Layers](#layers)), the cards keep showing the
@@ -863,7 +888,12 @@ glass check reads patches back from a GDI bitmap, then follows frames behind
 two cards: one that moved goes straight in, bent ahead, while the other is left
 alone; at rest it's bent in full; a hidden card is skipped; frames from Windows'
 capture are read the same way, the first taken whole; the kept shadow is the
-shadow; and no card is ever left out of screen captures. The TLS check reads what the board's
+shadow; and no card is ever left out of screen captures. The GPU glass check
+bends cards on the graphics card (or Windows' software one) and compares them
+with the CPU's bend, and six cards bent together with each bent alone. It runs
+the frame pacing on a simulated clock against 60 and 26 frames-a-second
+wallpapers, times the short waits, and checks that a whole look along the way
+is built beside the cards' frames rather than in their way. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 
