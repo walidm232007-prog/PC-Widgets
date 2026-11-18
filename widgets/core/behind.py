@@ -463,6 +463,17 @@ class LiveGlass:
         return self.base.generation if patch is None else ("live", self.base.generation,
                                                            patch.generation)
 
+    def changed_since(self, generation, rect) -> bool:
+        """GlassBackdrop.changed_since, for the dock: where the capture holds
+        the rect, only a new capture changes it; elsewhere the wallpaper's
+        glass decides."""
+        patch = self.behind.patch
+        if patch is not None and patch.holds(*rect):
+            return not (isinstance(generation, tuple) and generation[2] == patch.generation)
+        if not isinstance(generation, int):
+            return True                    # drawn from a capture that's gone
+        return self.base.changed_since(generation, rect)
+
     def bend(self, sx, sy, w, h, radius, step=None):
         patch = self._patch(sx, sy, w, h)
         if patch is None or patch.planes is None:

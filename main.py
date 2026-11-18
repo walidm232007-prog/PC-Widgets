@@ -169,6 +169,7 @@ def selftest() -> int:
     _check_liquid_glass(pal_mod.build("dark", "blue"))
     _check_glass_settings(pal_mod.build("dark", "blue"))
     _check_live_wallpaper()
+    _check_smooth_glass(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -1254,7 +1255,7 @@ def _check_live_wallpaper() -> None:
     tmp = tempfile.mkdtemp(prefix="pcwidgets-live-")
     stand = {"layer": 0, "frame": frame((220, 30, 40)), "full": None, "grabs": 0}
 
-    def grab(layer):
+    def grab(layer, keep=False):
         stand["grabs"] += 1
         return (stand["frame"], (0, 0)) if layer == stand["layer"] else None
 
@@ -1361,12 +1362,14 @@ def _check_live_wallpaper() -> None:
             assert until(lambda: g.ready and bends(g, RED)), (
                 "back to liquid, the live frame wasn't bent again")
 
-        # It quits: the files' glass comes back and the thread ends.
+        # It quits: the files' glass comes back - blurred and clear copies
+        # together, once the clear one is built - and the thread ends.
         stand["layer"] = 0
         assert g.check_live(), "the glass didn't go back to the files"
-        assert not g.live and not g.showing_live and shows(g.image, GREEN)
-        assert g.wait_clear() == liquid and (not liquid or bends(g, GREEN)), (
-            "the files' clear copy wasn't built again")
+        assert not g.live and not g.showing_live
+        assert g.wait_clear() == liquid and shows(g.image, GREEN), (
+            "the files' glass wasn't built again")
+        assert not liquid or bends(g, GREEN), "the files' clear copy wasn't built again"
         assert until(lambda: not following()), "the live wallpaper's thread didn't end"
     finally:
         g.stop_live()
@@ -1388,6 +1391,196 @@ def _check_live_wallpaper() -> None:
     print(f"  live wallpaper: followed into both copies, unchanged and black frames skipped, "
           f"nothing grabbed under a full-screen window, back to the files when it quits; "
           f"{here}")
+
+
+def _check_smooth_glass(pal) -> None:
+    """Glass changes reach only the cards they are behind, and fade in.
+
+    A live wallpaper moving behind one card rebuilds the glass behind that
+    card alone - the clear copy patched there, coming out as building it whole
+    would - and the other card keeps its bend and doesn't fade. Motion behind
+    no card builds nothing. A card whose glass changes fades from the old
+    slice to the new; one being moved switches. A new wallpaper lands whole,
+    the old glass kept meanwhile, so liquid cards never go frosted in between.
+    And a live wallpaper's first frame is built before anything is drawn.
+    """
+    import tempfile
+    import threading
+
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    try:
+        import numpy as np
+    except ImportError:
+        print("  smooth glass: no numpy, so no liquid glass to patch (skipped)")
+        return
+
+    from widgets.core import glass as glass_mod
+    from widgets.core import livewall, winapi
+    from widgets.core.board import REGISTRY
+    from widgets.core.card import MARGIN
+    from widgets.core.displays import Display
+    from widgets.core.glass import FROSTS, GlassBackdrop
+
+    W, H = 800, 400
+    LAYER = 0x5150
+    stand = {"frame": None}
+    saved = (livewall.find_layer, livewall.alive, livewall.grab, winapi.fullscreen_monitor,
+             winapi.virtual_screen, winapi.desktop_colour, glass_mod.LIVE_EVERY)
+    livewall.find_layer = lambda: LAYER
+    livewall.alive = lambda layer: layer == LAYER
+    livewall.grab = lambda layer, keep=False: (stand["frame"], (0, 0))
+    winapi.fullscreen_monitor = lambda: None
+    winapi.virtual_screen = lambda: (0, 0, W, H)
+    winapi.desktop_colour = lambda: (0, 0, 0)
+    glass_mod.LIVE_EVERY = 0.05
+
+    RED, GREEN, BLUE, GREY = (220, 30, 40), (40, 170, 60), (30, 60, 220), (90, 90, 90)
+    m = int(MARGIN)
+    card_a = REGISTRY["clock"](pal, "small", {})
+    card_b = REGISTRY["clock"](pal, "small", {})
+    card_a.move(60 - m, 60 - m)
+    card_b.move(500 - m, 100 - m)
+    ra, rb = card_a.card_rect(), card_b.card_rect()
+    A = (60, 60, int(ra.width()), int(ra.height()))
+    B = (500, 100, int(rb.width()), int(rb.height()))
+
+    def scene(a, b, extra=False) -> QImage:
+        img = QImage(W, H, QImage.Format_RGB32)
+        img.fill(QColor(*GREY))
+        p = QPainter(img)
+        p.fillRect(0, 0, 40, 40, QColor("#ffffff"))        # so it isn't one flat colour
+        for (x, y, w, h), rgb in ((A, a), (B, b)):
+            p.fillRect(x - 30, y - 30, w + 60, h + 60, QColor(*rgb))
+        if extra:
+            p.fillRect(300, 250, 120, 80, QColor("#ffffff"))   # behind neither card
+        p.end()
+        return img
+
+    def colour(img: QImage, x: int, y: int):
+        c = img.pixelColor(x, y)
+        return c.red(), c.green(), c.blue()
+
+    def near(rgb, want, tol=20) -> bool:
+        return all(abs(a - b) <= tol for a, b in zip(rgb, want))
+
+    def glass_of(card) -> tuple:
+        """What the card's glass alone shows at its middle, fade and all."""
+        buf = QImage(card.size(), QImage.Format_ARGB32_Premultiplied)
+        buf.fill(QColor(0, 0, 0, 0))
+        p = QPainter(buf)
+        card._paint_glass(p, card.card_rect())
+        p.end()
+        return colour(buf, card.width() // 2, card.height() // 2)
+
+    frost = FROSTS["light"]
+    tmp = tempfile.mkdtemp(prefix="pcwidgets-smooth-")
+    g = GlassBackdrop()
+    try:
+        # A live wallpaper behind both cards; then it moves behind A only.
+        g.regions = (A, B)
+        job, _wake = g._prepare_live(LAYER)
+        stand["frame"] = scene(RED, BLUE)
+        assert g._live_once(LAYER, job) == (True, False), "the first frame wasn't built"
+        for card in (card_a, card_b):
+            card.glass = g
+        first_a, first_b = glass_of(card_a), glass_of(card_b)
+        assert near(first_a, RED) and near(first_b, BLUE), (first_a, first_b)
+        bent_b, gen = card_b._bent[1], g.generation
+        before = g.clear.copy()
+
+        stand["frame"] = scene(GREEN, BLUE)
+        assert g._live_once(LAYER, job) == (True, False), "a change behind a card wasn't built"
+        assert g.changed_since(gen, A) and not g.changed_since(gen, B), (
+            "the change behind one card reached the other")
+        whole = GlassBackdrop._planes(stand["frame"], (0, 0, W, H), frost)[0]
+        ax, ay, aw, ah = (v // 2 for v in A)
+        bx, by, bw, bh = (v // 2 for v in B)
+        patched = int(np.abs(g.clear[:, ay:ay + ah, ax:ax + aw].astype(int)
+                             - whole[:, ay:ay + ah, ax:ax + aw]).max())
+        assert patched <= 1, f"the patched glass differs from a whole build by {patched}"
+        assert np.array_equal(g.clear[:, by:by + bh, bx:bx + bw], before[:, by:by + bh, bx:bx + bw]), (
+            "the glass behind the card that didn't change was rebuilt")
+        assert card_a.glass_stale() and not card_b.glass_stale(), (
+            "the board would repaint the wrong card")
+
+        # A fades from red to green; B keeps its bend and doesn't fade.
+        start_a = glass_of(card_a)
+        assert card_a._pane_from is not None and card_a._glass_fade.active, "A didn't start a fade"
+        assert near(start_a, RED), f"A's fade didn't start from the old glass: {start_a}"
+        card_a._glass_fade._elapsed = card_a._glass_fade._duration / 2
+        card_a._glass_fade._advance()
+        mid_a = glass_of(card_a)
+        assert mid_a[1] > RED[1] + 30 and mid_a[0] < RED[0] - 30, f"A's fade isn't halfway: {mid_a}"
+        card_a._glass_fade.finish()
+        assert near(glass_of(card_a), GREEN), "A's fade didn't end on the new glass"
+        glass_of(card_b)
+        assert card_b._bent[1] is bent_b and card_b._pane_from is None, (
+            "B was bent again or faded with nothing new behind it")
+
+        # Motion behind neither card builds nothing; the same frame neither.
+        gen = g.generation
+        stand["frame"] = scene(GREEN, BLUE, extra=True)
+        assert g._live_once(LAYER, job) == (False, False) and g.generation == gen, (
+            "motion behind no card rebuilt the glass")
+        assert g._live_once(LAYER, job) == (False, False), "the same frame was built again"
+
+        # A card being moved switches rather than fading.
+        g._wake_live()
+        stand["frame"] = scene(BLUE, BLUE)
+        g._live_once(LAYER, job)
+        card_a.move(card_a.x() + 6, card_a.y())
+        glass_of(card_a)
+        assert card_a._pane_from is None, "a moved card faded from glass that was somewhere else"
+        g.stop_live()
+
+        # A new wallpaper lands whole, blurred and clear together: the old
+        # glass stays meanwhile, still liquid, never frosted in between.
+        files = Display("A", "A", (0, 0, W, H), (0, 0, W, H), True)
+        pictures = {}
+        for name, rgb in (("one", RED), ("two", GREEN)):
+            pictures[name] = os.path.join(tmp, name + ".png")
+            scene(rgb, rgb).save(pictures[name])
+        f = GlassBackdrop()
+        f._read = lambda: (("files", "one"), winapi.WALL_STRETCH, [(files, pictures["one"])])
+        assert f.refresh() and f.wait_clear() and near(colour(f.image, 150, 150), RED)
+        gate = threading.Event()
+        build = GlassBackdrop.compose_clear
+
+        def held(*args):
+            gate.wait(10)
+            return build(*args)
+
+        f.compose_clear = held
+        old_image, old_clear = f.image, f.clear
+        f._read = lambda: (("files", "two"), winapi.WALL_STRETCH, [(files, pictures["two"])])
+        assert f.refresh(), "a new wallpaper wasn't noticed"
+        assert f.image is old_image and f.clear is old_clear and f.ready, (
+            "the old glass didn't stay while the new clear copy was built")
+        gate.set()
+        assert f.wait_clear() and near(colour(f.image, 150, 150), GREEN), (
+            "the new wallpaper's glass didn't land")
+        assert f.clear is not old_clear
+
+        # The first frame of a live wallpaper is there as soon as asked for.
+        s = GlassBackdrop()
+        stand["frame"] = scene(BLUE, BLUE)
+        assert not s.check_live(now=True)
+        assert s.showing_live and near(colour(s.image, 150, 150), BLUE), (
+            "the first live frame wasn't built straight away")
+        assert not s.refresh(), "the files' glass was built over the first live frame"
+        s.stop_live()
+    finally:
+        g.stop_live()
+        (livewall.find_layer, livewall.alive, livewall.grab, winapi.fullscreen_monitor,
+         winapi.virtual_screen, winapi.desktop_colour, glass_mod.LIVE_EVERY) = saved
+        for card in (card_a, card_b):
+            card.close()
+            card.deleteLater()
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"  smooth glass: a change behind one card rebuilds only its glass (patch within "
+          f"{patched} of a whole build) and only it fades; motion behind no card builds nothing; "
+          f"a new wallpaper lands whole with no frosted gap; the first live frame is built at once")
 
 
 def _check_layout_mirror() -> None:

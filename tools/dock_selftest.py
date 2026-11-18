@@ -847,6 +847,85 @@ def check_cover_fade(app, out, board):
           "decoded again doesn't restart it, a late cover fades in, and the dock ends on it")
 
 
+def check_glass_fade(app, out, board):
+    """The dock fades into new glass as the cards do: a change behind it
+    dissolves the old dock into the new over GLASS_FADE_MS - added, not laid
+    over, so its see-through edges don't thicken - and a change elsewhere on
+    the desk (a live wallpaper moving behind a card) leaves it alone, not even
+    redrawn."""
+    import numpy as np
+    from widgets.core.card import GLASS_FADE_MS
+
+    g = board.glass
+    saved = (g.image, g.origin, g.clear, g.clear_origin)
+    vl, vt, vr, vb = winapi.virtual_screen()
+
+    def glass(rgb, regions=None):
+        img = QImage(vr - vl, vb - vt, QImage.Format_RGB32)
+        img.fill(QColor(*rgb))
+        planes = np.empty((3, (vb - vt) // 2, (vr - vl) // 2), np.uint8)
+        for i in range(3):
+            planes[i] = rgb[i]
+        with g._lock:
+            g.image, g.origin, g.clear, g.clear_origin = img, (vl, vt), planes, (vl, vt)
+            g._bump(regions)
+        board.glass_changed.emit()
+
+    def tone():
+        """The dock's glass, as the mean red and blue across its capsule."""
+        img = dock.grab().toImage()
+        c = dock._capsule
+        reds, blues = [], []
+        for y in range(int(c.top()) + 4, int(c.bottom()) - 4, 4):
+            for x in range(int(c.left()) + 8, int(c.right()) - 8, 6):
+                px = img.pixelColor(x, y)
+                reds.append(px.red())
+                blues.append(px.blue())
+        return sum(reds) / len(reds), sum(blues) / len(blues)
+
+    board.palette = palette.build("dark")
+    board.state.dock_style = "glass"
+    dock = GlassDock(board, preview=True)
+    dock._snap = fake_snapshot()
+    dock.sync()
+    dock.resize(1000, 64)
+    try:
+        glass((220, 30, 40))
+        dock.invalidate()
+        red = tone()
+        assert red[0] > red[1] + 20, f"the dock doesn't show red glass: {red}"
+        assert not dock._glass_fade.active, "the dock faded with nothing drawn before"
+        glass((30, 60, 220))
+        assert dock._glass_fade.active and dock._glass_from is not None, (
+            "new glass behind the dock didn't start a fade")
+        start = tone()
+        assert abs(start[0] - red[0]) < 12 and abs(start[1] - red[1]) < 12, (
+            f"the fade didn't start from the old glass: {start} vs {red}")
+        end_at = time.monotonic() + GLASS_FADE_MS / 1000 * 0.5
+        while time.monotonic() < end_at:
+            app.processEvents()
+            time.sleep(0.005)
+        mid = tone()
+        pump(app, GLASS_FADE_MS / 1000 + 0.15)
+        end = tone()
+        assert not dock._glass_fade.active and end[1] > end[0] + 20, f"didn't end on blue: {end}"
+        assert red[0] > mid[0] > end[0] and red[1] < mid[1] < end[1], (
+            f"no dissolve halfway: red {red}, mid {mid}, blue {end}")
+        before = dock._static
+        glass((240, 240, 240), regions=[(vr + 500, vb + 500, 50, 50)])
+        assert dock._static is before and not dock._glass_fade.active, (
+            "a change behind no part of the dock redrew or faded it")
+    finally:
+        dock.close()
+        with g._lock:
+            g.image, g.origin, g.clear, g.clear_origin = saved
+            g._bump()
+        board.glass_changed.emit()
+    print(f"PASS: the dock fades into new glass over {GLASS_FADE_MS:.0f} ms (red {red[0]:.0f}/"
+          f"{red[1]:.0f}, halfway {mid[0]:.0f}/{mid[1]:.0f}, blue {end[0]:.0f}/{end[1]:.0f}), "
+          "and a change behind none of it leaves it alone")
+
+
 def check_pictures():
     """The shell's pictures come out the right way up, with their transparency."""
     img = shell.shell_image(NOTEPAD, 32)
@@ -1642,6 +1721,7 @@ def main():
     check_liquid(app, out)
     check_see_through(app, out)
     check_cover_fade(app, out, board)
+    check_glass_fade(app, out, board)
     check_rows(board)
     check_native()
     check_start_host()

@@ -16,8 +16,8 @@ is ``Progman > WorkerW > WPEDesktopDX11Window "WPELiveWallpaper"``.
 DirectX content and all: the live wallpaper where it draws, and Windows' own
 wallpaper on any monitor it leaves alone - never the icons, which live in a
 sibling, nor any window, the cards included. Nothing is shown and nothing
-moves. A grab of a 3000x1920 desktop takes about 55 ms on a Ryzen 5 5600G,
-most of it waiting on the compositor.
+moves. A grab of a 3000x1920 desktop takes about 40 ms on a Ryzen 5 5600G,
+14 ms of it CPU, the rest waiting on the compositor.
 
 The grab asks the app's window to draw itself, so a hung wallpaper app would
 hang the caller: glass.py only grabs from a thread of its own.
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ctypes as C
 import ctypes.wintypes as W
+import threading
 from typing import Optional, Tuple
 
 from PySide6.QtGui import QImage
@@ -110,45 +111,75 @@ def alive(layer: int) -> bool:
     return bool(layer) and bool(u.IsWindow(layer)) and bool(u.IsWindowVisible(layer))
 
 
-def grab(hwnd: int) -> Optional[Tuple[QImage, Tuple[int, int]]]:
+_kept = threading.local()        # a grabbing thread's bitmap and image, between grabs
+
+
+def grab(hwnd: int, keep: bool = False) -> Optional[Tuple[QImage, Tuple[int, int]]]:
     """The window as it draws itself, offscreen: (image, its top-left on the
-    virtual screen), or None if it wouldn't draw."""
+    virtual screen), or None if it wouldn't draw. The image is Format_BGR888,
+    as read_bitmap leaves it.
+
+    ``keep``, for a thread that grabs over and over: its bitmap and image are
+    kept for its next grab of the same size rather than made afresh, which
+    took a 3000x1920 grab from 52 ms and 23 ms of CPU to about 39 and 14. That
+    next grab then overwrites the image, so copy what must outlast it, and
+    call release() when done grabbing."""
     r = W.RECT()
     if not u.GetWindowRect(hwnd, C.byref(r)):
         return None
     w, h = r.right - r.left, r.bottom - r.top
     if w <= 0 or h <= 0:
         return None
-    screen = u.GetDC(None)
-    dc = g.CreateCompatibleDC(screen)
-    bmp = g.CreateCompatibleBitmap(screen, w, h)
+    parts = getattr(_kept, "parts", None) if keep else None
+    if parts is not None and parts[0] != (w, h):
+        release()
+        parts = None
+    if parts is None:
+        screen = u.GetDC(None)
+        try:
+            dc = g.CreateCompatibleDC(screen)
+            bmp = g.CreateCompatibleBitmap(screen, w, h)
+        finally:
+            u.ReleaseDC(None, screen)
+        parts = ((w, h), dc, bmp, QImage(w, h, QImage.Format_BGR888))
+        if keep:
+            _kept.parts = parts
+    _size, dc, bmp, img = parts
     try:
         old = g.SelectObject(dc, bmp)
         drawn = u.PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)
         g.SelectObject(dc, old)            # GetDIBits reads a bitmap no DC holds
-        if not drawn:
+        if not drawn or read_bitmap(dc, bmp, w, h, into=img) is None:
             return None
-        img = read_bitmap(dc, bmp, w, h)
-        return (img, (r.left, r.top)) if img is not None else None
+        return img, (r.left, r.top)
     finally:
-        g.DeleteObject(bmp)
-        g.DeleteDC(dc)
-        u.ReleaseDC(None, screen)
+        if not keep:
+            g.DeleteObject(bmp)
+            g.DeleteDC(dc)
 
 
-def read_bitmap(dc: int, bmp: int, w: int, h: int) -> Optional[QImage]:
-    """A GDI bitmap's pixels as an opaque QImage. Read back as 24-bit,
-    top-down - blue, green, red, rows padded to 4 bytes, which is the layout of
-    a Format_BGR888 QImage. 32-bit would leave the alpha byte at 0, and the
-    glass built from that would come out clear."""
-    img = QImage(w, h, QImage.Format_BGR888)
+def release() -> None:
+    """Free the bitmap the calling thread kept with grab(keep=True)."""
+    parts = getattr(_kept, "parts", None)
+    if parts is not None:
+        _kept.parts = None
+        g.DeleteObject(parts[2])
+        g.DeleteDC(parts[1])
+
+
+def read_bitmap(dc: int, bmp: int, w: int, h: int,
+                into: Optional[QImage] = None) -> Optional[QImage]:
+    """A GDI bitmap's pixels as an opaque QImage, Format_BGR888: read back as
+    24-bit, top-down - blue, green, red, rows padded to 4 bytes - which is that
+    format's layout exactly. 32-bit would leave the alpha byte at 0, and the
+    glass built from that would come out clear. Read into ``into``, a BGR888
+    image of the size, when given."""
+    img = into if into is not None else QImage(w, h, QImage.Format_BGR888)
     info = _BITMAPINFOHEADER(C.sizeof(_BITMAPINFOHEADER), w, -h, 1, 24, 0, 0, 0, 0, 0, 0)
     buf = (C.c_ubyte * (img.bytesPerLine() * h)).from_buffer(img.bits())
     lines = g.GetDIBits(dc, bmp, 0, h, buf, C.byref(info), 0)
     del buf
-    if lines != h:
-        return None
-    return img.convertToFormat(QImage.Format_RGB32)
+    return img if lines == h else None
 
 
 def fingerprint(img: QImage) -> bytes:

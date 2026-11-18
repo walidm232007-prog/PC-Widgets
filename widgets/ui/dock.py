@@ -26,7 +26,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinear
 from PySide6.QtWidgets import QApplication, QColorDialog, QFileDialog, QMenu, QToolTip, QWidget
 
 from ..core import audio, behind, dock_shell as shell, media, palette, typography, winapi
-from ..core.card import Fader, squircle
+from ..core.card import GLASS_FADE_MS, Fader, squircle
 from ..core.frameclock import Ticker, Tween, clock
 from ..core.store import _log, report
 from .theme import paint_shadow
@@ -336,6 +336,12 @@ def _paint_liquid(p, cap, radius, glass, area, x, y, owner, coarse):
     bw = -(-w // 16) * 16 if coarse else w
     key = (id(glass), glass.generation, sx, sy, bw, h, radius, coarse)
     kept = getattr(owner, "_liquid", None)
+    if kept is not None and kept[0] != key and kept[0][0] == key[0] and kept[0][2:] == key[2:]:
+        # The glass changed somewhere else - a live wallpaper moving behind a
+        # card, say: the same bend, still true here.
+        changed = getattr(glass, "changed_since", None)
+        if changed is not None and not changed(kept[0][1], (sx, sy, bw, h)):
+            kept = owner._liquid = (key, kept[1])
     if kept is None or kept[0] != key:
         img = glass.bend(sx, sy, bw, h, radius, step=DRAG_STEP if coarse else None)
         if img is None:
@@ -723,6 +729,13 @@ class GlassDock(QWidget):
         self._art_fade.finish()       # nothing to fade into on the first paint
         self._static_fade = 1.0       # the fade's value the cached image was drawn at
         self._static = None           # everything but the bars, until something changes
+        # When the glass behind the dock changes, the dock as it was drawn
+        # before is kept and faded out as the new one fades in, the way the
+        # cards fade their glass.
+        self._glass_seen = None       # the glass's generation the dock was drawn at
+        self._glass_from = None
+        self._glass_fade = Fader(_Repaint(self), fps=None)
+        self._glass_fade.finish()
         self._pal = None
         self._fonts = None
         self._hover = ""
@@ -770,7 +783,7 @@ class GlassDock(QWidget):
         self._soon.timeout.connect(self._poke)
         self.track_ready.connect(self._on_track)
         board.prefs_changed.connect(self.sync)
-        board.glass_changed.connect(self.invalidate)
+        board.glass_changed.connect(self._glass_changed)
         board.displays_changed.connect(lambda: QTimer.singleShot(0, self._refresh))
         board.displays_changed.connect(clock().displays_changed)   # a new main display or rate
         QApplication.instance().aboutToQuit.connect(self.shutdown)
@@ -781,6 +794,20 @@ class GlassDock(QWidget):
         self._static = None
         self._neon_img = None
         self.update()
+
+    def _glass_changed(self):
+        """The board's glass changed. Drawn again only if what lies behind the
+        dock did - a live wallpaper moving behind a card leaves it alone - and
+        then faded into rather than switched."""
+        seen = self._glass_seen
+        if (seen is not None and self._static is not None
+                and not self._through.changed_since(seen, (self.x(), self.y(), self.width(), self.height()))):
+            self._glass_seen = self._through.generation
+            return
+        if self._static is not None and self.board.state.dock_style == "glass":
+            self._glass_from = self._static
+            self._glass_fade.start(GLASS_FADE_MS)
+        self.invalidate()
 
     def sync(self):
         if self.preview:
@@ -1467,7 +1494,21 @@ class GlassDock(QWidget):
             self._static_fade = fade
             self._static = self._render()
         p = QPainter(self)
-        p.drawPixmap(0, 0, self._static)
+        old = self._glass_from
+        if old is not None and self._glass_fade.value < 1.0 and old.size() == self._static.size():
+            # Added rather than laid over: the old at 1 - t plus the new at t
+            # is the blend everywhere, the see-through shadow and edges too.
+            t = self._glass_fade.value
+            p.setCompositionMode(QPainter.CompositionMode_Plus)
+            p.setOpacity(1.0 - t)
+            p.drawPixmap(0, 0, old)
+            p.setOpacity(t)
+            p.drawPixmap(0, 0, self._static)
+            p.setOpacity(1.0)
+            p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        else:
+            self._glass_from = None
+            p.drawPixmap(0, 0, self._static)
         neon = self._neon_frame()
         if neon is not None:
             p.drawImage(0, 0, neon)
@@ -1488,6 +1529,7 @@ class GlassDock(QWidget):
         dpm = round(self.logicalDpiX() / 0.0254)
         img.setDotsPerMeterX(dpm)
         img.setDotsPerMeterY(dpm)
+        self._glass_seen = self._through.generation
         self._pal, tint = self._palette()
         p = QPainter(img)
         p.setRenderHint(QPainter.Antialiasing)

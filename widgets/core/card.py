@@ -79,6 +79,12 @@ SHADOW_ALPHA = 34
 DRAG_STEP = 4
 BEND_BUDGET_MS = 12.0
 
+# When the glass behind a card sitting still changes - a new wallpaper, a live
+# one moving, the clear copy landing, a Glass setting - the card fades from the
+# old glass to the new over this long instead of switching. The tint and the
+# content are drawn over it as ever, so only the glass fades.
+GLASS_FADE_MS = 400.0
+
 
 # --------------------------------------------------------------------------- #
 #  Quiet mode
@@ -412,6 +418,17 @@ class WidgetCard(QWidget):
         self.glass = None                # a shared GlassBackdrop, set by Board
         self.glass_tint = 112            # alpha of the tint over the blur
         self._bent = None                # (key, image): the liquid glass, kept
+        # The glass as last drawn - (what it shows, image, source rect or None
+        # for all of it) - where, at which generation of the glass, and the
+        # pane a change is fading from.
+        self._pane = None
+        self._pane_at: Optional[Tuple[int, int, int, int]] = None
+        self._pane_gen = None
+        self._pane_from = None
+        self._frost_gen = None           # frosted: the generation last looked at...
+        self._frost_what = None          # ...and the one the slice last changed at
+        self._glass_fade = Fader(self)
+        self._glass_fade.finish()        # nothing to fade from on the first paint
         self._drag_ms = 0.0              # what bending it at a step of a drag costs
         self._drag_from: Optional[QPoint] = None
         self._target: Optional[Tuple[int, int]] = None   # window pos the outline shows
@@ -742,9 +759,7 @@ class WidgetCard(QWidget):
             if not self.solid_bg and self.glass is not None:
                 p.save()
                 p.setClipPath(path)
-                liquid = self._paint_liquid(p, r)
-                frosted = liquid or self.glass.paint_into(
-                    p, r, self.x() + int(MARGIN), self.y() + int(MARGIN))
+                liquid, frosted = self._paint_glass(p, r)
                 p.restore()
 
             fill = QColor(pal.card)
@@ -818,39 +833,131 @@ class WidgetCard(QWidget):
         under the content. Nothing by default; the weather faces use it for
         Apple's sky-coloured background. Skipped when a picture fills the card."""
 
-    def _paint_liquid(self, p: QPainter, r: QRectF) -> bool:
-        """Paint the card's slice of desktop through liquid glass (lens.py).
+    def _paint_glass(self, p: QPainter, r: QRectF) -> Tuple[bool, bool]:
+        """Paint the card's slice of desktop: through liquid glass when it can
+        be bent, frosted otherwise. Returns (liquid, drawn); not drawn, the
+        card is off the desktop and gets a solid fill instead.
 
-        The bend is kept until the card moves, changes size or the wallpaper
-        changes, so a card sitting still costs nothing to repaint - the clock
-        ticking redraws the kept image, as it redrew the frosted slice.
-
-        Returns False to fall back to frosted glass: while the clear copy of
-        the desktop is still being built (it's done on a thread), without
-        numpy, or on a PC too slow to bend at every step of a drag.
-        """
+        When that slice changes under a card sitting still, the card fades
+        from the old one to the new over GLASS_FADE_MS rather than switching.
+        A card being moved or resized switches: there's no old slice of the
+        same place to fade from."""
         g = self.glass
-        if not getattr(g, "ready", False):
-            return False
         sx, sy = self.x() + int(MARGIN), self.y() + int(MARGIN)
         w, h = int(round(r.width())), int(round(r.height()))
         moving = self._drag_from is not None or self._gliding
+        pane = self._liquid_pane(g, sx, sy, w, h, moving)
+        liquid = pane is not None
+        if pane is None:
+            pane = self._frosted_pane(g, sx, sy, w, h)
+        if pane is None:
+            self._pane = self._pane_from = None
+            return False, False
+        at = (sx, sy, w, h)
+        last = self._pane
+        if last is not None and last[0] != pane[0]:
+            if self._pane_at == at and not moving:
+                self._pane_from = last
+                self._glass_fade.start(GLASS_FADE_MS)
+            else:
+                self._pane_from = None
+                self._glass_fade.finish()
+        self._pane, self._pane_at, self._pane_gen = pane, at, g.generation
+        # Bent glass is worked out on a coarser grid than the screen's
+        # (lens.STEP) and drawn scaled up, smoothly - paint_card sets
+        # SmoothPixmapTransform. Frosted glass is a slice of the blurred desk.
+        target = QRectF(r.left(), r.top(), w, h)
+        if self._pane_from is not None and self._glass_fade.value < 1.0:
+            self._draw_pane(p, target, self._pane_from)
+            opacity = p.opacity()
+            p.setOpacity(opacity * self._glass_fade.value)
+            self._draw_pane(p, target, pane)
+            p.setOpacity(opacity)
+        else:
+            self._pane_from = None
+            self._draw_pane(p, target, pane)
+        return liquid, True
+
+    def _paint_liquid(self, p: QPainter, r: QRectF) -> bool:
+        """The liquid glass alone, without a fade: True if it could be bent.
+        The self-test's way in to the bending."""
+        sx, sy = self.x() + int(MARGIN), self.y() + int(MARGIN)
+        w, h = int(round(r.width())), int(round(r.height()))
+        moving = self._drag_from is not None or self._gliding
+        pane = self._liquid_pane(self.glass, sx, sy, w, h, moving)
+        if pane is None:
+            return False
+        self._draw_pane(p, QRectF(r.left(), r.top(), w, h), pane)
+        return True
+
+    @staticmethod
+    def _draw_pane(p: QPainter, target: QRectF, pane) -> None:
+        if pane[2] is None:
+            p.drawImage(target, pane[1])
+        else:
+            p.drawImage(target, pane[1], pane[2])
+
+    def _liquid_pane(self, g, sx: int, sy: int, w: int, h: int, moving: bool):
+        """The card's slice of desktop through liquid glass (lens.py), as a
+        pane for _paint_glass, or None for frosted glass: while the clear copy
+        of the desktop is still being built (it's done on a thread), without
+        numpy, or on a PC too slow to bend at every step of a drag.
+
+        The bend is kept until the card moves, changes size or the glass
+        behind it changes, so a card sitting still costs nothing to repaint -
+        the clock ticking redraws the kept image. A change somewhere else on
+        the desk (a live wallpaper moving behind another card) keeps it too."""
+        if not getattr(g, "ready", False):
+            return None
         key = (id(g), g.generation, sx, sy, w, h, moving)
         kept = self._bent
+        if kept is not None and kept[0] != key and kept[0][0] == key[0] and kept[0][2:] == key[2:]:
+            changed = getattr(g, "changed_since", None)
+            if changed is not None and not changed(kept[0][1], (sx, sy, w, h)):
+                kept = self._bent = (key, kept[1])
         if kept is None or kept[0] != key:
             if moving and self._drag_ms > BEND_BUDGET_MS:
-                return False
+                return None
             img = g.bend(sx, sy, w, h, RADIUS, step=DRAG_STEP if moving else None)
             if img is None:
-                return False
+                return None
             # What a step of a drag costs: measured on one, or - from a bend at
             # rest, on a grid with four times the points - about a quarter.
             self._drag_ms = g.last_bend_ms if moving else g.last_bend_ms / 4.0
             kept = self._bent = (key, img)
-        # Bent on a coarser grid than the screen's (lens.STEP); drawn scaled
-        # up, smoothly - paint_card sets SmoothPixmapTransform.
-        p.drawImage(QRectF(r.left(), r.top(), w, h), kept[1])
-        return True
+        return (("liquid", id(kept[1])), kept[1], None)
+
+    def _frosted_pane(self, g, sx: int, sy: int, w: int, h: int):
+        """The card's slice of the blurred desk, as a pane for _paint_glass,
+        or None off the desk. It counts as changed only when the glass behind
+        the card did, so a live wallpaper moving elsewhere fades nothing."""
+        image = g.image
+        if image is None:
+            return None
+        ox, oy = g.origin
+        src = QRect(int(sx - ox), int(sy - oy), int(w), int(h))
+        if not src.intersects(image.rect()):
+            return None
+        gen = g.generation
+        if self._frost_gen != gen:
+            changed = getattr(g, "changed_since", None)
+            if self._frost_gen is None or changed is None or changed(self._frost_gen, (sx, sy, w, h)):
+                self._frost_what = gen
+            self._frost_gen = gen
+        return (("frosted", id(g), self._frost_what), image, src)
+
+    def glass_stale(self) -> bool:
+        """Whether the glass behind this card changed since it was drawn - so
+        the board repaints only the cards a live wallpaper moved behind."""
+        g = self.glass
+        if g is None or self.solid_bg:
+            return False
+        if self._pane is None or self._pane_at is None:
+            return True
+        if bool(getattr(g, "ready", False)) != (self._pane[0][0] == "liquid"):
+            return True
+        changed = getattr(g, "changed_since", None)
+        return changed is None or changed(self._pane_gen, self._pane_at)
 
     # -- painting helpers shared by every tile --------------------------- #
     def font(self, size: float, weight: int = QFont.Normal,
