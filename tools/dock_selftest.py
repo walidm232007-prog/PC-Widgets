@@ -871,17 +871,20 @@ def check_glass_fade(app, out, board):
             g._bump(regions)
         board.glass_changed.emit()
 
-    def tone():
-        """The dock's glass, as the mean red and blue across its capsule."""
+    def tone(with_alpha=False):
+        """The dock's glass, as the mean red and blue across its capsule (and
+        the least opaque pixel there)."""
         img = dock.grab().toImage()
         c = dock._capsule
-        reds, blues = [], []
+        reds, blues, alphas = [], [], []
         for y in range(int(c.top()) + 4, int(c.bottom()) - 4, 4):
             for x in range(int(c.left()) + 8, int(c.right()) - 8, 6):
                 px = img.pixelColor(x, y)
                 reds.append(px.red())
                 blues.append(px.blue())
-        return sum(reds) / len(reds), sum(blues) / len(blues)
+                alphas.append(px.alpha())
+        mean = (sum(reds) / len(reds), sum(blues) / len(blues))
+        return (mean, min(alphas)) if with_alpha else mean
 
     board.palette = palette.build("dark")
     board.state.dock_style = "glass"
@@ -898,19 +901,24 @@ def check_glass_fade(app, out, board):
         glass((30, 60, 220))
         assert dock._glass_fade.active and dock._glass_from is not None, (
             "new glass behind the dock didn't start a fade")
+        before_blue = dock._glass_from
         start = tone()
         assert abs(start[0] - red[0]) < 12 and abs(start[1] - red[1]) < 12, (
             f"the fade didn't start from the old glass: {start} vs {red}")
-        end_at = time.monotonic() + GLASS_FADE_MS / 1000 * 0.5
-        while time.monotonic() < end_at:
-            app.processEvents()
-            time.sleep(0.005)
-        mid = tone()
         pump(app, GLASS_FADE_MS / 1000 + 0.15)
         end = tone()
         assert not dock._glass_fade.active and end[1] > end[0] + 20, f"didn't end on blue: {end}"
-        assert red[0] > mid[0] > end[0] and red[1] < mid[1] < end[1], (
-            f"no dissolve halfway: red {red}, mid {mid}, blue {end}")
+        # Halfway, held there: an even blend of the two, and as solid as
+        # either - laid on with Qt's clamping, the dock went a quarter
+        # see-through and brighter.
+        dock._glass_from = before_blue
+        dock._glass_fade._value = 0.5
+        (mid, solid) = tone(with_alpha=True)
+        dock._glass_fade.finish()
+        want = ((red[0] + end[0]) / 2, (red[1] + end[1]) / 2)
+        assert abs(mid[0] - want[0]) < 8 and abs(mid[1] - want[1]) < 8, (
+            f"halfway isn't an even blend: {mid} where {want}")
+        assert solid >= 250, f"the dock is see-through halfway through the fade (alpha {solid})"
         before = dock._static
         glass((240, 240, 240), regions=[(vr + 500, vb + 500, 50, 50)])
         assert dock._static is before and not dock._glass_fade.active, (

@@ -1496,16 +1496,7 @@ class GlassDock(QWidget):
         p = QPainter(self)
         old = self._glass_from
         if old is not None and self._glass_fade.value < 1.0 and old.size() == self._static.size():
-            # Added rather than laid over: the old at 1 - t plus the new at t
-            # is the blend everywhere, the see-through shadow and edges too.
-            t = self._glass_fade.value
-            p.setCompositionMode(QPainter.CompositionMode_Plus)
-            p.setOpacity(1.0 - t)
-            p.drawPixmap(0, 0, old)
-            p.setOpacity(t)
-            p.drawPixmap(0, 0, self._static)
-            p.setOpacity(1.0)
-            p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            p.drawImage(0, 0, self._glass_blend(old, self._glass_fade.value))
         else:
             self._glass_from = None
             p.drawPixmap(0, 0, self._static)
@@ -1515,6 +1506,30 @@ class GlassDock(QWidget):
         if self._np.available and not self._bars.isEmpty():
             self._paint_bars(p)
         p.end()
+
+    def _glass_blend(self, old: QPixmap, t: float) -> QImage:
+        """The dock ``t`` of the way from ``old`` to the cached one: each
+        weighted on a clear image, then added, so the see-through shadow and
+        edges blend too, rather than thickening as one laid over the other
+        does. The new one is weighted on an image of its own first: added at
+        an opacity, Qt clamps the sum before weighing it, and the dock came
+        out a quarter see-through halfway."""
+        out, new = (QImage(self._static.size(), QImage.Format_ARGB32_Premultiplied) for _ in range(2))
+        for img in (out, new):
+            img.setDevicePixelRatio(self._static.devicePixelRatio())
+            img.fill(Qt.transparent)
+        q = QPainter(new)
+        q.setOpacity(t)
+        q.drawPixmap(0, 0, self._static)
+        q.end()
+        q = QPainter(out)
+        q.setOpacity(1.0 - t)
+        q.drawPixmap(0, 0, old)
+        q.setOpacity(1.0)
+        q.setCompositionMode(QPainter.CompositionMode_Plus)
+        q.drawImage(0, 0, new)
+        q.end()
+        return out
 
     def _render(self) -> QPixmap:
         # Drawn on a straight-alpha image, then converted once. On a
