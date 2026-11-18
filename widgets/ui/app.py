@@ -1634,6 +1634,12 @@ class SettingsPage(QWidget):
         look.add(setting_row("eye", "#64d2ff", "Blur",
                              "How much liquid glass softens the wallpaper behind it.",
                              self.blur), self.INSET)
+        self.live = Switch()
+        self.live.toggled.connect(board.set_glass_live)
+        look.add(setting_row("photo", "#30d158", "Live glass",
+                             "With a live wallpaper running, the glass moves along with it. "
+                             "Off, it catches up every few seconds, which is lighter.",
+                             self.live), self.INSET)
         self.tint = Segmented(GLASS)
         self.tint.changed.connect(lambda v: board.set_glass_tint(int(v)))
         look.add(setting_row("sliders", "#30b0c7", "Glass strength",
@@ -1779,6 +1785,7 @@ class SettingsPage(QWidget):
         self.glass_style.set_current("frosted" if s.glass_style == "frosted" else "liquid")
         self.blur.set_current(s.glass_blur if s.glass_blur in dict(BLURS) else "light")
         self.blur.setEnabled(s.glass_style != "frosted")     # frosted has its own blur
+        self.live.set_quietly(s.glass_live)
         self.tint.set_current(min(GLASS, key=lambda g: abs(int(g[0]) - s.glass_tint))[0])
         self.opacity.set_current(min(OPACITY, key=lambda o: abs(int(o[0]) - s.opacity * 100))[0])
         self.layer.set_current(s.layer)

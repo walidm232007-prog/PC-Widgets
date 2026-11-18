@@ -800,11 +800,14 @@ class GlassDock(QWidget):
         dock did - a live wallpaper moving behind a card leaves it alone - and
         then faded into rather than switched."""
         seen = self._glass_seen
+        rect = (self.x(), self.y(), self.width(), self.height())
         if (seen is not None and self._static is not None
-                and not self._through.changed_since(seen, (self.x(), self.y(), self.width(), self.height()))):
+                and not self._through.changed_since(seen, rect)):
             self._glass_seen = self._through.generation
             return
-        if self._static is not None and self.board.state.dock_style == "glass":
+        # Live glass's frames switch, as the cards' do; anything else fades.
+        if (self._static is not None and self.board.state.dock_style == "glass"
+                and (seen is None or self._through.fade_since(seen, rect))):
             self._glass_from = self._static
             self._glass_fade.start(GLASS_FADE_MS)
         self.invalidate()

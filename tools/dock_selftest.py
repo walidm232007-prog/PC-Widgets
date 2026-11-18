@@ -860,7 +860,7 @@ def check_glass_fade(app, out, board):
     saved = (g.image, g.origin, g.clear, g.clear_origin)
     vl, vt, vr, vb = winapi.virtual_screen()
 
-    def glass(rgb, regions=None):
+    def glass(rgb, regions=None, fade=True):
         img = QImage(vr - vl, vb - vt, QImage.Format_RGB32)
         img.fill(QColor(*rgb))
         planes = np.empty((3, (vb - vt) // 2, (vr - vl) // 2), np.uint8)
@@ -868,7 +868,7 @@ def check_glass_fade(app, out, board):
             planes[i] = rgb[i]
         with g._lock:
             g.image, g.origin, g.clear, g.clear_origin = img, (vl, vt), planes, (vl, vt)
-            g._bump(regions)
+            g._bump(regions, fade=fade)
         board.glass_changed.emit()
 
     def tone(with_alpha=False):
@@ -923,6 +923,13 @@ def check_glass_fade(app, out, board):
         glass((240, 240, 240), regions=[(vr + 500, vb + 500, 50, 50)])
         assert dock._static is before and not dock._glass_fade.active, (
             "a change behind no part of the dock redrew or faded it")
+        # A live glass frame behind it: drawn again at once, no fade - they
+        # follow each other ten a second.
+        glass((40, 200, 90), fade=False)
+        assert dock._static is None and not dock._glass_fade.active, (
+            "a live glass frame faded the dock, or left it as it was")
+        green = tone()
+        assert green[0] < 80 and green[1] < 120, f"the dock didn't take the live frame: {green}"
     finally:
         dock.close()
         with g._lock:
@@ -931,7 +938,7 @@ def check_glass_fade(app, out, board):
         board.glass_changed.emit()
     print(f"PASS: the dock fades into new glass over {GLASS_FADE_MS:.0f} ms (red {red[0]:.0f}/"
           f"{red[1]:.0f}, halfway {mid[0]:.0f}/{mid[1]:.0f}, blue {end[0]:.0f}/{end[1]:.0f}), "
-          "and a change behind none of it leaves it alone")
+          "takes live glass frames without fading, and a change behind none of it leaves it alone")
 
 
 def check_pictures():

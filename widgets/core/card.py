@@ -856,7 +856,13 @@ class WidgetCard(QWidget):
         at = (sx, sy, w, h)
         last = self._pane
         if last is not None and last[0] != pane[0]:
-            if self._pane_at == at and not moving:
+            # Live glass's frames switch: they follow each other too quickly
+            # to fade between. Anything else - a new wallpaper, a setting -
+            # fades, if the card sits where it was.
+            fade_since = getattr(g, "fade_since", None)
+            live = (fade_since is not None and g.generation != self._pane_gen
+                    and not fade_since(self._pane_gen, at))
+            if self._pane_at == at and not moving and not live:
                 self._pane_from = last
                 self._glass_fade.start(GLASS_FADE_MS)
             else:
@@ -931,6 +937,10 @@ class WidgetCard(QWidget):
         """The card's slice of the blurred desk, as a pane for _paint_glass,
         or None off the desk. It counts as changed only when the glass behind
         the card did, so a live wallpaper moving elsewhere fades nothing."""
+        ahead = getattr(g, "frost_ahead", None)
+        live = ahead(sx, sy, w, h) if ahead is not None else None
+        if live is not None:
+            return (("frosted", id(g), "live", id(live)), live, None)   # live glass's slice
         image = g.image
         if image is None:
             return None
