@@ -266,12 +266,21 @@ def _mark_of(img: QImage, area: QRect) -> bytes:
     return cells.astype(np.uint8).tobytes()
 
 
+DIFFER_LEVELS = 2         # a pane changed by more than this anywhere is handed on...
+DIFFER_MEAN = 0.1         # ...or by more than this on the whole
+
+
 def _differ(a: Optional[QImage], b: QImage) -> bool:
-    """Whether a card's newly bent pane differs from the last one handed on
-    enough to show: by ten levels anywhere, or a third of one on the whole.
-    Below that, through the tint, a repaint would show the same glass - and a
-    change creeping along still adds up past it, since it's the last pane
-    handed on that's compared."""
+    """Whether a card's newly bent pane differs from the last one handed on by
+    more than flicker: DIFFER_LEVELS anywhere, or DIFFER_MEAN on the whole.
+    Anything more is the wallpaper moving, and held back it comes out in
+    steps. Ten levels was the line once, and a small card, with less of the
+    moving picture behind it, crossed it far less often: 15 frames a second of
+    the 40 its glass changed in, in steps of 14 levels - stuttering, while the
+    big cards beside it ran smoothly. A level or two - rounding, a video's
+    noise through the frost - isn't worth a repaint, and a change creeping
+    along still adds up past the line, since it's the last pane handed on
+    that's compared."""
     if a is None or a.size() != b.size():
         return True
     try:
@@ -281,7 +290,7 @@ def _differ(a: Optional[QImage], b: QImage) -> bool:
     n = a.bytesPerLine() * a.height()
     d = np.abs(np.frombuffer(a.constBits(), np.uint8, n).astype(np.int16)
                - np.frombuffer(b.constBits(), np.uint8, n))
-    return int(d.max()) > 10 or float(d.mean()) > 0.3
+    return int(d.max()) > DIFFER_LEVELS or float(d.mean()) > DIFFER_MEAN
 
 
 def _overlap(a, b) -> bool:

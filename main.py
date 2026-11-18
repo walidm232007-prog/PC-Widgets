@@ -187,6 +187,7 @@ def selftest() -> int:
     _check_smooth_glass(pal_mod.build("dark", "blue"))
     _check_live_glass(pal_mod.build("dark", "blue"))
     _check_gpu_glass(pal_mod.build("dark", "blue"))
+    _check_glass_layer(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -2218,6 +2219,159 @@ def _check_gpu_glass(pal) -> None:
     print(f"  gpu glass: {gpu_note}; a 60 fps wallpaper's frames taken {share60:.0%}, "
           f"{1000 * late60:.1f} ms after they come, asking {asks60:.1f} times a frame; short waits "
           f"to the millisecond; a whole look along the way built beside the frames")
+
+
+def _check_glass_layer(pal) -> None:
+    """Live glass reaches every card smoothly, and a repaint for new glass
+    alone is cheap and comes out the same.
+
+    The change check hands on a pane changed by three levels anywhere, or a
+    tenth of one on the whole, but not by a level or two. Ten levels used to
+    hold a small card's glass back to a third of its frames, in steps. A card
+    repainted for new glass alone (glass_update) lays the layer kept from its
+    last paint - tint, rim and content - on the new glass, pixel for pixel
+    what drawing it again gives, while a repaint asked for any other way
+    (update) draws it again. That layer's type is greyscale, without
+    ClearType's coloured edges, and a card a picture covers has no glass to
+    go stale.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        print("  glass layer: no numpy, so no liquid glass (skipped)")
+        return
+    import os as _os
+    import tempfile
+    import time as _t
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from widgets.core import glass as glass_mod
+    from widgets.core import lens, samples
+    from widgets.core.board import REGISTRY
+    from widgets.core.card import MARGIN, RADIUS
+    from widgets.core.glass import GlassBackdrop
+
+    # The change check: flicker stays, any real change goes.
+    base = QImage(40, 30, QImage.Format_RGB32)
+    base.fill(QColor(100, 100, 100))
+
+    def nudged(levels: int, everywhere: bool = False) -> QImage:
+        img = base.copy()
+        for x in (range(40) if everywhere else (5,)):
+            for y in (range(30) if everywhere else (5,)):
+                img.setPixelColor(x, y, QColor(100 + levels, 100, 100))
+        return img
+
+    assert glass_mod._differ(base, nudged(3)), "a pane three levels out in one place was held back"
+    assert not glass_mod._differ(base, nudged(2)), "a pane two levels out in one place was handed on"
+    assert glass_mod._differ(base, nudged(1, everywhere=True)), (
+        "a pane a level out all over was held back")
+
+    def pixels(img: QImage):
+        rows = np.frombuffer(img.constBits(), np.uint8, img.bytesPerLine() * img.height())
+        return rows.reshape(img.height(), -1)[:, :img.width() * 4].astype(np.int16)
+
+    g = GlassBackdrop()
+    g.clear = np.zeros((3, 2, 2), np.float32)    # ready to bend: the panes come ahead, as live glass's
+    card = REGISTRY["clock"](pal, "medium", {})
+    card.glass = g
+    card.move(700, 300)
+    samples.prepare(card)
+    r = card.card_rect()
+    key = (card.x() + int(MARGIN), card.y() + int(MARGIN), int(round(r.width())),
+           int(round(r.height())), float(RADIUS))
+    f = lens.field(key[2], key[3], RADIUS, lens.STEP)
+    panes = []
+    for rgb in ((110, 110, 110), (60, 60, 60)):
+        pane = QImage(f.cols, f.rows, QImage.Format_RGB32)
+        pane.fill(QColor(*rgb))
+        panes.append(pane)
+
+    def frame(i: int) -> None:
+        g._bump([key[:4]], fade=False)
+        g._ahead[key] = panes[i]
+
+    def painted(over) -> QImage:
+        img = QImage(card.size(), QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        card.paint_card(p, over=over)
+        p.end()
+        return img
+
+    def as_board() -> QImage:
+        # paintEvent's choice, onto an image.
+        reuse = card._glass_only and not card._over_stale
+        card._glass_only = card._over_stale = False
+        return painted("reuse" if reuse else "keep")
+
+    try:
+        frame(0)
+        first = as_board()
+        assert card._over_kept is not None, "nothing was kept from a card's paint"
+        kept = card._over_kept[1]
+        frame(1)
+        card.glass_update()
+        laid = as_board()
+        assert card._over_kept[1] is kept, "a repaint for new glass alone drew the layer again"
+        again = painted("keep")
+        assert np.abs(pixels(laid) - pixels(again)).max() == 0, (
+            "the kept layer on new glass isn't what drawing it again gives")
+        assert np.abs(pixels(laid) - pixels(first)).max() > 20, "the new glass didn't show"
+        card.update()                        # the clock ticking: drawn again
+        as_board()
+        assert card._over_kept[1] is not kept, "a repaint asked for by update() kept the old layer"
+        def fringes(img: QImage) -> int:
+            # Pixels whose channels spread apart: on grey glass under a
+            # neutral tint, only ClearType's coloured edges do.
+            a = pixels(img)
+            b_, g_, r_ = a[:, 0::4], a[:, 1::4], a[:, 2::4]
+            top = np.maximum(np.maximum(b_, g_), r_)
+            return int((top - np.minimum(np.minimum(b_, g_), r_) > 16).sum())
+
+        fringed = fringes(painted(None))
+        assert fringes(laid) == 0, "the kept layer's type has coloured edges"
+
+        def full():
+            frame(0)
+            card.update()
+            as_board()
+
+        def glass_alone():
+            frame(1)
+            card.glass_update()
+            as_board()
+
+        n = 40
+        started = _t.perf_counter()
+        for _ in range(n):
+            full()
+        drawn = 1000 * (_t.perf_counter() - started) / n
+        started = _t.perf_counter()
+        for _ in range(n):
+            glass_alone()
+        alone = 1000 * (_t.perf_counter() - started) / n
+
+        # A picture over the whole card: no glass shows, none goes stale.
+        folder = tempfile.mkdtemp(prefix="pcwidgets-layer-")
+        path = _os.path.join(folder, "picture.png")
+        picture = QImage(400, 300, QImage.Format_RGB32)
+        picture.fill(QColor(200, 120, 40))
+        picture.save(path)
+        card.allow_image = True
+        card.config["image"] = path
+        card.update()
+        as_board()
+        assert card._covered and not card.glass_stale(), "a card a picture covers went on repainting for glass"
+    finally:
+        card.close()
+        card.deleteLater()
+    print(f"  glass layer: three levels' change goes, two don't; a repaint for new glass alone lays "
+          f"the kept layer on it, pixel for pixel, in {alone:.2f} ms against {drawn:.2f} drawn again; "
+          f"update() draws it again; its type greyscale ({fringed} coloured-edge pixels drawn "
+          f"straight on the glass here, none in the layer); a covered card never goes stale")
 
 
 def _check_layout_mirror() -> None:

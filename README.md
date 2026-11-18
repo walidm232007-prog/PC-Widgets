@@ -667,10 +667,33 @@ the capture fails part-way.
   pane from it, with `lens.py`'s own field. The panes are bent side by side
   into one texture and come back in one read: about a quarter of a millisecond
   of CPU a frame for six cards, where bending one on the CPU took 4 to 6 ms.
-  They match the CPU's bend to within a level. Only a pane that came out
-  different is handed on, so a card over a still corner isn't repainted. No
-  package is needed: the shaders are compiled by `d3dcompiler_47`, part of
-  Windows. Where Direct3D 11 can't be had, the CPU bends as below.
+  They match the CPU's bend to within a level. No package is needed: the
+  shaders are compiled by `d3dcompiler_47`, part of Windows. Where Direct3D 11
+  can't be had, the CPU bends as below.
+- **Every change, but not flicker.** A pane goes to its card when it changed
+  by three levels anywhere, or a tenth of one on the whole, so a card over a
+  still corner isn't repainted. The line was ten levels once, and the small
+  cards stuttered: with less of the moving picture behind them they crossed it
+  far less often than the big ones beside them, 15 frames a second of the 40
+  their glass changed in, in steps of 14 levels. Now every card takes every
+  frame its glass changed in, 90% of them within 21 ms of the last at 50
+  frames a second. A level or two (rounding, or a video's noise through the
+  frost) still isn't worth a repaint.
+- **The glass alone.** A card repainted for new glass and nothing else lays
+  what was drawn over its glass last time - the tint, the lit rim, the content
+  - back on the new glass as one image, rather than drawing it again. Anything
+  else asking for a repaint, a clock ticking or a hover, draws it all. Drawing
+  the content was most of a repaint: a repaint for new glass takes about
+  0.3 ms where it took 0.4 to 1.9, and nine cards following a 50
+  frames-a-second wallpaper took a fifth of a core to repaint instead of two
+  thirds. That layer is drawn on a straight-alpha image, as the dock is, so
+  the cards' type is greyscale, as Apple draws it. Drawn straight onto the
+  window, Qt gave it ClearType, and every letter had red and blue edges on the
+  glass. Now Playing composes its frosted buttons again for each new glass,
+  about 2.3 ms. Before, the board's repaint found nothing to recompose and
+  drew its old picture, so the glass behind it moved only when a poll or the
+  pointer happened to recompose it. A card a picture covers has no glass to
+  repaint for.
 - **Bent ahead.** Without the graphics card, each moving card's liquid glass is
   bent on the background thread, on the coarser grid a card uses while it's
   dragged, and the card's repaint is then only drawing. Once the wallpaper
@@ -693,15 +716,21 @@ the capture fails part-way.
   cards it's built on a thread of its own and the cards' frames go on.
 - **Cheaper repaints.** Each card's shadow is drawn once a size and kept;
   its nine curves were half of a plain card's repaint. The weather card's
-  icons are built once each too. A plain card now repaints in about 0.6 ms,
-  the weather card in 1.4.
+  icons are built once each too. A repaint that draws everything takes about
+  1 ms for a plain card and 2 for the weather card, and only a change of what
+  a card shows asks for one.
 
 Measured on a Ryzen 5 5600G with a 3000×1920 desk and Wallpaper Engine at
 about 30 frames a second, moving behind six cards, with the glass bent on the
 graphics card: the background thread took about a tenth of one core, before
 the cards shared one frost, and the six cards' repaints about another tenth.
-On the CPU it was a third of a core at 25 frames. Fewer or smaller cards cost
-less, and a wallpaper that rests costs almost nothing.
+On the CPU it was a third of a core at 25 frames. With nine cards following
+Wallpaper Engine at 50 frames a second, the ten-level line held the whole
+process to 74% of one core by leaving frames out, and every frame drawn in
+full took 91%. Repainting for the glass alone took the nine cards' repaints
+from 65% of a core to 20%, measured on stand-in frames at the same pace.
+Fewer or smaller cards cost less, and a wallpaper that rests costs almost
+nothing.
 
 Desktop icons behind a card show through its glass, as they would through
 glass. Shown over apps (see [Layers](#layers)), the cards keep showing the
@@ -932,7 +961,12 @@ bends cards on the graphics card (or Windows' software one) and compares them
 with the CPU's bend, and six cards bent together with each bent alone. It runs
 the frame pacing on a simulated clock against 60 and 26 frames-a-second
 wallpapers, times the short waits, and checks that a whole look along the way
-is built beside the cards' frames rather than in their way. The TLS check reads what the board's
+is built beside the cards' frames rather than in their way. The glass layer
+check hands a three-level change on and holds a two-level one back, then
+repaints a clock for new glass alone and asks for its kept layer laid on it to
+come out pixel for pixel as drawing the layer again, and the layer drawn
+again after update(). It checks the layer's type has no coloured edges, and
+that a card a picture covers never goes stale. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 
