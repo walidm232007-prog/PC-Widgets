@@ -52,7 +52,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from PySide6.QtCore import QObject, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 
-from . import displays, livewall, winapi
+from . import displays, livewall, wgc, winapi
 
 DOWNSCALE = 14           # bigger = blurrier and cheaper
 BOX_PASSES = 3
@@ -89,6 +89,20 @@ LIVE_RESTING = 1.5
 LIVE_DUTY = 0.3
 LIVE_WHOLE_EVERY = 3.0   # s of motion between whole looks: the blurred copy, glass behind no card
 FROST_MARGIN = DOWNSCALE * (BOX_RADIUS * BOX_PASSES + 2)   # px a frosted slice's blur reaches
+
+# With Windows' own capture (wgc.py) a frame arrives whenever the wallpaper
+# draws one, so live glass keeps the wallpaper's pace - up to LIVE_FPS, and
+# never building more than LIVE_FAST_DUTY of the time. It's asked for a new
+# frame every LIVE_POLL seconds, LIVE_POLL_IDLE once nothing has come for
+# LIVE_IDLE_AFTER: asking costs next to nothing, a frame only arrives when
+# something was drawn. Where that capture can't be had, PrintWindow's ten a
+# second, as above.
+LIVE_FPS = 40
+LIVE_FAST_DUTY = 0.5
+LIVE_POLL = 0.005
+LIVE_POLL_IDLE = 0.02
+LIVE_IDLE_AFTER = 1.0
+HIDDEN_EVERY = 0.25      # s a reading of which cards are hidden behind windows is trusted
 
 
 def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
@@ -163,6 +177,35 @@ def _fit(p: QPainter, img: QImage, dest: QRect, mode: int) -> None:
         sx = max(0, (scaled.width() - w) // 2)
         sy = max(0, (scaled.height() - h) // 2)
         p.drawImage(dest, scaled, QRect(sx, sy, w, h))
+
+
+def _mark_of(img: QImage, area: QRect) -> bytes:
+    """A 16x16 thumbnail of ``area`` of ``img``, blue, green and red: each
+    cell the mean of 8x8 samples spread across its part, so a scatter of
+    sparkles moves no cell far, at a tenth of the cost of scaling the area
+    down. The same from Windows' capture (Format_RGB32) and PrintWindow's
+    (Format_BGR888), whose pixels both start blue, green, red."""
+    try:
+        import numpy as np
+    except ImportError:
+        small = img.copy(area).scaled(16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        return bytes(small.convertToFormat(QImage.Format_BGR888).constBits())[: 16 * 16 * 3]
+    if img.format() == QImage.Format_BGR888:
+        size = 3
+    elif img.format() in (QImage.Format_RGB32, QImage.Format_ARGB32,
+                          QImage.Format_ARGB32_Premultiplied):
+        size = 4
+    else:
+        img, size = img.convertToFormat(QImage.Format_RGB32), 4
+    rows = img.height()
+    data = np.frombuffer(img.constBits(), np.uint8, img.bytesPerLine() * rows).reshape(rows, -1)
+    n = 128
+    ys = area.y() + (np.arange(n) * area.height()) // n
+    xs = area.x() + (np.arange(n) * area.width()) // n
+    cols = (xs[:, None] * size + np.arange(3)[None, :]).ravel()
+    picked = data[np.ix_(ys, cols)].reshape(n, n, 3).astype(np.uint16)
+    cells = picked.reshape(16, n // 16, 16, n // 16, 3).mean(axis=(1, 3))
+    return cells.astype(np.uint8).tobytes()
 
 
 def _overlap(a, b) -> bool:
@@ -288,6 +331,7 @@ class GlassBackdrop:
         self._live_work = 0.0         # s the last frame spent building, the grab aside
         self._live_moving = False     # whether the last look found something new
         self._live_look_at = 0.0      # when the last whole look was
+        self._hidden_kept = None      # (when, regions, which were hidden): _hidden_now
         # A live wallpaper being followed: its layer, or 0. The glass shows it
         # from its first good grab (showing_live); until then, and once it
         # quits, the wallpaper files.
@@ -605,6 +649,8 @@ class GlassBackdrop:
         so the first look waits too."""
         wait = (LIVE_FRAME if self.live_glass else LIVE_EVERY) if rested else 0.0
         still = 0
+        capture, joined, refused = None, False, False
+        quiet_since = time.monotonic()
         try:
             while True:
                 if wait:
@@ -613,28 +659,57 @@ class GlassBackdrop:
                 if job != self._live_job or not livewall.alive(layer):
                     return
                 live = self.live_glass
+                if live and capture is None and not refused:
+                    if not joined:
+                        wgc.join_apartment()
+                        joined = True
+                    try:
+                        capture = wgc.Capture(wgc.target(layer))
+                    except Exception:
+                        refused = True         # PrintWindow's frames instead
+                elif not live and capture is not None:
+                    capture.close()
+                    capture = None
                 built = again = False
+                fresh = True                   # whether anything new was looked at
                 started = time.perf_counter()
                 try:
                     if winapi.fullscreen_monitor() is not None:
                         pass
+                    elif capture is not None:
+                        built, again, fresh = self._live_capture(capture, layer, job, still)
                     elif not live or self._whole_look_due(still):
                         built, again = self._live_once(layer, job, keep=True)
                         self._live_look_at = time.monotonic()
                     else:
                         built, again = self._live_frame(layer, job)
                 except Exception:
-                    pass
+                    if capture is not None:    # a capture that fails mid-way: PrintWindow from here
+                        capture.close()
+                        capture, refused = None, True
                 with self._lock:
                     if job == self._live_job:
                         self._built.set()      # tried: wait_clear needn't wait on
                 took = time.perf_counter() - started
+                if not fresh:
+                    # Nothing drawn since the last frame: ask again soon -
+                    # less often once it has been quiet a while.
+                    idle = time.monotonic() - quiet_since > LIVE_IDLE_AFTER
+                    wait = LIVE_POLL_IDLE if idle else LIVE_POLL
+                    continue
+                quiet_since = time.monotonic()
                 still = 0 if built else still + 1
                 self._live_moving = built
                 if again:
                     wait = 0.0
                 elif not live:
                     wait = LIVE_EVERY * (2 if built else 1)
+                elif capture is not None:
+                    # The wallpaper's own pace, up to LIVE_FPS, resting at
+                    # least as long as LIVE_FAST_DUTY asks after building.
+                    work = self._live_work if built else 0.0
+                    wait = max(1.0 / LIVE_FPS - took, work * (1 - LIVE_FAST_DUTY) / LIVE_FAST_DUTY,
+                               LIVE_POLL)
                 elif built:
                     # Paced as the dock's capture is: a frame every LIVE_FRAME,
                     # but resting at least as long as LIVE_DUTY asks after the
@@ -644,7 +719,34 @@ class GlassBackdrop:
                 else:
                     wait = LIVE_STILL if still < 10 else LIVE_RESTING
         finally:
+            if capture is not None:
+                capture.close()
             livewall.release()                 # the bitmaps its grabs kept
+            if joined:
+                wgc.leave_apartment()
+
+    def _live_capture(self, capture, layer: int, job: int, still: int) -> Tuple[bool, bool, bool]:
+        """One turn of live glass on Windows' capture: (built, look again at
+        once, whether there was a new frame at all). Each frame is read back
+        behind the cards in view, as _live_frame reads PrintWindow's; every
+        LIVE_WHOLE_EVERY seconds of motion it's taken whole, for the blurred
+        copy and glass behind no card - from this capture too, so what's
+        compared is always alike (it holds the desktop's icons, PrintWindow's
+        layer doesn't)."""
+        frame = capture.latest()
+        if frame is None:
+            return False, False, False
+        try:
+            at = capture.origin()
+            if self._whole_look_due(still):
+                built, again = self._live_once(layer, job, grabbed=(capture.whole(frame), at))
+                self._live_look_at = time.monotonic()
+            else:
+                built, again = self._live_frame(layer, job,
+                                                lambda asks: (capture.read(frame, asks, at), at))
+        finally:
+            frame.close()
+        return built, again, True
 
     def _whole_look_due(self, still: int) -> bool:
         """Whether live glass's next look should be a whole one: the first, one
@@ -654,7 +756,8 @@ class GlassBackdrop:
             return True
         return self._live_moving and time.monotonic() - self._live_look_at >= LIVE_WHOLE_EVERY
 
-    def _live_once(self, layer: int, job: int, keep: bool = False) -> Tuple[bool, bool]:
+    def _live_once(self, layer: int, job: int, keep: bool = False,
+                   grabbed=None) -> Tuple[bool, bool]:
         """One look at the live wallpaper. Returns (whether glass was built
         from it, whether to look again straight away - Glass style or Blur
         changed while it built).
@@ -667,8 +770,9 @@ class GlassBackdrop:
         moving, the clear copy is built whole every LIVE_FULL_EVERY seconds
         too, for glass that is behind no card: the dock's menus, a card that
         has just been moved. ``keep``: grab into the bitmap kept from the
-        last look (livewall.grab), as the thread does."""
-        got = livewall.grab(layer, keep=keep)
+        last look (livewall.grab), as the thread does. ``grabbed``: (image,
+        its top-left), a frame already taken - Windows' capture's."""
+        got = grabbed or livewall.grab(layer, keep=keep)
         if got is None:
             return False, False
         img, at = got
@@ -755,7 +859,7 @@ class GlassBackdrop:
         self.notifier.ready.emit()
         return True, not fits
 
-    def _live_frame(self, layer: int, job: int) -> Tuple[bool, bool]:
+    def _live_frame(self, layer: int, job: int, parts_of=None) -> Tuple[bool, bool]:
         """One frame of live glass, returning as _live_once does. The layer is
         grabbed, but read back only behind the glass in view - ``regions`` not
         hidden behind a window - and built again only where that moved. Liquid
@@ -763,7 +867,8 @@ class GlassBackdrop:
         ahead, here, on the grid a card uses while dragged, so a card's repaint
         is only drawing; frosted glass gets each card's slice blurred. Nothing
         fades: the frames follow each other too quickly. Once it rests, the
-        coarse bends are bent again in full, and those fade in."""
+        coarse bends are bent again in full, and those fade in. ``parts_of``
+        reads the patches instead of PrintWindow: Windows' capture's frame."""
         with self._lock:
             liquid, frost = self.liquid, self.frost
             regions, info = tuple(self.regions), dict(self.region_info)
@@ -772,13 +877,13 @@ class GlassBackdrop:
         virtual = winapi.virtual_screen()
         if placed != virtual or (liquid and clear is None) or not regions:
             return self._live_once(layer, job, keep=True)
-        hidden = _hidden(info)
+        hidden = self._hidden_now(info)
         view = [r for r in regions if r not in hidden]
         if not view:
             self._live_work = 0.0
             return False, False
         asks = [_aligned(r, virtual, PATCH_MARGIN if liquid else FROST_MARGIN) for r in view]
-        got = livewall.grab_parts(layer, asks, keep=True)
+        got = parts_of(asks) if parts_of is not None else livewall.grab_parts(layer, asks, keep=True)
         if got is None:
             return False, False
         started = time.perf_counter()
@@ -847,9 +952,19 @@ class GlassBackdrop:
                      w + 2 * REGION_PAD, h + 2 * REGION_PAD).intersected(img.rect())
         if area.width() < 2 or area.height() < 2:
             return None
-        small = img.copy(area).scaled(16, 16, Qt.IgnoreAspectRatio,
-                                      Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB888)
-        return bytes(small.constBits())[: 16 * 16 * 3]
+        return _mark_of(img, area)
+
+    def _hidden_now(self, info) -> set:
+        """_hidden(info), read again at most every HIDDEN_EVERY seconds: at
+        the wallpaper's pace, walking every window at every frame would cost
+        more than the frame."""
+        now, regions = time.monotonic(), tuple(sorted(info))
+        kept = self._hidden_kept
+        if kept is not None and kept[1] == regions and now - kept[0] < HIDDEN_EVERY:
+            return kept[2]
+        hidden = _hidden(info)
+        self._hidden_kept = (now, regions, hidden)
+        return hidden
 
     @staticmethod
     def _patch_part(planes, img: QImage, prect: Tuple[int, int, int, int],
@@ -902,10 +1017,7 @@ class GlassBackdrop:
                      w + 2 * REGION_PAD, h + 2 * REGION_PAD).intersected(canvas.rect())
         if area.width() < 2 or area.height() < 2:
             return None
-        part = canvas if area == canvas.rect() else canvas.copy(area)
-        small = part.scaled(16, 16, Qt.IgnoreAspectRatio,
-                            Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB888)
-        return bytes(small.constBits())[: 16 * 16 * 3]
+        return _mark_of(canvas, area)
 
     @staticmethod
     def _patch(planes, canvas: QImage, virtual: Tuple[int, int, int, int], regions,

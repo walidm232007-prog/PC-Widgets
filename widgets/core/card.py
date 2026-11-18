@@ -429,6 +429,7 @@ class WidgetCard(QWidget):
         self._frost_what = None          # ...and the one the slice last changed at
         self._glass_fade = Fader(self)
         self._glass_fade.finish()        # nothing to fade from on the first paint
+        self._shadow_kept = None         # (size and where, image): the shadow, drawn once
         self._drag_ms = 0.0              # what bending it at a step of a drag costs
         self._drag_from: Optional[QPoint] = None
         self._target: Optional[Tuple[int, int]] = None   # window pos the outline shows
@@ -728,16 +729,13 @@ class WidgetCard(QWidget):
         r = self.card_rect()
 
         # --- ambient shadow -------------------------------------------- #
-        # Stacked translucent copies, each a little larger and lower. Cheap,
-        # and it lifts the card off the wallpaper the way a real widget sits.
+        # Stacked translucent copies, each a little larger and lower: it lifts
+        # the card off the wallpaper the way a real widget sits. Drawn once a
+        # size and kept, since its nine curves were half a plain card's
+        # repaint, and live glass repaints a card many times a second.
         p.setPen(Qt.NoPen)
-        for i in range(SHADOW_LAYERS if shadow else 0, 0, -1):
-            grow = i * 1.7
-            alpha = max(2, int(SHADOW_ALPHA / (i * 0.85)))
-            p.setBrush(QColor(0, 0, 0, alpha))
-            p.drawPath(squircle(
-                r.adjusted(-grow, -grow + 2.0, grow, grow + 3.0),
-                RADIUS + grow))
+        if shadow:
+            p.drawImage(QPointF(0, 0), self._shadow(r, p.device().devicePixelRatioF()))
 
         # --- the card -------------------------------------------------- #
         path = squircle(r, RADIUS)
@@ -827,6 +825,27 @@ class WidgetCard(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setPen(Qt.NoPen)
         self.paint_content(p, inner)
+
+    def _shadow(self, r: QRectF, dpr: float) -> QImage:
+        """The ambient shadow for a card at ``r``, as an image the size of
+        the window, drawn at ``dpr`` and kept until the size changes."""
+        key = (self.width(), self.height(), r.x(), r.y(), r.width(), r.height(), dpr)
+        kept = self._shadow_kept
+        if kept is None or kept[0] != key:
+            img = QImage(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)),
+                         QImage.Format_ARGB32_Premultiplied)
+            img.setDevicePixelRatio(dpr)
+            img.fill(Qt.transparent)
+            q = QPainter(img)
+            q.setRenderHint(QPainter.Antialiasing, True)
+            q.setPen(Qt.NoPen)
+            for i in range(SHADOW_LAYERS, 0, -1):
+                grow = i * 1.7
+                q.setBrush(QColor(0, 0, 0, max(2, int(SHADOW_ALPHA / (i * 0.85)))))
+                q.drawPath(squircle(r.adjusted(-grow, -grow + 2.0, grow, grow + 3.0), RADIUS + grow))
+            q.end()
+            kept = self._shadow_kept = (key, img)
+        return kept[1]
 
     def paint_tint(self, p: QPainter, path: QPainterPath, r: QRectF) -> None:
         """Colour laid over the card's glass, under liquid glass's lit rim and

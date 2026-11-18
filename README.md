@@ -617,18 +617,27 @@ built from the files again, and fades in like any other change.
 ### Live glass
 
 **Settings → Look → Live glass**, on by default, makes the glass follow the
-wallpaper as it moves: about ten frames a second while something moves behind
-the cards. It's true glass that still shows up in screenshots. The see-through
-dock leaves itself out of screen captures, because a capture of the screen
-behind it would otherwise contain the dock. Live glass never captures the
-screen. It grabs the wallpaper layer itself, which holds no window, the cards
+wallpaper as it moves, at the wallpaper's own pace: about 25 frames a second
+for Wallpaper Engine here, and up to 40. It's true glass that still shows up
+in screenshots. The see-through dock leaves itself out of screen captures,
+because a capture of the screen behind it would otherwise contain the dock.
+Live glass never captures the screen. It captures the desktop window itself,
+which holds the wallpaper and the icons but no other window, the cards
 included, so nothing has to be left out of captures.
 
-- **Only behind the cards in view.** The grab reads back just a patch behind
-  each card, 0.6 ms for four, where the whole desk took 9 ms. A card hidden
-  behind a window that covers it entirely is skipped, until it's back in view.
-  Only ordinary app windows count there, never the invisible overlays some
-  game launchers and graphics drivers put over the whole screen.
+It uses Windows' own capture (Windows.Graphics.Capture, through `wgc.py`, with
+no package needed). Each frame comes from the graphics card as the wallpaper
+draws it, and only when it draws one. The yellow border Windows puts round a
+captured window is turned off, and so is the cursor. Where that capture can't
+be had, live glass falls back to PrintWindow on the wallpaper layer, about ten
+frames a second: on Windows 10, where the border can't be turned off, or if
+the capture fails part-way.
+
+- **Only behind the cards in view.** A frame is read back as just a patch
+  behind each card, about a quarter of a millisecond each. A card hidden behind
+  a window that covers it entirely is skipped, until it's back in view. Only
+  ordinary app windows count there, never the invisible overlays some game
+  launchers and graphics drivers put over the whole screen.
 - **Only where it moved.** A card's patch counts as moved when its thumbnail's
   average changes or any one part of it changes clearly, so a light drifting
   across one corner counts and a scatter of sparkles doesn't. Cards with
@@ -638,23 +647,23 @@ included, so nothing has to be left out of captures.
   repaint is then only drawing. Once the wallpaper rests, each card is bent in
   full and fades into it. Frosted cards get a freshly blurred slice instead.
 - **No fades between frames.** They follow each other too quickly.
-- **Paced like the dock's capture.** A frame every 0.1 s, but never building
-  more than 30% of the time; the grab itself is mostly waiting on the
-  compositor. While nothing moves, it looks twice a second to notice motion,
-  and every 1.5 s once things have been still for a few seconds. Nothing at
-  all while a full-screen window has the focus.
+- **Paced.** Never more than 40 frames a second, and never building more than
+  half the time. While nothing is drawn, asking for a frame costs next to
+  nothing. Nothing at all while a full-screen window has the focus.
+- **Cheaper repaints.** Each card's shadow is drawn once a size and kept;
+  its nine curves were half of a plain card's repaint. The weather card's
+  icons are built once each too. A plain card now repaints in about 0.6 ms,
+  the weather card in 1.4.
 
-Measured on a Ryzen 5 5600G with a 3000×1920 desk, the grab costs about 15 ms
-of CPU and building the glass behind six moving cards about 11 ms. The six
-cards then repaint in about 8 ms. Paced at ten frames a second, that's about
-a third of one core while the wallpaper moves behind all of them. Fewer or
-smaller cards cost less. While it's still, a look costs about 20 ms of CPU:
-about 1.3% of a core once it has rested.
+Measured on a Ryzen 5 5600G with a 3000×1920 desk and Wallpaper Engine at 25
+frames a second, moving behind six cards: the background thread takes about a
+third of one core, and the six cards' repaints about another tenth. Fewer or
+smaller cards cost less, and a wallpaper that rests costs almost nothing.
 
-Shown over apps (see [Layers](#layers)), the cards keep showing the desktop
-behind them. Seeing the windows behind them would mean leaving them out of
-captures. Desktop icons aren't in the wallpaper layer, so they don't show
-through either.
+Desktop icons behind a card show through its glass, as they would through
+glass. Shown over apps (see [Layers](#layers)), the cards keep showing the
+desktop behind them: seeing the windows behind them would mean leaving them
+out of captures.
 
 ### Smooth updates
 
@@ -852,8 +861,9 @@ exactly as a whole build would, and only that card may fade. It also checks
 that a new wallpaper lands whole, with no frosted moment in between. The live
 glass check reads patches back from a GDI bitmap, then follows frames behind
 two cards: one that moved goes straight in, bent ahead, while the other is left
-alone; at rest it's bent in full; a hidden card is skipped; and no card is ever
-left out of screen captures. The TLS check reads what the board's
+alone; at rest it's bent in full; a hidden card is skipped; frames from Windows'
+capture are read the same way, the first taken whole; the kept shadow is the
+shadow; and no card is ever left out of screen captures. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 

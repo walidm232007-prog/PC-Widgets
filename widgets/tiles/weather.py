@@ -1626,8 +1626,22 @@ def _dashes(points, w: float = 4.6, length: float = 11.0) -> QPainterPath:
     return _stroke(lines, w)
 
 
+_ICON_PATHS: dict = {}
+
+
 def icon_paths(shape: int, night: bool = False):
-    """The icon as (colour role, path) pairs in 100-unit space, back to front."""
+    """The icon as (colour role, path) pairs in 100-unit space, back to front.
+    Built once each and kept: a weather card draws eight at every repaint,
+    and with live glass repainting it many times a second, building their
+    curves again was most of what the card cost."""
+    key = (shape, bool(night))
+    paths = _ICON_PATHS.get(key)
+    if paths is None:
+        paths = _ICON_PATHS[key] = tuple(_icon_paths(shape, night))
+    return paths
+
+
+def _icon_paths(shape: int, night: bool = False):
     if shape == CLEAR:
         if night:
             return [("ink", _moon(46, 55, 25)),
