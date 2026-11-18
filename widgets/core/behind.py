@@ -474,6 +474,19 @@ class LiveGlass:
             return True                    # drawn from a capture that's gone
         return self.base.changed_since(generation, rect)
 
+    def fade_since(self, generation, rect) -> bool:
+        """GlassBackdrop.fade_since, for the dock: a new capture switches, as
+        live glass's frames do."""
+        patch = self.behind.patch
+        if patch is not None and patch.holds(*rect):
+            return False
+        if not isinstance(generation, int):
+            return True
+        return self.base.fade_since(generation, rect)
+
+    def frost_ahead(self, sx, sy, w, h):
+        return None if self._patch(sx, sy, w, h) is not None else self.base.frost_ahead(sx, sy, w, h)
+
     def bend(self, sx, sy, w, h, radius, step=None):
         patch = self._patch(sx, sy, w, h)
         if patch is None or patch.planes is None:

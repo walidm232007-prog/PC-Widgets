@@ -56,8 +56,12 @@ g.SelectObject.restype = W.HGDIOBJ
 g.DeleteObject.argtypes = [W.HGDIOBJ]
 g.DeleteDC.argtypes = [W.HDC]
 g.GetDIBits.argtypes = [W.HDC, W.HBITMAP, W.UINT, W.UINT, C.c_void_p, C.c_void_p, W.UINT]
+g.BitBlt.argtypes = [W.HDC, C.c_int, C.c_int, C.c_int, C.c_int, W.HDC, C.c_int, C.c_int, W.DWORD]
+g.CreateDIBSection.argtypes = [W.HDC, C.c_void_p, W.UINT, C.POINTER(C.c_void_p), W.HANDLE, W.DWORD]
+g.CreateDIBSection.restype = W.HBITMAP
 
 PW_RENDERFULLCONTENT = 2
+SRCCOPY = 0x00CC0020
 
 
 class _BITMAPINFOHEADER(C.Structure):
@@ -158,13 +162,110 @@ def grab(hwnd: int, keep: bool = False) -> Optional[Tuple[QImage, Tuple[int, int
             g.DeleteDC(dc)
 
 
+def grab_parts(hwnd: int, rects, keep: bool = False):
+    """The window as it draws itself, offscreen, read back only where each of
+    ``rects`` (x, y, w, h on the virtual screen) lies: ([(rect, image), ...],
+    the window's top-left), each rect clipped to the window and each image
+    Format_BGR888; or None if it wouldn't draw.
+
+    The compositor still draws all of it, so the grab costs what a whole one
+    does, but four card-sized patches read back in 0.6 ms, where the whole
+    3000x1920 took 4 ms and its conversion 5 more. ``keep`` as for grab(),
+    and the two share the kept bitmap."""
+    r = W.RECT()
+    if not u.GetWindowRect(hwnd, C.byref(r)):
+        return None
+    w, h = r.right - r.left, r.bottom - r.top
+    if w <= 0 or h <= 0:
+        return None
+    parts = getattr(_kept, "parts", None) if keep else None
+    if parts is not None and parts[0] != (w, h):
+        release()
+        parts = None
+    if parts is None:
+        screen = u.GetDC(None)
+        try:
+            dc = g.CreateCompatibleDC(screen)
+            bmp = g.CreateCompatibleBitmap(screen, w, h)
+        finally:
+            u.ReleaseDC(None, screen)
+        parts = ((w, h), dc, bmp, QImage(w, h, QImage.Format_BGR888))
+        if keep:
+            _kept.parts = parts
+    _size, dc, bmp, _img = parts
+    old = g.SelectObject(dc, bmp)
+    try:
+        if not u.PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT):
+            return None
+        return read_parts(dc, (r.left, r.top, w, h), rects, keep), (r.left, r.top)
+    finally:
+        g.SelectObject(dc, old)
+        if not keep:
+            g.DeleteObject(bmp)
+            g.DeleteDC(dc)
+
+
+def read_parts(dc: int, where: Tuple[int, int, int, int], rects, keep: bool = False):
+    """Patches of the bitmap selected into ``dc`` - the window at ``where``,
+    (x, y, w, h) on the virtual screen - one for each of ``rects``, in order:
+    (the rect clipped to the window, a Format_BGR888 image), or None for one
+    off it. Each is copied through a 24-bit DIB section of its size, kept for
+    the next call with ``keep``."""
+    left, top, w, h = where
+    out = []
+    sections = getattr(_kept, "sections", None) if keep else None
+    if sections is None:
+        sections = {}
+        if keep:
+            _kept.sections = sections
+    screen = u.GetDC(None)
+    sdc = g.CreateCompatibleDC(screen)
+    try:
+        for x, y, rw, rh in rects:
+            x0, y0 = max(x, left), max(y, top)
+            x1, y1 = min(x + rw, left + w), min(y + rh, top + h)
+            if x1 - x0 < 1 or y1 - y0 < 1:
+                out.append(None)
+                continue
+            pw, ph = x1 - x0, y1 - y0
+            if (pw, ph) not in sections:
+                info = _BITMAPINFOHEADER(C.sizeof(_BITMAPINFOHEADER), pw, -ph, 1, 24, 0, 0, 0, 0, 0, 0)
+                bits = C.c_void_p()
+                section = g.CreateDIBSection(screen, C.byref(info), 0, C.byref(bits), None, 0)
+                if not section:
+                    out.append(None)
+                    continue
+                sections[(pw, ph)] = (section, bits)
+            section, bits = sections[(pw, ph)]
+            held = g.SelectObject(sdc, section)
+            g.BitBlt(sdc, 0, 0, pw, ph, dc, x0 - left, y0 - top, SRCCOPY)
+            g.SelectObject(sdc, held)
+            g.GdiFlush()
+            img = QImage(pw, ph, QImage.Format_BGR888)
+            size = img.bytesPerLine() * ph
+            C.memmove((C.c_ubyte * size).from_buffer(img.bits()), bits, size)
+            out.append(((x0, y0, pw, ph), img))
+    finally:
+        g.DeleteDC(sdc)
+        u.ReleaseDC(None, screen)
+        if not keep:
+            for section, _bits in sections.values():
+                g.DeleteObject(section)
+    return out
+
+
 def release() -> None:
-    """Free the bitmap the calling thread kept with grab(keep=True)."""
+    """Free the bitmaps the calling thread kept with keep=True."""
     parts = getattr(_kept, "parts", None)
     if parts is not None:
         _kept.parts = None
         g.DeleteObject(parts[2])
         g.DeleteDC(parts[1])
+    sections = getattr(_kept, "sections", None)
+    if sections:
+        _kept.sections = None
+        for section, _bits in sections.values():
+            g.DeleteObject(section)
 
 
 def read_bitmap(dc: int, bmp: int, w: int, h: int,
@@ -194,6 +295,17 @@ def differs(a: Optional[bytes], b: Optional[bytes], tolerance: float = 2.0) -> b
     if a is None or b is None or len(a) != len(b):
         return True
     return sum(abs(x - y) for x, y in zip(a, b)) / len(a) > tolerance
+
+
+def moved(a: Optional[bytes], b: Optional[bytes], tolerance: float = 2.0,
+          spot: int = 12) -> bool:
+    """Whether a card's thumbnail moved: differs() on the whole, or any one
+    cell more than ``spot`` levels - a light drifting across one corner moves
+    the mean of 256 cells by next to nothing, a scatter of sparkles moves no
+    cell that far."""
+    if differs(a, b, tolerance):
+        return True
+    return max(abs(x - y) for x, y in zip(a, b)) > spot
 
 
 def blank(mark: bytes) -> bool:

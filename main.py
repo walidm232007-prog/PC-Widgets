@@ -185,6 +185,7 @@ def selftest() -> int:
     _check_glass_settings(pal_mod.build("dark", "blue"))
     _check_live_wallpaper()
     _check_smooth_glass(pal_mod.build("dark", "blue"))
+    _check_live_glass(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -1374,6 +1375,7 @@ def _check_live_wallpaper() -> None:
 
     RED, BLUE, GREEN = (220, 30, 40), (30, 60, 220), (40, 160, 60)
     g = GlassBackdrop()
+    g.live_glass = False                    # the look every few seconds; _check_live_glass has the rest
     try:
         green = os.path.join(tmp, "green.png")
         frame(GREEN).save(green)
@@ -1557,6 +1559,7 @@ def _check_smooth_glass(pal) -> None:
     frost = FROSTS["light"]
     tmp = tempfile.mkdtemp(prefix="pcwidgets-smooth-")
     g = GlassBackdrop()
+    g.live_glass = False                    # Live glass off: the updates that fade
     try:
         # A live wallpaper behind both cards; then it moves behind A only.
         g.regions = (A, B)
@@ -1645,6 +1648,7 @@ def _check_smooth_glass(pal) -> None:
 
         # The first frame of a live wallpaper is there as soon as asked for.
         s = GlassBackdrop()
+        s.live_glass = False
         stand["frame"] = scene(BLUE, BLUE)
         assert not s.check_live(now=True)
         assert s.showing_live and near(colour(s.image, 150, 150), BLUE), (
@@ -1662,6 +1666,199 @@ def _check_smooth_glass(pal) -> None:
     print(f"  smooth glass: a change behind one card rebuilds only its glass (patch within "
           f"{patched} of a whole build) and only it fades; motion behind no card builds nothing; "
           f"a new wallpaper lands whole with no frosted gap; the first live frame is built at once")
+
+
+def _check_live_glass(pal) -> None:
+    """Live glass follows a live wallpaper frame by frame, and the cards stay
+    in screenshots: it reads back patches of the wallpaper layer behind them,
+    and no window is ever left out of captures.
+
+    Patches of a GDI bitmap read back clipped and right. A frame that moves
+    behind one card patches the glass there and bends that card's pane ahead
+    on the drag grid; the card shows it at once, unfaded, and the other card
+    is left alone. Once the wallpaper rests, the coarse bend is bent in full
+    and fades in. A card hidden behind a window is skipped, and catches up
+    when it's back in view. Frosted cards get live slices.
+    """
+    import ctypes as C
+    import ctypes.wintypes as W
+
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        print("  live glass: no numpy, so no liquid glass to follow (skipped)")
+        return
+
+    from widgets.core import glass as glass_mod
+    from widgets.core import lens, livewall, winapi
+    from widgets.core.board import REGISTRY
+    from widgets.core.card import DRAG_STEP, MARGIN, RADIUS
+    from widgets.core.glass import GlassBackdrop
+
+    # Patches of a GDI bitmap, red on the left and blue on the right, read
+    # back as the live glass reads them: clipped to it, one off it skipped.
+    gdi, user = C.WinDLL("gdi32"), C.WinDLL("user32")
+    user.GetDC.argtypes, user.GetDC.restype = [W.HWND], W.HDC
+    user.ReleaseDC.argtypes = [W.HWND, W.HDC]
+    user.FillRect.argtypes = [W.HDC, C.POINTER(W.RECT), W.HBRUSH]
+    gdi.CreateCompatibleDC.argtypes, gdi.CreateCompatibleDC.restype = [W.HDC], W.HDC
+    gdi.CreateCompatibleBitmap.argtypes = [W.HDC, C.c_int, C.c_int]
+    gdi.CreateCompatibleBitmap.restype = W.HBITMAP
+    gdi.SelectObject.argtypes, gdi.SelectObject.restype = [W.HDC, W.HGDIOBJ], W.HGDIOBJ
+    gdi.CreateSolidBrush.argtypes, gdi.CreateSolidBrush.restype = [W.COLORREF], W.HBRUSH
+    gdi.DeleteObject.argtypes = [W.HGDIOBJ]
+    gdi.DeleteDC.argtypes = [W.HDC]
+    screen_dc = user.GetDC(None)
+    dc = gdi.CreateCompatibleDC(screen_dc)
+    bmp = gdi.CreateCompatibleBitmap(screen_dc, 64, 40)
+    brushes = [gdi.CreateSolidBrush(200 | (40 << 8) | (40 << 16)),
+               gdi.CreateSolidBrush(30 | (60 << 8) | (210 << 16))]
+    try:
+        old = gdi.SelectObject(dc, bmp)
+        user.FillRect(dc, C.byref(W.RECT(0, 0, 32, 40)), brushes[0])
+        user.FillRect(dc, C.byref(W.RECT(32, 0, 64, 40)), brushes[1])
+        parts = livewall.read_parts(dc, (100, 50, 64, 40),
+                                    [(100, 50, 20, 20), (150, 70, 30, 30), (500, 500, 10, 10)])
+        gdi.SelectObject(dc, old)
+    finally:
+        for b in brushes:
+            gdi.DeleteObject(b)
+        gdi.DeleteObject(bmp)
+        gdi.DeleteDC(dc)
+        user.ReleaseDC(None, screen_dc)
+    assert parts[2] is None, "a patch off the layer was read back"
+    (r0, i0), (r1, i1) = parts[0], parts[1]
+    assert r0 == (100, 50, 20, 20) and r1 == (150, 70, 14, 20), f"patches clipped wrong: {r0}, {r1}"
+    c0, c1 = i0.pixelColor(10, 10), i1.pixelColor(7, 10)
+    assert (c0.red(), c0.green(), c0.blue()) == (200, 40, 40) and (
+        c1.red(), c1.green(), c1.blue()) == (30, 60, 210), "patches read back the wrong pixels"
+
+    W_, H_, LAYER = 800, 400, 0x5150
+    stand = {"frame": None, "hidden": set()}
+
+    def grab_parts(layer, rects, keep=False):
+        out = []
+        for x, y, w, h in rects:
+            x0, y0, x1, y1 = max(x, 0), max(y, 0), min(x + w, W_), min(y + h, H_)
+            out.append(None if x1 <= x0 or y1 <= y0 else
+                       ((x0, y0, x1 - x0, y1 - y0), stand["frame"].copy(x0, y0, x1 - x0, y1 - y0)))
+        return out, (0, 0)
+
+    saved = (livewall.grab, livewall.grab_parts, winapi.fullscreen_monitor,
+             winapi.virtual_screen, winapi.desktop_colour, glass_mod._hidden)
+    livewall.grab = lambda layer, keep=False: (stand["frame"], (0, 0))
+    livewall.grab_parts = grab_parts
+    winapi.fullscreen_monitor = lambda: None
+    winapi.virtual_screen = lambda: (0, 0, W_, H_)
+    winapi.desktop_colour = lambda: (0, 0, 0)
+    glass_mod._hidden = lambda info: set(stand["hidden"])
+
+    RED, GREEN, BLUE, GREY = (220, 30, 40), (40, 170, 60), (30, 60, 220), (90, 90, 90)
+    m = int(MARGIN)
+    card_a = REGISTRY["clock"](pal, "small", {})
+    card_b = REGISTRY["clock"](pal, "small", {})
+    card_a.move(60 - m, 60 - m)
+    card_b.move(500 - m, 100 - m)
+    A = (60, 60, int(card_a.card_rect().width()), int(card_a.card_rect().height()))
+    B = (500, 100, int(card_b.card_rect().width()), int(card_b.card_rect().height()))
+    key_a = A + (float(RADIUS),)
+
+    def scene(a, b) -> QImage:
+        img = QImage(W_, H_, QImage.Format_RGB32)
+        img.fill(QColor(*GREY))
+        p = QPainter(img)
+        p.fillRect(0, 0, 40, 40, QColor("#ffffff"))
+        for (x, y, w, h), rgb in ((A, a), (B, b)):
+            p.fillRect(x - 30, y - 30, w + 60, h + 60, QColor(*rgb))
+        p.end()
+        return img
+
+    def glass_of(card) -> tuple:
+        buf = QImage(card.size(), QImage.Format_ARGB32_Premultiplied)
+        buf.fill(QColor(0, 0, 0, 0))
+        p = QPainter(buf)
+        card._paint_glass(p, card.card_rect())
+        p.end()
+        c = buf.pixelColor(card.width() // 2, card.height() // 2)
+        return c.red(), c.green(), c.blue()
+
+    def near(rgb, want, tol=20) -> bool:
+        return all(abs(a - b) <= tol for a, b in zip(rgb, want))
+
+    g = GlassBackdrop()
+    try:
+        assert g.live_glass, "live glass isn't on by default"
+        g.regions = (A, B)
+        g.region_info = {A: (0, RADIUS), B: (0, RADIUS)}
+        job, _wake = g._prepare_live(LAYER)
+        stand["frame"] = scene(RED, BLUE)
+        assert g._live_once(LAYER, job) == (True, False), "the first frame wasn't built"
+        for card in (card_a, card_b):
+            card.glass = g
+        assert near(glass_of(card_a), RED) and near(glass_of(card_b), BLUE)
+        bent_b, gen = card_b._bent[1], g.generation
+
+        # A frame moves behind A: straight in, bent ahead, B left alone.
+        stand["frame"] = scene(GREEN, BLUE)
+        assert g._live_frame(LAYER, job) == (True, False), "a frame behind a card wasn't built"
+        assert g.changed_since(gen, A) and not g.changed_since(gen, B), "the frame reached B"
+        assert not g.fade_since(gen, A), "a live frame asks to be faded into"
+        ahead = g._ahead.get(key_a)
+        assert ahead is not None and ahead.width() == lens.field(A[2], A[3], RADIUS, DRAG_STEP).cols, (
+            "A's pane wasn't bent ahead on the drag grid")
+        shown = glass_of(card_a)
+        assert near(shown, GREEN) and card_a._pane_from is None, f"A faded into its frame: {shown}"
+        assert card_a._bent[1] is ahead, "A bent its own pane instead of taking the one bent ahead"
+        glass_of(card_b)
+        assert card_b._bent[1] is bent_b, "B was bent again with nothing new behind it"
+
+        # It rests: the coarse bend is bent in full, and that fades in.
+        gen = g.generation
+        assert g._live_frame(LAYER, job) == (False, False)
+        sharp = g._ahead.get(key_a)
+        assert sharp is not None and sharp.width() == lens.field(A[2], A[3], RADIUS).cols, (
+            "resting, A's pane wasn't bent in full")
+        assert g.fade_since(gen, A), "the full bend doesn't fade in"
+        glass_of(card_a)
+        assert card_a._pane_from is not None and card_a._bent[1] is sharp
+        card_a._glass_fade.finish()
+
+        # Hidden behind a window: skipped; back in view, it catches up.
+        stand["hidden"], stand["frame"], gen = {A}, scene(BLUE, BLUE), g.generation
+        assert g._live_frame(LAYER, job) == (False, False) and g.generation == gen, (
+            "the glass behind a hidden card was built")
+        stand["hidden"] = set()
+        assert g._live_frame(LAYER, job) == (True, False) and g.changed_since(gen, A), (
+            "a card back in view didn't catch up")
+        assert near(glass_of(card_a), BLUE)
+
+        # Frosted: live slices for the cards.
+        g.set_liquid(False)
+        stand["frame"] = scene(BLUE, GREEN)
+        assert g._live_frame(LAYER, job) == (True, False)
+        assert g.frost_ahead(*B) is not None, "frosted glass got no live slice"
+        shown = glass_of(card_b)
+        assert card_b._pane[0][2] == "live" and shown[1] > shown[0] + 40 and shown[1] > shown[2] + 40, (
+            f"the frosted card doesn't show its live slice: {shown}")
+
+        # And nothing was left out of captures: the cards stay in screenshots.
+        affinity = W.DWORD()
+        for card in (card_a, card_b):
+            user.GetWindowDisplayAffinity(W.HWND(int(card.winId())), C.byref(affinity))
+            assert affinity.value == 0, "a card was left out of screen captures"
+    finally:
+        g.stop_live()
+        (livewall.grab, livewall.grab_parts, winapi.fullscreen_monitor,
+         winapi.virtual_screen, winapi.desktop_colour, glass_mod._hidden) = saved
+        for card in (card_a, card_b):
+            card.close()
+            card.deleteLater()
+    print("  live glass: patches read back clipped and right; a frame behind one card goes "
+          "straight in, bent ahead on the drag grid, the other card untouched; at rest bent in "
+          "full and faded in; hidden cards skipped; frosted cards get live slices; cards stay "
+          "in screen captures")
 
 
 def _check_layout_mirror() -> None:

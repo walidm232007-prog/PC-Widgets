@@ -28,7 +28,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
 from . import card, displays, winapi
-from .card import MARGIN, WidgetCard, card_size
+from .card import MARGIN, RADIUS, WidgetCard, card_size
 from .displays import Anchor, Display
 from .glass import FROSTS, GlassBackdrop
 from .palette import Palette, build as build_palette
@@ -124,6 +124,7 @@ class Board(QObject):
         # for frosted glass, skips) the clear copy liquid glass bends.
         self.glass.liquid = state.glass_style != "frosted"
         self.glass.frost = state.glass_blur if state.glass_blur in FROSTS else "light"
+        self.glass.live_glass = bool(state.glass_live)
         # The cards' liquid glass waits on that copy, built on a thread after
         # each refresh; when it lands, everything glass repaints. Connected
         # before the first refresh so its signal can't be missed.
@@ -190,7 +191,7 @@ class Board(QObject):
             self._show(c, place=False)
         self._remember_displays()
         self.apply_layer()
-        self.glass.regions = self._glass_regions()
+        self._glass_where()
         if self.state.layer == "desktop":
             self._park.start(1500)
 
@@ -245,6 +246,7 @@ class Board(QObject):
                               self.palette.dark)
         c.moved.connect(lambda c=c: self._card_moved(c))
         c.changed.connect(self.persist)
+        c.changed.connect(self._glass_where)            # a new size, a picture
         c.changed.connect(lambda c=c: self.card_changed.emit(c))
         c.removed.connect(self.remove)
 
@@ -627,6 +629,7 @@ class Board(QObject):
         self._anchor_here(c)
         self.persist()
         self.card_changed.emit(c)
+        self._glass_where()             # live glass follows it to where it landed
 
     def _placements(self, cards: Optional[Sequence[WidgetCard]] = None) -> List[Placement]:
         """The cards as the layout file holds them: where each one *belongs*,
@@ -995,24 +998,26 @@ class Board(QObject):
         # A live wallpaper's frames arrive through _glass_ready; going back to
         # the wallpaper files when it quits repaints here. Where the glass
         # shows is passed on each time: a live wallpaper is judged there.
-        self.glass.regions = self._glass_regions()
+        self._glass_where()
         if self.glass.check_live():
             self._glass_ready()
 
-    def _glass_regions(self) -> Tuple[Tuple[int, int, int, int], ...]:
-        """Where glass shows, (x, y, w, h) on the virtual screen: each card's
-        glass, and the dock."""
-        out = []
+    def _glass_where(self) -> None:
+        """Tell the glass where it shows: each card's glass and the dock, as
+        (x, y, w, h) on the virtual screen, with the window each is in and,
+        for a card, its corners' radius - live glass bends a card's ahead."""
+        info: Dict[Tuple[int, int, int, int], Tuple[int, Optional[float]]] = {}
         if self.state.glass:
             for c in getattr(self, "cards", []):
                 if c.glass is not None and not c.solid_bg:
                     r = c.card_rect()
-                    out.append((c.x() + int(MARGIN), c.y() + int(MARGIN),
-                                int(round(r.width())), int(round(r.height()))))
+                    info[(c.x() + int(MARGIN), c.y() + int(MARGIN),
+                          int(round(r.width())), int(round(r.height())))] = (int(c.winId()), RADIUS)
         dock = getattr(self, "dock", None)
         if dock is not None and dock.isVisible() and self.state.dock_style == "glass":
-            out.append((dock.x(), dock.y(), dock.width(), dock.height()))
-        return tuple(out)
+            info[(dock.x(), dock.y(), dock.width(), dock.height())] = (int(dock.winId()), None)
+        self.glass.region_info = info
+        self.glass.regions = tuple(info)
 
     def _glass_ready(self) -> None:
         """New glass: the clear desktop built, a new wallpaper, a live
@@ -1053,6 +1058,15 @@ class Board(QObject):
         level = level if level in FROSTS else "light"
         self.state.glass_blur = level
         self.glass.set_frost(level)
+        self.persist()
+        self.prefs_changed.emit()
+
+    def set_glass_live(self, on: bool) -> None:
+        """Live glass: with a live wallpaper running, the glass follows it as
+        it moves, about ten frames a second (glass.py); off, it catches up
+        every few seconds and fades."""
+        self.state.glass_live = bool(on)
+        self.glass.set_live_glass(bool(on))
         self.persist()
         self.prefs_changed.emit()
 

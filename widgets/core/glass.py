@@ -76,6 +76,20 @@ REGION_PAD = 16          # px round a card its thumbnail takes in
 REGION_TOLERANCE = 2.0   # mean change (0..255) in that thumbnail that counts as moved
 PATCH_MARGIN = 24        # px round a card rebuilt with it: further than the frost reaches
 
+# Live glass (Settings' "Live glass", on by default) follows a live wallpaper
+# as it moves: a frame every LIVE_FRAME seconds while what lies behind the
+# cards moves, read back and built only behind the cards in view, with the
+# building after each grab kept under LIVE_DUTY of the time (the grab itself is
+# mostly waiting on the compositor). Still, it looks every LIVE_STILL seconds
+# to notice it move again, and every LIVE_RESTING once it has rested a while.
+# Off, the glass updates every LIVE_EVERY seconds and fades, as above.
+LIVE_FRAME = 0.1
+LIVE_STILL = 0.5
+LIVE_RESTING = 1.5
+LIVE_DUTY = 0.3
+LIVE_WHOLE_EVERY = 3.0   # s of motion between whole looks: the blurred copy, glass behind no card
+FROST_MARGIN = DOWNSCALE * (BOX_RADIUS * BOX_PASSES + 2)   # px a frosted slice's blur reaches
+
 
 def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
     """Separable box blur with the edges held. Repeated passes approach a
@@ -151,6 +165,76 @@ def _fit(p: QPainter, img: QImage, dest: QRect, mode: int) -> None:
         p.drawImage(dest, scaled, QRect(sx, sy, w, h))
 
 
+def _overlap(a, b) -> bool:
+    """Whether two (x, y, w, h) rects overlap."""
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def _aligned(rect, virtual, reach: int) -> Tuple[int, int, int, int]:
+    """``rect`` with ``reach`` px round it, its edges moved out to even pixels
+    of the virtual screen, so its half-size planes line up with the clear
+    copy's."""
+    x, y, w, h = rect
+    vl, vt, s = virtual[0], virtual[1], CLEAR_SCALE
+    x0, y0 = vl + (x - vl - reach) // s * s, vt + (y - vt - reach) // s * s
+    x1, y1 = vl - (-(x - vl + w + reach) // s) * s, vt - (-(y - vt + h + reach) // s) * s
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _hidden(info) -> set:
+    """The regions in ``info`` (region -> (its window, radius)) that a window
+    above theirs covers entirely, so live glass needn't build what nobody can
+    see. Only an ordinary window counts - visible, uncloaked, captioned or
+    maximised, not layered, click-through or a tool window - since an
+    invisible overlay over the whole screen (a game launcher's, a graphics
+    driver's) would otherwise freeze every card. One a window and a half
+    cover still counts as in view: that only costs a frame."""
+    wanted = {int(hwnd): rect for rect, (hwnd, _r) in info.items() if hwnd}
+    if not wanted:
+        return set()
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+        user, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
+    except Exception:
+        return set()
+    above, hidden, left = [], set(), set(wanted)
+    box, cloak = wt.RECT(), wt.DWORD()
+    cls = ctypes.create_unicode_buffer(64)
+    style_ex_skip = 0x00080000 | 0x00000020 | 0x00000080 | 0x08000000   # LAYERED, TRANSPARENT, TOOLWINDOW, NOACTIVATE
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def visit(hwnd, _):
+        h = int(hwnd or 0)
+        if h in wanted:
+            x, y, w, hh = wanted[h]
+            if any(l <= x and t <= y and r >= x + w and b >= y + hh for l, t, r, b in above):
+                hidden.add(wanted[h])
+            left.discard(h)
+            return bool(left)                  # stop once the lowest card is reached
+        if not user.IsWindowVisible(hwnd) or user.IsIconic(hwnd):
+            return True
+        if user.GetWindowLongW(hwnd, -20) & style_ex_skip:
+            return True
+        if user.GetWindowLongW(hwnd, -16) & 0x00C00000 != 0x00C00000 and not user.IsZoomed(hwnd):
+            return True                        # no caption and not maximised
+        dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloak), ctypes.sizeof(cloak))
+        if cloak.value:
+            return True
+        user.GetClassNameW(hwnd, cls, 64)
+        if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            return True
+        if user.GetWindowRect(hwnd, ctypes.byref(box)):
+            above.append((box.left, box.top, box.right, box.bottom))
+        return True
+
+    try:
+        user.EnumWindows(visit, 0)
+    except Exception:
+        return set()
+    return hidden
+
+
 class _Notifier(QObject):
     """Tells the GUI thread the clear copy is ready. A signal emitted from the
     builder thread is delivered queued, on the thread that made this."""
@@ -190,6 +274,20 @@ class GlassBackdrop:
         # Where glass shows, (x, y, w, h) on the virtual screen: each card, and
         # the dock. Set by the board; a live wallpaper is judged there.
         self.regions: Tuple[Tuple[int, int, int, int], ...] = ()
+        # For each region, (its window, the corner radius of a card's pane or
+        # None): live glass skips one hidden behind a window, and bends a
+        # card's pane ahead.
+        self.region_info: Dict[Tuple, Tuple[int, Optional[float]]] = {}
+        self.live_glass = True        # Settings' Live glass
+        # Live glass's work, done ahead for the cards: bent panes, by (x, y,
+        # w, h, radius), and frosted slices, by region; and the panes last bent
+        # on the coarse grid, to be bent in full once the wallpaper rests.
+        self._ahead: Dict[Tuple, QImage] = {}
+        self._frost_ahead: Dict[Tuple, QImage] = {}
+        self._live_coarse: set = set()
+        self._live_work = 0.0         # s the last frame spent building, the grab aside
+        self._live_moving = False     # whether the last look found something new
+        self._live_look_at = 0.0      # when the last whole look was
         # A live wallpaper being followed: its layer, or 0. The glass shows it
         # from its first good grab (showing_live); until then, and once it
         # quits, the wallpaper files.
@@ -274,33 +372,63 @@ class GlassBackdrop:
             self._drop_clear()
         return True
 
-    def _bump(self, regions=None) -> None:
+    def _bump(self, regions=None, fade: bool = True) -> None:
         """A new generation, under the lock: what changed is ``regions``,
-        (x, y, w, h) each, or None for everywhere."""
+        (x, y, w, h) each, or None for everywhere; ``fade``, whether glass
+        should fade into it (not a live glass frame). Work done ahead for the
+        glass it touched is dropped."""
         self.generation += 1
-        self._history.append((self.generation, None if regions is None else tuple(regions)))
+        self._history.append((self.generation, None if regions is None else tuple(regions), fade))
+        if regions is None:
+            self._ahead.clear()
+            self._frost_ahead.clear()
+            return
+        for kept in (self._ahead, self._frost_ahead):
+            for key in [k for k in kept if any(_overlap(k[:4], r) for r in regions)]:
+                del kept[key]
 
     def changed_since(self, generation, rect) -> bool:
         """Whether the glass behind ``rect`` (x, y, w, h on the virtual screen)
         can have changed since ``generation``. A card asks before it bends its
         glass again or fades: a live wallpaper moving behind one card changes
         the glass behind that one, and the others keep theirs."""
+        return self._since(generation, rect, False)
+
+    def fade_since(self, generation, rect) -> bool:
+        """Whether a change since ``generation`` behind ``rect`` should be faded
+        into: anything but live glass's frames, which follow each other too
+        quickly for a fade."""
+        return self._since(generation, rect, True)
+
+    def _since(self, generation, rect, fading: bool) -> bool:
         if not isinstance(generation, int):
             return True
         with self._lock:
             if generation >= self.generation:
                 return False
-            later = [regions for gen, regions in self._history if gen > generation]
+            later = [(regions, fade) for gen, regions, fade in self._history if gen > generation]
             if len(later) < self.generation - generation:
                 return True            # further back than is remembered
-        x, y, w, h = rect
-        for regions in later:
-            if regions is None:
+        for regions, fade in later:
+            if fading and not fade:
+                continue
+            if regions is None or any(_overlap(rect, r) for r in regions):
                 return True
-            for rx, ry, rw, rh in regions:
-                if x < rx + rw and rx < x + w and y < ry + rh and ry < y + h:
-                    return True
         return False
+
+    def set_live_glass(self, on: bool) -> None:
+        """Settings' Live glass: follow a live wallpaper as it moves, or update
+        every LIVE_EVERY seconds and fade."""
+        self.live_glass = bool(on)
+        with self._lock:
+            self._live_coarse.clear()
+        self._wake_live()
+
+    def frost_ahead(self, sx: int, sy: int, w: int, h: int) -> Optional[QImage]:
+        """Live glass's frosted slice for the card whose glass is at ``sx, sy``
+        and ``w`` by ``h``, built from its latest frame, or None."""
+        with self._lock:
+            return self._frost_ahead.get((int(sx), int(sy), int(w), int(h)))
 
     # ------------------------------------------------------------------ #
     #  The clear copy, for liquid glass
@@ -475,7 +603,8 @@ class GlassBackdrop:
         at all while a full-screen window has the focus - a game covers the
         desktop, glass and all. ``rested``: the first frame is already built,
         so the first look waits too."""
-        wait = LIVE_EVERY if rested else 0.0
+        wait = (LIVE_FRAME if self.live_glass else LIVE_EVERY) if rested else 0.0
+        still = 0
         try:
             while True:
                 if wait:
@@ -483,18 +612,47 @@ class GlassBackdrop:
                 wake.clear()
                 if job != self._live_job or not livewall.alive(layer):
                     return
+                live = self.live_glass
                 built = again = False
+                started = time.perf_counter()
                 try:
-                    if winapi.fullscreen_monitor() is None:
+                    if winapi.fullscreen_monitor() is not None:
+                        pass
+                    elif not live or self._whole_look_due(still):
                         built, again = self._live_once(layer, job, keep=True)
+                        self._live_look_at = time.monotonic()
+                    else:
+                        built, again = self._live_frame(layer, job)
                 except Exception:
                     pass
                 with self._lock:
                     if job == self._live_job:
                         self._built.set()      # tried: wait_clear needn't wait on
-                wait = 0.0 if again else LIVE_EVERY * (2 if built else 1)
+                took = time.perf_counter() - started
+                still = 0 if built else still + 1
+                self._live_moving = built
+                if again:
+                    wait = 0.0
+                elif not live:
+                    wait = LIVE_EVERY * (2 if built else 1)
+                elif built:
+                    # Paced as the dock's capture is: a frame every LIVE_FRAME,
+                    # but resting at least as long as LIVE_DUTY asks after the
+                    # building - the grab before it is mostly waiting.
+                    work = self._live_work
+                    wait = max(LIVE_FRAME - took, work * (1 - LIVE_DUTY) / LIVE_DUTY)
+                else:
+                    wait = LIVE_STILL if still < 10 else LIVE_RESTING
         finally:
-            livewall.release()                 # the bitmap its grabs kept
+            livewall.release()                 # the bitmaps its grabs kept
+
+    def _whole_look_due(self, still: int) -> bool:
+        """Whether live glass's next look should be a whole one: the first, one
+        after a setting changed, and every LIVE_WHOLE_EVERY seconds while it
+        moves, for the blurred copy and glass behind no card."""
+        if self._live_mark is None or not self.showing_live:
+            return True
+        return self._live_moving and time.monotonic() - self._live_look_at >= LIVE_WHOLE_EVERY
 
     def _live_once(self, layer: int, job: int, keep: bool = False) -> Tuple[bool, bool]:
         """One look at the live wallpaper. Returns (whether glass was built
@@ -535,13 +693,24 @@ class GlassBackdrop:
         if not whole:
             for rect in regions:
                 seen = self._region_mark(canvas, virtual, rect)
-                if seen is not None and livewall.differs(marks.get(rect), seen, REGION_TOLERANCE):
+                if seen is not None and livewall.moved(marks.get(rect), seen, REGION_TOLERANCE):
                     moved.append(rect)
                     marks[rect] = seen
             if not moved:
                 with self._lock:
                     if job == self._live_job:
                         self._live_mark = mark
+                if self.live_glass:
+                    # Live glass's frames keep the glass behind the cards
+                    # current, so this finds nothing new there - but the
+                    # blurred copy is redone for glass that isn't a card's,
+                    # the app's sidebar: no new generation, nothing to bend.
+                    canvas = canvas.convertToFormat(QImage.Format_RGB32)
+                    image, origin = self._blurred(canvas, virtual)
+                    with self._lock:
+                        if job == self._live_job:
+                            self.image, self.origin = image, origin
+                    self.notifier.ready.emit()
                 return False, False            # moving, but behind no glass
             whole = time.monotonic() - self._live_whole_at >= LIVE_FULL_EVERY
         if whole:
@@ -577,11 +746,149 @@ class GlassBackdrop:
             self.showing_live = True
             self._pending = None
             self._job += 1                     # a build from the files still running is dropped
-            self._bump(None if whole else moved)
+            # Live glass fades only into a first frame or a setting's change;
+            # its looks along the way are frames like the rest.
+            self._bump(None if whole else moved,
+                       fade=not self.live_glass or last is None or not showing)
             if whole and fits:
                 self._live_whole_at = time.monotonic()
         self.notifier.ready.emit()
         return True, not fits
+
+    def _live_frame(self, layer: int, job: int) -> Tuple[bool, bool]:
+        """One frame of live glass, returning as _live_once does. The layer is
+        grabbed, but read back only behind the glass in view - ``regions`` not
+        hidden behind a window - and built again only where that moved. Liquid
+        glass gets its clear copy patched there and each card's pane bent
+        ahead, here, on the grid a card uses while dragged, so a card's repaint
+        is only drawing; frosted glass gets each card's slice blurred. Nothing
+        fades: the frames follow each other too quickly. Once it rests, the
+        coarse bends are bent again in full, and those fade in."""
+        with self._lock:
+            liquid, frost = self.liquid, self.frost
+            regions, info = tuple(self.regions), dict(self.region_info)
+            marks, clear, origin = dict(self._region_marks), self.clear, self.clear_origin
+            coarse, placed = set(self._live_coarse), self._live_virtual
+        virtual = winapi.virtual_screen()
+        if placed != virtual or (liquid and clear is None) or not regions:
+            return self._live_once(layer, job, keep=True)
+        hidden = _hidden(info)
+        view = [r for r in regions if r not in hidden]
+        if not view:
+            self._live_work = 0.0
+            return False, False
+        asks = [_aligned(r, virtual, PATCH_MARGIN if liquid else FROST_MARGIN) for r in view]
+        got = livewall.grab_parts(layer, asks, keep=True)
+        if got is None:
+            return False, False
+        started = time.perf_counter()
+        moved, pieces = [], []
+        for rect, part in zip(view, got[0]):
+            if part is None:
+                continue
+            seen = self._part_mark(part[1], part[0], rect)
+            if seen is not None and livewall.moved(marks.get(rect), seen, REGION_TOLERANCE):
+                moved.append(rect)
+                marks[rect] = seen
+                pieces.append((rect, part[0], part[1]))
+        frosting = FROSTS.get(frost, FROSTS["light"])
+        if not moved:
+            sharp = {}
+            if liquid and coarse and clear is not None:
+                sharp = self._bend_panes(clear, origin, coarse, info, None)
+            if sharp:
+                with self._lock:
+                    if job != self._live_job or (self.liquid, self.frost) != (liquid, frost):
+                        return False, False
+                    self._bump([k[:4] for k in sharp])
+                    self._ahead.update(sharp)
+                    self._live_coarse.clear()
+                self.notifier.ready.emit()
+            self._live_work = time.perf_counter() - started
+            return False, False
+        planes, ahead, slices = None, {}, {}
+        try:
+            if liquid:
+                planes = clear.copy()
+                for _rect, prect, img in pieces:
+                    self._patch_part(planes, img.convertToFormat(QImage.Format_RGB32), prect,
+                                     virtual, frosting)
+                from .card import DRAG_STEP
+                ahead = self._bend_panes(planes, origin, moved, info, DRAG_STEP)
+            else:
+                for rect, prect, img in pieces:
+                    slices[rect] = self._frost_slice(img, prect, rect)
+        except Exception:
+            return False, False                # no numpy: the cards stay as they are
+        with self._lock:
+            if job != self._live_job:
+                return False, False
+            if (self.liquid, self.frost) != (liquid, frost):
+                self._live_mark = None         # a setting changed meanwhile: a whole look next
+                return True, True
+            if planes is not None:
+                self.clear = planes
+            self._region_marks.update({r: marks[r] for r in moved})
+            self._bump(moved, fade=False)
+            self._ahead.update(ahead)
+            self._frost_ahead.update(slices)
+            self._live_coarse.update(ahead)
+        self.notifier.ready.emit()
+        self._live_work = time.perf_counter() - started
+        return True, False
+
+    @staticmethod
+    def _part_mark(img: QImage, prect: Tuple[int, int, int, int],
+                   rect: Tuple[int, int, int, int]) -> Optional[bytes]:
+        """_region_mark's thumbnail of ``rect``, from a patch read back round
+        it at ``prect``: the same pixels, so the two compare."""
+        x, y, w, h = rect
+        area = QRect(x - prect[0] - REGION_PAD, y - prect[1] - REGION_PAD,
+                     w + 2 * REGION_PAD, h + 2 * REGION_PAD).intersected(img.rect())
+        if area.width() < 2 or area.height() < 2:
+            return None
+        small = img.copy(area).scaled(16, 16, Qt.IgnoreAspectRatio,
+                                      Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB888)
+        return bytes(small.constBits())[: 16 * 16 * 3]
+
+    @staticmethod
+    def _patch_part(planes, img: QImage, prect: Tuple[int, int, int, int],
+                    virtual: Tuple[int, int, int, int], frost: Tuple[int, int]) -> None:
+        """Write a patch, read back at ``prect`` (from an even pixel of the
+        virtual screen, PATCH_MARGIN round its card), into the clear copy
+        ``planes``, in place."""
+        part, _ = GlassBackdrop._planes(img, (0, 0, prect[2], prect[3]), frost)
+        py, px = (prect[1] - virtual[1]) // CLEAR_SCALE, (prect[0] - virtual[0]) // CLEAR_SCALE
+        ph, pw = min(part.shape[1], planes.shape[1] - py), min(part.shape[2], planes.shape[2] - px)
+        if ph > 0 and pw > 0:
+            planes[:, py:py + ph, px:px + pw] = part[:, :ph, :pw]
+
+    @staticmethod
+    def _frost_slice(img: QImage, prect: Tuple[int, int, int, int],
+                     rect: Tuple[int, int, int, int]) -> QImage:
+        """A card's frosted slice, blurred as the whole desk is, from a patch
+        read back FROST_MARGIN round it."""
+        pw, ph = img.width(), img.height()
+        small = img.scaled(max(1, pw // DOWNSCALE), max(1, ph // DOWNSCALE),
+                           Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        small = _box_blur(small, BOX_RADIUS, BOX_PASSES)
+        big = small.scaled(pw, ph, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        return big.copy(rect[0] - prect[0], rect[1] - prect[1], rect[2], rect[3])
+
+    @staticmethod
+    def _bend_panes(planes, origin, rects, info, step) -> Dict[Tuple, QImage]:
+        """Each card's pane among ``rects`` bent from ``planes``, keyed as
+        bend() looks for it, on a ``step`` px grid (lens.STEP if None). The
+        dock bends its own."""
+        from . import lens
+        out = {}
+        for rect in rects:
+            x, y, w, h = rect[:4]
+            radius = info.get((x, y, w, h), (0, None))[1]
+            if radius is not None:
+                out[(x, y, w, h, float(radius))] = lens.bend(planes, CLEAR_SCALE, origin, x, y, w, h,
+                                                             radius, int(step or lens.STEP))
+        return out
 
     @staticmethod
     def _region_mark(canvas: QImage, virtual: Tuple[int, int, int, int],
@@ -686,12 +993,15 @@ class GlassBackdrop:
         ``last_bend_ms`` is left holding what the bend itself cost. Working out
         a new size's field, once, is kept out of it: counted in, the first bend
         of a new card made a quick PC look slow and its drag went frosted."""
+        w, h = int(round(w)), int(round(h))
         with self._lock:
             planes, origin = self.clear, self.clear_origin
+            ahead = self._ahead.get((int(sx), int(sy), w, h, float(radius))) if step is None else None
+        if ahead is not None:
+            return ahead                       # bent already, by live glass's thread
         if planes is None:
             return None
         from . import lens
-        w, h = int(round(w)), int(round(h))
         step = int(step or lens.STEP)
         lens.field(w, h, radius, step)
         started = time.perf_counter()
@@ -774,6 +1084,10 @@ class GlassBackdrop:
         lives on the virtual screen. Returns False if there is nothing to draw
         and the caller should fall back to a flat fill.
         """
+        live = self.frost_ahead(screen_x, screen_y, int(dest.width()), int(dest.height()))
+        if live is not None:
+            p.drawImage(dest, live)            # live glass's slice, from its latest frame
+            return True
         if self.image is None:
             return False
         ox, oy = self.origin

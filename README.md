@@ -624,8 +624,59 @@ all. The grab has the live wallpaper where it draws and Windows' own wallpaper
 on any monitor it leaves alone, and never the icons or any window, the cards
 included. Nothing is shown and nothing moves.
 
-While one runs, both copies of the desktop, the blurred one and liquid glass's
-clear one, are built from that grab instead of the files:
+When the board starts with a live wallpaper running, its first frame is built
+before anything is drawn, about 0.3 s, so the cards come up showing it
+instead of the files' picture for a moment first.
+
+The board looks for a live wallpaper every 3 s with a few window lookups, so
+the glass switches over soon after one starts. When it quits, the glass is
+built from the files again, and fades in like any other change.
+
+### Live glass
+
+**Settings → Look → Live glass**, on by default, makes the glass follow the
+wallpaper as it moves: about ten frames a second while something moves behind
+the cards. It's true glass that still shows up in screenshots. The see-through
+dock leaves itself out of screen captures, because a capture of the screen
+behind it would otherwise contain the dock. Live glass never captures the
+screen. It grabs the wallpaper layer itself, which holds no window, the cards
+included, so nothing has to be left out of captures.
+
+- **Only behind the cards in view.** The grab reads back just a patch behind
+  each card, 0.6 ms for four, where the whole desk took 9 ms. A card hidden
+  behind a window that covers it entirely is skipped, until it's back in view.
+  Only ordinary app windows count there, never the invisible overlays some
+  game launchers and graphics drivers put over the whole screen.
+- **Only where it moved.** A card's patch counts as moved when its thumbnail's
+  average changes or any one part of it changes clearly, so a light drifting
+  across one corner counts and a scatter of sparkles doesn't. Cards with
+  nothing new behind them aren't touched.
+- **Bent ahead.** Each moving card's liquid glass is bent on the background
+  thread, on the coarser grid a card uses while it's dragged. The card's
+  repaint is then only drawing. Once the wallpaper rests, each card is bent in
+  full and fades into it. Frosted cards get a freshly blurred slice instead.
+- **No fades between frames.** They follow each other too quickly.
+- **Paced like the dock's capture.** A frame every 0.1 s, but never building
+  more than 30% of the time; the grab itself is mostly waiting on the
+  compositor. While nothing moves, it looks twice a second to notice motion,
+  and every 1.5 s once things have been still for a few seconds. Nothing at
+  all while a full-screen window has the focus.
+
+Measured on a Ryzen 5 5600G with a 3000×1920 desk, the grab costs about 15 ms
+of CPU and building the glass behind six moving cards about 11 ms. The six
+cards then repaint in about 8 ms. Paced at ten frames a second, that's about
+a third of one core while the wallpaper moves behind all of them. Fewer or
+smaller cards cost less. While it's still, a look costs about 20 ms of CPU:
+about 1.3% of a core once it has rested.
+
+Shown over apps (see [Layers](#layers)), the cards keep showing the desktop
+behind them. Seeing the windows behind them would mean leaving them out of
+captures. Desktop icons aren't in the wallpaper layer, so they don't show
+through either.
+
+### Smooth updates
+
+With **Live glass** off, the glass catches up every few seconds and fades:
 
 - **A look every 3 s, on a thread of its own, and every 6 s while the
   wallpaper keeps moving.** A wallpaper that starts moving is caught within
@@ -650,21 +701,13 @@ clear one, are built from that grab instead of the files:
 - **A black grab is ignored.** An app that won't draw into one leaves the
   glass showing what it did.
 
-When the board starts with a live wallpaper running, its first frame is built
-before anything is drawn, about 0.3 s, so the cards come up showing it
-instead of the files' picture for a moment first.
-
-On a Ryzen 5 5600G with a 3000×1920 desk, a grab takes about 40 ms, 15 ms of
-it CPU. The rest is waiting on the compositor. The grab keeps its bitmap from
-one look to the next, since making a new one each time cost a third again. A
-look that finds nothing new costs about 20 ms of CPU, so about 0.65% of one
-core. With the wallpaper moving behind all six cards of a typical board, an
-update costs about 170 ms of CPU, including the six cards bending again and
-fading. Every 6 s, that's about 3% of one core.
-
-The board looks for a live wallpaper every 3 s with a few window lookups, so
-the glass switches over soon after one starts. When it quits, the glass is
-built from the files again, and fades in like any other change.
+A grab takes about 40 ms, 15 ms of it CPU; the rest is waiting on the
+compositor. The grab keeps its bitmap from one look to the next, since making
+a new one each time cost a third again. A look that finds nothing new costs
+about 20 ms of CPU, so about 0.65% of one core. With the wallpaper moving
+behind all six cards of a typical board, an update costs about 170 ms of CPU,
+including the six cards bending again and fading. Every 6 s, that's about 3%
+of one core.
 
 ## Glass Dock
 
@@ -845,7 +888,11 @@ the same on any PC whatever its desktop runs, and the boards the other checks
 build never follow a real one. The smooth glass check moves a live wallpaper
 behind one of two cards. Only that card's glass may be rebuilt, coming out
 exactly as a whole build would, and only that card may fade. It also checks
-that a new wallpaper lands whole, with no frosted moment in between. The TLS check reads what the board's
+that a new wallpaper lands whole, with no frosted moment in between. The live
+glass check reads patches back from a GDI bitmap, then follows frames behind
+two cards: one that moved goes straight in, bent ahead, while the other is left
+alone; at rest it's bent in full; a hidden card is skipped; and no card is ever
+left out of screen captures. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 
