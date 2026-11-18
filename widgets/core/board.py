@@ -128,21 +128,26 @@ class Board(QObject):
         # each refresh; when it lands, everything glass repaints. Connected
         # before the first refresh so its signal can't be missed.
         self.glass.notifier.ready.connect(self._glass_ready)
-        self.glass.refresh()
+        # A live wallpaper (Wallpaper Engine and the like) covers the files:
+        # while one runs, the glass follows it from a thread (glass.py). Its
+        # first frame is built here, before anything is drawn, so the cards
+        # come up showing it rather than the files' picture for a moment.
+        # Looked for again every few seconds - a few window lookups - so the
+        # glass switches over soon after one starts or quits. The self-tests
+        # turn it off: what they check mustn't hang on what this PC's desktop
+        # runs.
+        live = not os.environ.get("PCWIDGETS_NO_LIVE_WALLPAPER")
+        if live:
+            self.glass.check_live(now=True)
+        self.glass.refresh()            # the files - nothing, while a live one shows
         # The wallpaper can change under us - a slideshow, a theme switch, a
         # monitor being plugged in. Cheap to check, only rebuilt when it moved.
         self._glass_timer = QTimer(self)
         self._glass_timer.timeout.connect(self._refresh_glass)
         self._glass_timer.start(20_000)
-        # A live wallpaper (Wallpaper Engine and the like) covers the files:
-        # while one runs, the glass follows it from a thread (glass.py). Looked
-        # for now and every few seconds - a few window lookups - so the glass
-        # switches over soon after it starts or quits. The self-tests turn it
-        # off: what they check mustn't hang on what this PC's desktop runs.
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._check_live)
-        if not os.environ.get("PCWIDGETS_NO_LIVE_WALLPAPER"):
-            self.glass.check_live()
+        if live:
             self._live_timer.start(3_000)
 
         # In desktop mode another window can end up drawn over a widget when
@@ -185,6 +190,7 @@ class Board(QObject):
             self._show(c, place=False)
         self._remember_displays()
         self.apply_layer()
+        self.glass.regions = self._glass_regions()
         if self.state.layer == "desktop":
             self._park.start(1500)
 
@@ -983,24 +989,41 @@ class Board(QObject):
         # Kept current with the widgets' glass switched off too: the app
         # window's sidebar is frosted with the same picture.
         if self.glass.refresh():
-            self.glass_changed.emit()
-            if self.state.glass:
-                for c in self.cards:
-                    c.update()
+            self._glass_ready()
 
     def _check_live(self) -> None:
         # A live wallpaper's frames arrive through _glass_ready; going back to
-        # the wallpaper files when it quits repaints here.
+        # the wallpaper files when it quits repaints here. Where the glass
+        # shows is passed on each time: a live wallpaper is judged there.
+        self.glass.regions = self._glass_regions()
         if self.glass.check_live():
             self._glass_ready()
 
+    def _glass_regions(self) -> Tuple[Tuple[int, int, int, int], ...]:
+        """Where glass shows, (x, y, w, h) on the virtual screen: each card's
+        glass, and the dock."""
+        out = []
+        if self.state.glass:
+            for c in getattr(self, "cards", []):
+                if c.glass is not None and not c.solid_bg:
+                    r = c.card_rect()
+                    out.append((c.x() + int(MARGIN), c.y() + int(MARGIN),
+                                int(round(r.width())), int(round(r.height()))))
+        dock = getattr(self, "dock", None)
+        if dock is not None and dock.isVisible() and self.state.dock_style == "glass":
+            out.append((dock.x(), dock.y(), dock.width(), dock.height()))
+        return tuple(out)
+
     def _glass_ready(self) -> None:
-        """The clear desktop is built, or a live wallpaper's new frame:
-        everything glass repaints, and frosted cards turn liquid."""
+        """New glass: the clear desktop built, a new wallpaper, a live
+        wallpaper's new frame. Everything glass is told, and the cards whose
+        glass it changed repaint - fading into it (card.py) - frosted cards
+        turning liquid."""
         self.glass_changed.emit()
         if self.state.glass:
             for c in getattr(self, "cards", []):
-                c.update()
+                if c.glass_stale():
+                    c.update()
 
     def set_glass(self, on: bool) -> None:
         self.state.glass = on

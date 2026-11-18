@@ -582,8 +582,18 @@ against 2 ms for frosted glass. On a PC slow enough that a step would still take
 longer than 12 ms, the card shows frosted glass while it moves.
 
 The clear copy is built on a thread after each wallpaper change, taking about
-0.4 s here, and until it lands a card shows frosted glass. A card also stays
+0.4 s here. Until it lands, the cards keep the glass they had, and the new
+wallpaper's blurred copy waits to land with it. On a first start there is
+nothing to keep, so the cards show frosted glass until then. A card also stays
 frosted without numpy (a checkout with only PySide6).
+
+Whenever the glass behind a card that's sitting still changes, the card fades
+from the old glass to the new over 0.4 s instead of switching. That covers a
+new wallpaper, a live one moving, the clear copy landing, and Glass style or
+Blur being changed. Only the glass fades: the tint and everything on the card
+are drawn over it as usual. A card being dragged or resized switches, since
+there's no old glass of the same spot to fade from. The dock fades its glass
+the same way.
 
 **Settings → Look** has the choices. **Glass style** is Liquid or Frosted, for
 the cards and the dock together; Frosted drops the clear copy altogether.
@@ -617,25 +627,44 @@ included. Nothing is shown and nothing moves.
 While one runs, both copies of the desktop, the blurred one and liquid glass's
 clear one, are built from that grab instead of the files:
 
-- **Every 15 s, on a thread of its own.** The glass trails an animated
-  wallpaper by up to that much, which its blur hides well enough.
-- **Only when the frame changed.** A 32×18 thumbnail of each grab is compared
-  with the last, so a still or paused wallpaper costs the grab and nothing else.
+- **A look every 3 s, on a thread of its own, and every 6 s while the
+  wallpaper keeps moving.** A wallpaper that starts moving is caught within
+  3 s, and one that never stops costs half as much.
+- **Judged card by card.** A 16×16 thumbnail of what lies behind each card
+  (and the dock) is compared with the one its glass was built from. Only the
+  cards whose thumbnail moved get new glass. The others keep theirs and
+  aren't even repainted, so motion behind one card leaves the rest alone, and
+  motion behind no card builds nothing.
+- **Rebuilt only where it moved.** The blurred copy is redone whole, since
+  that takes about 17 ms. The clear copy is only patched behind the cards
+  that moved: about 1.5 ms a card, where the whole desk takes 150 ms. Each
+  patch reaches 24 px past its card, further than the frost does, so it comes
+  out exactly as a whole build would. While the wallpaper keeps moving, the
+  clear copy is built whole once a minute too, for glass that's behind no
+  card, such as the dock's menus or a card that has just been moved.
+- **Faded in.** A card fades into its new glass over 0.4 s (see
+  [Liquid glass](#liquid-glass)).
 - **Not at all while a full-screen window has the focus.** A game covers the
-  desktop, glass and all.
+  desktop, glass and all. Wallpaper Engine pauses itself then too, by default,
+  and a paused wallpaper's identical frames are skipped straight away.
 - **A black grab is ignored.** An app that won't draw into one leaves the
   glass showing what it did.
 
-On a Ryzen 5 5600G with a 3000×1920 desk, a grab takes about 55 ms, mostly
-waiting on the compositor. A new frame then takes about 20 ms to blur and
-210 ms more for the clear copy, so an animated wallpaper costs about 2% of one
-core and a still one about 0.4%. Measured there, a rebuild held up the
-board's own thread for 16.5 ms at most, about one frame. When the board
-starts, the first live frame lands about 0.3 s after the files' glass.
+When the board starts with a live wallpaper running, its first frame is built
+before anything is drawn, about 0.3 s, so the cards come up showing it
+instead of the files' picture for a moment first.
+
+On a Ryzen 5 5600G with a 3000×1920 desk, a grab takes about 40 ms, 15 ms of
+it CPU. The rest is waiting on the compositor. The grab keeps its bitmap from
+one look to the next, since making a new one each time cost a third again. A
+look that finds nothing new costs about 20 ms of CPU, so about 0.65% of one
+core. With the wallpaper moving behind all six cards of a typical board, an
+update costs about 170 ms of CPU, including the six cards bending again and
+fading. Every 6 s, that's about 3% of one core.
 
 The board looks for a live wallpaper every 3 s with a few window lookups, so
 the glass switches over soon after one starts. When it quits, the glass is
-built from the files again.
+built from the files again, and fades in like any other change.
 
 ## Glass Dock
 
@@ -813,7 +842,10 @@ The glass check composites two made-up monitors with a solid picture each and
 reads back which colour landed where. The live wallpaper check plays the
 wallpaper layer, its grabs and a full-screen game with stand-ins, so it checks
 the same on any PC whatever its desktop runs, and the boards the other checks
-build never follow a real one. The TLS check reads what the board's
+build never follow a real one. The smooth glass check moves a live wallpaper
+behind one of two cards. Only that card's glass may be rebuilt, coming out
+exactly as a whole build would, and only that card may fade. It also checks
+that a new wallpaper lands whole, with no frosted moment in between. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 

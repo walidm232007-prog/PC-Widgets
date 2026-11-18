@@ -36,8 +36,9 @@ copy is never built and every card stays frosted.
 A live wallpaper - Wallpaper Engine and the like - covers the wallpaper files
 without Windows ever hearing of it (livewall.py), and the glass went on showing
 a picture that wasn't on screen. While one runs, both copies are built from a
-grab of it instead: on a thread, every LIVE_EVERY seconds, and only when the
-grab shows a new frame.
+grab of it instead, on a thread, every LIVE_EVERY seconds - and only behind the
+cards it moved behind (``regions``, ``changed_since``), so each card bends and
+fades again only when what is behind it changed.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import deque
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, QRect, Qt, Signal
@@ -63,11 +65,16 @@ CLEAR_SCALE = 2          # the clear copy is kept at 1/2 size...
 # straight through the cards' small grey labels. More is about 6px.
 FROSTS = {"none": (0, 0), "light": (1, 3), "more": (2, 4)}
 
-# A live wallpaper (livewall.py) is grabbed this often, on a thread of its own,
-# and the glass built again only when the grab shows a new frame. It trails an
-# animated wallpaper by up to this much, which a blur of it hides well enough;
-# more often would only cost more.
-LIVE_EVERY = 15.0
+# A live wallpaper (livewall.py) is looked at this often, on a thread of its
+# own, and the glass behind a card built again only where the look finds
+# something new - which the card then fades into. While it keeps finding
+# something, it looks half as often: a wallpaper that starts moving is caught
+# within LIVE_EVERY, and one that never stops costs half as much.
+LIVE_EVERY = 3.0
+LIVE_FULL_EVERY = 60.0   # s of motion between whole clear copies, for glass behind no card
+REGION_PAD = 16          # px round a card its thumbnail takes in
+REGION_TOLERANCE = 2.0   # mean change (0..255) in that thumbnail that counts as moved
+PATCH_MARGIN = 24        # px round a card rebuilt with it: further than the frost reaches
 
 
 def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
@@ -174,6 +181,15 @@ class GlassBackdrop:
         self._job = 0
         self._built = threading.Event()
         self._last = None             # what the last refresh composed, to rebuild from
+        # A new wallpaper's blurred copy, waiting to land with its clear copy
+        # (refresh): (image, origin, tint), or None.
+        self._pending = None
+        # (generation, regions it changed - or None, everywhere) for the last
+        # few changes, so a card can tell whether one reached it.
+        self._history = deque(maxlen=32)
+        # Where glass shows, (x, y, w, h) on the virtual screen: each card, and
+        # the dock. Set by the board; a live wallpaper is judged there.
+        self.regions: Tuple[Tuple[int, int, int, int], ...] = ()
         # A live wallpaper being followed: its layer, or 0. The glass shows it
         # from its first good grab (showing_live); until then, and once it
         # quits, the wallpaper files.
@@ -181,8 +197,10 @@ class GlassBackdrop:
         self.showing_live = False
         self._live_job = 0
         self._live_wake: Optional[threading.Event] = None
-        self._live_mark: Optional[bytes] = None    # the last frame's fingerprint
+        self._live_mark: Optional[bytes] = None    # the last frame looked at; None: build it whole
         self._live_virtual = None                  # the virtual screen it was placed on
+        self._live_whole_at = 0.0                  # when the clear copy was last built whole
+        self._region_marks: Dict[Tuple, bytes] = {}   # each region's thumbnail, as built
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -239,15 +257,50 @@ class GlassBackdrop:
             if self.showing_live:
                 return False           # a live wallpaper's frame landed meanwhile
             self._signature = sig
-            self.tint = QColor(r, g, b)
-            self.image, self.origin = image, origin
-            self.generation += 1
             self._last = (pics, mode, virtual, QColor(r, g, b))
+            # With liquid glass a new desktop lands whole, blurred and clear
+            # copies together once the clear one is built: the cards keep the
+            # old glass meanwhile and fade from it, where they went frosted
+            # for a moment first. Only a first desktop shows straight away.
+            now = self.image is None or not self.liquid
+            if now:
+                self.tint = QColor(r, g, b)
+                self.image, self.origin = image, origin
+                self._bump()
         if self.liquid:
-            self._start_clear(*self._last)
+            self._start_clear(*self._last, keep=True,
+                              blurred=None if now else (image, origin, QColor(r, g, b)))
         else:
             self._drop_clear()
         return True
+
+    def _bump(self, regions=None) -> None:
+        """A new generation, under the lock: what changed is ``regions``,
+        (x, y, w, h) each, or None for everywhere."""
+        self.generation += 1
+        self._history.append((self.generation, None if regions is None else tuple(regions)))
+
+    def changed_since(self, generation, rect) -> bool:
+        """Whether the glass behind ``rect`` (x, y, w, h on the virtual screen)
+        can have changed since ``generation``. A card asks before it bends its
+        glass again or fades: a live wallpaper moving behind one card changes
+        the glass behind that one, and the others keep theirs."""
+        if not isinstance(generation, int):
+            return True
+        with self._lock:
+            if generation >= self.generation:
+                return False
+            later = [regions for gen, regions in self._history if gen > generation]
+            if len(later) < self.generation - generation:
+                return True            # further back than is remembered
+        x, y, w, h = rect
+        for regions in later:
+            if regions is None:
+                return True
+            for rx, ry, rw, rh in regions:
+                if x < rx + rw and rx < x + w and y < ry + rh and ry < y + h:
+                    return True
+        return False
 
     # ------------------------------------------------------------------ #
     #  The clear copy, for liquid glass
@@ -291,19 +344,32 @@ class GlassBackdrop:
             self._wake_live()
 
     def _drop_clear(self) -> None:
+        landed = False
         with self._lock:
             self._job += 1             # and any build still running is ignored
             self.clear = None
+            if self._pending is not None:
+                # A new wallpaper was waiting on the clear copy: show it now.
+                self.image, self.origin, self.tint = self._pending
+                self._pending = None
+                self._bump()
+                landed = True
             self._built.set()          # nothing coming: don't keep anyone waiting
+        if landed:
+            self.notifier.ready.emit()
 
     def _start_clear(self, pictures, mode: int, virtual, colour: QColor,
-                     keep: bool = False) -> None:
+                     keep: bool = False, blurred=None) -> None:
+        """Build the clear copy on a thread. ``blurred``, (image, origin,
+        tint), is a new wallpaper's blurred copy, landing with it."""
         frost = FROSTS.get(self.frost, FROSTS["light"])
         with self._lock:
             if self.showing_live:
                 return                 # the live wallpaper's thread builds it
             self._job += 1
             job = self._job
+            if blurred is not None:
+                self._pending = blurred
             if not keep:
                 self.clear = None      # the old one shows the old wallpaper
             self._built.clear()
@@ -316,11 +382,16 @@ class GlassBackdrop:
             with self._lock:
                 if job != self._job or self.showing_live:
                     return             # the desktop changed again meanwhile
+                landed = planes is not None or self._pending is not None
+                if self._pending is not None:
+                    self.image, self.origin, self.tint = self._pending
+                    self._pending = None
                 if planes is not None:
                     self.clear, self.clear_origin = planes, origin
-                    self.generation += 1
+                if landed:
+                    self._bump()
                 self._built.set()
-            if planes is not None:
+            if landed:
                 self.notifier.ready.emit()
 
         threading.Thread(target=build, name="glass-clear", daemon=True).start()
@@ -334,11 +405,15 @@ class GlassBackdrop:
     # ------------------------------------------------------------------ #
     #  Live wallpapers (livewall.py)
     # ------------------------------------------------------------------ #
-    def check_live(self) -> bool:
+    def check_live(self, now: bool = False) -> bool:
         """Start following a live wallpaper when one starts, and stop when it
         quits. Cheap: the board asks every few seconds. True when the glass
         went back to the wallpaper files and everything glass should repaint;
-        a live frame lands through ``notifier.ready`` instead."""
+        a live frame lands through ``notifier.ready`` instead.
+
+        ``now``, as the board starts: the first frame is built here and then,
+        in about 0.3 s, so the cards' first paint shows the live wallpaper -
+        not the files' picture for a moment, then a switch."""
         try:
             layer = livewall.find_layer()
         except Exception:
@@ -346,7 +421,18 @@ class GlassBackdrop:
         if layer == self.live:
             return False
         if layer:
-            self._start_live(layer)
+            job, wake = self._prepare_live(layer)
+            if now:
+                try:
+                    self._live_once(layer, job)
+                except Exception:
+                    pass
+                with self._lock:
+                    if job == self._live_job:
+                        self._built.set()
+            threading.Thread(target=self._follow,
+                             args=(layer, job, wake, now and self.showing_live),
+                             name="glass-live", daemon=True).start()
             return False
         showing = self.showing_live
         self.stop_live()
@@ -360,19 +446,20 @@ class GlassBackdrop:
             if self._live_wake is not None:
                 self._live_wake.set()          # its thread wakes and quits
             self.live, self.showing_live, self._live_wake = 0, False, None
+            self._region_marks = {}
             self._built.set()
 
-    def _start_live(self, layer: int) -> None:
+    def _prepare_live(self, layer: int):
+        """Ready to follow ``layer``: (its job, the event that wakes its thread)."""
         wake = threading.Event()
         with self._lock:
             self._live_job += 1
-            job = self._live_job
             if self._live_wake is not None:
                 self._live_wake.set()          # an old layer's thread quits
             self.live, self._live_wake, self._live_mark = layer, wake, None
+            self._region_marks = {}
             self._built.clear()
-        threading.Thread(target=self._follow, args=(layer, job, wake),
-                         name="glass-live", daemon=True).start()
+            return self._live_job, wake
 
     def _wake_live(self) -> None:
         """A grab now, built into glass even if the frame hasn't changed."""
@@ -381,64 +468,165 @@ class GlassBackdrop:
             if self._live_wake is not None:
                 self._live_wake.set()
 
-    def _follow(self, layer: int, job: int, wake: threading.Event) -> None:
-        """The live wallpaper's thread: a grab now, then every LIVE_EVERY
-        seconds or when woken. None at all while a full-screen window has the
-        focus - a game covers the desktop, glass and all."""
-        while job == self._live_job and livewall.alive(layer):
-            again = False
-            try:
-                if winapi.fullscreen_monitor() is None:
-                    again = self._live_once(layer, job)
-            except Exception:
-                pass
-            with self._lock:
-                if job == self._live_job:
-                    self._built.set()          # tried: wait_clear needn't wait on
-            if not again:
-                wake.wait(LIVE_EVERY)
-            wake.clear()
+    def _follow(self, layer: int, job: int, wake: threading.Event,
+                rested: bool = False) -> None:
+        """The live wallpaper's thread: a look every LIVE_EVERY seconds, twice
+        that while each look finds something new, and sooner when woken. None
+        at all while a full-screen window has the focus - a game covers the
+        desktop, glass and all. ``rested``: the first frame is already built,
+        so the first look waits too."""
+        wait = LIVE_EVERY if rested else 0.0
+        try:
+            while True:
+                if wait:
+                    wake.wait(wait)
+                wake.clear()
+                if job != self._live_job or not livewall.alive(layer):
+                    return
+                built = again = False
+                try:
+                    if winapi.fullscreen_monitor() is None:
+                        built, again = self._live_once(layer, job, keep=True)
+                except Exception:
+                    pass
+                with self._lock:
+                    if job == self._live_job:
+                        self._built.set()      # tried: wait_clear needn't wait on
+                wait = 0.0 if again else LIVE_EVERY * (2 if built else 1)
+        finally:
+            livewall.release()                 # the bitmap its grabs kept
 
-    def _live_once(self, layer: int, job: int) -> bool:
-        """One grab, built into both copies when it shows a new frame. True
-        to go again straight away: Glass style or Blur changed while it built."""
-        got = livewall.grab(layer)
+    def _live_once(self, layer: int, job: int, keep: bool = False) -> Tuple[bool, bool]:
+        """One look at the live wallpaper. Returns (whether glass was built
+        from it, whether to look again straight away - Glass style or Blur
+        changed while it built).
+
+        The first look builds both copies whole. After that, a 16x16 thumbnail
+        of what lies behind each of ``regions`` says which moved, and only the
+        glass behind those is built again: the blurred copy whole, since that
+        takes 20 ms, but the clear copy only round them - a millisecond or two
+        each, where the whole desk takes a fifth of a second. While it keeps
+        moving, the clear copy is built whole every LIVE_FULL_EVERY seconds
+        too, for glass that is behind no card: the dock's menus, a card that
+        has just been moved. ``keep``: grab into the bitmap kept from the
+        last look (livewall.grab), as the thread does."""
+        got = livewall.grab(layer, keep=keep)
         if got is None:
-            return False
+            return False, False
         img, at = got
         mark = livewall.fingerprint(img)
         if livewall.blank(mark):
-            return False                       # it drew nothing: keep what's shown
+            return False, False                # it drew nothing: keep what's shown
         with self._lock:
             liquid, frost, last = self.liquid, self.frost, self._live_mark
-        if not livewall.differs(mark, last):
-            return False                       # a still wallpaper, or a paused one
+            regions, marks = tuple(self.regions), dict(self._region_marks)
+            clear, showing, placed = self.clear, self.showing_live, self._live_virtual
+        if last is not None and mark == last:
+            return False, False                # the same frame: paused, or still
         r, g, b = winapi.desktop_colour()
         colour = QColor(r, g, b)
         virtual = winapi.virtual_screen()
         canvas = self._place(img, at, virtual, colour)
+        vl, vt, vr, vb = virtual
+        if not regions:
+            regions = ((vl, vt, vr - vl, vb - vt),)    # no board: the desk as one
+        whole = last is None or not showing or placed != virtual
+        moved = []
+        if not whole:
+            for rect in regions:
+                seen = self._region_mark(canvas, virtual, rect)
+                if seen is not None and livewall.differs(marks.get(rect), seen, REGION_TOLERANCE):
+                    moved.append(rect)
+                    marks[rect] = seen
+            if not moved:
+                with self._lock:
+                    if job == self._live_job:
+                        self._live_mark = mark
+                return False, False            # moving, but behind no glass
+            whole = time.monotonic() - self._live_whole_at >= LIVE_FULL_EVERY
+        if whole:
+            marks = {rect: self._region_mark(canvas, virtual, rect) for rect in regions}
+        marks = {rect: marks[rect] for rect in regions if marks.get(rect) is not None}
+        # Built from a copy in the format the scaling works in: once here,
+        # rather than at every look, and a kept grab is overwritten by the next.
+        canvas = canvas.convertToFormat(QImage.Format_RGB32)
         image, origin = self._blurred(canvas, virtual)
         planes = None
         if liquid:
+            frosting = FROSTS.get(frost, FROSTS["light"])
             try:
-                planes = self._planes(canvas, virtual, FROSTS.get(frost, FROSTS["light"]))[0]
+                fits_whole = (clear is not None and clear.shape[1] == canvas.height() // CLEAR_SCALE
+                              and clear.shape[2] == canvas.width() // CLEAR_SCALE)
+                if whole or not fits_whole:
+                    planes, whole = self._planes(canvas, virtual, frosting)[0], True
+                else:
+                    planes = self._patch(clear, canvas, virtual, moved, frosting)
             except Exception:
                 planes = None                  # no numpy: the cards stay frosted
         with self._lock:
             if job != self._live_job:
-                return False                   # stopped while it built
+                return False, False            # stopped while it built
             fits = not self.liquid or (self.liquid, self.frost) == (liquid, frost)
             self.image, self.origin, self.tint = image, origin, colour
             if fits:
                 self.clear = planes if self.liquid else None
                 self.clear_origin = origin
             self._live_mark = mark if fits else None
+            self._region_marks = marks if fits else {}
             self._live_virtual = virtual
             self.showing_live = True
+            self._pending = None
             self._job += 1                     # a build from the files still running is dropped
-            self.generation += 1
+            self._bump(None if whole else moved)
+            if whole and fits:
+                self._live_whole_at = time.monotonic()
         self.notifier.ready.emit()
-        return not fits
+        return True, not fits
+
+    @staticmethod
+    def _region_mark(canvas: QImage, virtual: Tuple[int, int, int, int],
+                     rect: Tuple[int, int, int, int]) -> Optional[bytes]:
+        """A 16x16 thumbnail of what lies behind ``rect`` (x, y, w, h on the
+        virtual screen) and REGION_PAD round it - averaged, not sampled, so a
+        scatter of sparkles doesn't count as the wallpaper moving. None off
+        the desk."""
+        x, y, w, h = rect
+        area = QRect(x - virtual[0] - REGION_PAD, y - virtual[1] - REGION_PAD,
+                     w + 2 * REGION_PAD, h + 2 * REGION_PAD).intersected(canvas.rect())
+        if area.width() < 2 or area.height() < 2:
+            return None
+        part = canvas if area == canvas.rect() else canvas.copy(area)
+        small = part.scaled(16, 16, Qt.IgnoreAspectRatio,
+                            Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB888)
+        return bytes(small.constBits())[: 16 * 16 * 3]
+
+    @staticmethod
+    def _patch(planes, canvas: QImage, virtual: Tuple[int, int, int, int], regions,
+               frost: Tuple[int, int]):
+        """The clear copy ``planes`` with the glass behind each of ``regions``
+        built again from ``canvas``, a grab as big as the virtual screen. On a
+        copy: the old planes are left alone, since a card may be bending them.
+
+        Each is built with PATCH_MARGIN px round it, further than the frost
+        reaches, so inside it comes out as a whole-desk build would, and from
+        an even pixel, so its halves line up with the whole copy's."""
+        out = planes.copy()
+        s = CLEAR_SCALE
+        vl, vt = virtual[0], virtual[1]
+        cw, ch = canvas.width() // s * s, canvas.height() // s * s
+        for x, y, w, h in regions:
+            x0 = max(0, (x - vl - PATCH_MARGIN) // s * s)
+            y0 = max(0, (y - vt - PATCH_MARGIN) // s * s)
+            x1 = min(cw, -(-(x - vl + w + PATCH_MARGIN) // s) * s)
+            y1 = min(ch, -(-(y - vt + h + PATCH_MARGIN) // s) * s)
+            if x1 - x0 < 4 * s or y1 - y0 < 4 * s:
+                continue
+            part, _ = GlassBackdrop._planes(canvas.copy(x0, y0, x1 - x0, y1 - y0),
+                                            (0, 0, x1 - x0, y1 - y0), frost)
+            py, px = y0 // s, x0 // s
+            ph, pw = min(part.shape[1], out.shape[1] - py), min(part.shape[2], out.shape[2] - px)
+            out[:, py:py + ph, px:px + pw] = part[:, :ph, :pw]
+        return out
 
     @staticmethod
     def _place(img: QImage, at: Tuple[int, int], virtual: Tuple[int, int, int, int],
