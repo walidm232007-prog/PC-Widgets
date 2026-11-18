@@ -186,6 +186,7 @@ def selftest() -> int:
     _check_live_wallpaper()
     _check_smooth_glass(pal_mod.build("dark", "blue"))
     _check_live_glass(pal_mod.build("dark", "blue"))
+    _check_gpu_glass(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -1969,6 +1970,254 @@ def _check_live_glass(pal) -> None:
           "full and faded in; hidden cards skipped; frosted cards get live slices; Windows' "
           "capture's frames read alike; shadows and weather icons kept; cards stay in screen "
           f"captures; {here}")
+
+
+def _check_gpu_glass(pal) -> None:
+    """Live glass bent on the graphics card (gpuglass.py) is the CPU's glass,
+    and keeps up with a wallpaper drawing sixty frames a second.
+
+    A card's pane bent on the graphics card matches lens.bend's within a level
+    or two, at three sizes and frosts; six cards bent together - one frost for
+    all of them - match each bent alone. The capture is asked for frames at
+    the wallpaper's own pace (_Pace): on a simulated clock nearly every frame
+    of a 60 and a 26 frames-a-second wallpaper is taken within a couple of
+    milliseconds, asking a few times a frame. Short waits keep to the
+    millisecond, where Event.wait rounds them up to 15.6 ms. And while the
+    graphics card bends the cards, a whole look along the way is built on a
+    thread of its own: that frame's panes come at once, and are kept.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        print("  gpu glass: no numpy, so no liquid glass to bend (skipped)")
+        return
+    import ctypes as C
+    import math
+    import random
+    import threading
+    import time as _t
+    import types
+
+    from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QRadialGradient
+
+    from widgets.core import glass as glass_mod
+    from widgets.core import lens, wgc, winapi
+    from widgets.core.card import RADIUS
+    from widgets.core.glass import GlassBackdrop
+
+    def pixels(img: QImage):
+        rows = np.frombuffer(img.constBits(), np.uint8, img.bytesPerLine() * img.height())
+        return rows.reshape(img.height(), -1)[:, :img.width() * 4].astype(np.int16)
+
+    # The graphics card's glass against the CPU's, from one busy picture:
+    # gradients and stripes, so a wrong pull shows.
+    W_, H_ = 800, 480
+    pic = QImage(W_, H_, QImage.Format_RGB32)
+    p = QPainter(pic)
+    grad = QLinearGradient(0, 0, W_, H_)
+    grad.setColorAt(0, QColor("#ff3060"))
+    grad.setColorAt(1, QColor("#2050ff"))
+    p.fillRect(pic.rect(), grad)
+    for x in range(0, W_, 23):
+        p.fillRect(x, 0, 6, H_, QColor(255, 255, 255, 90))
+    glow = QRadialGradient(400, 240, 200)
+    glow.setColorAt(0, QColor(30, 200, 90, 220))
+    glow.setColorAt(1, QColor(30, 200, 90, 0))
+    p.fillRect(pic.rect(), glow)
+    p.end()
+
+    def patch_of(card):
+        px, py, pw, ph = glass_mod._aligned(card, (0, 0, W_, H_), glass_mod.PATCH_MARGIN)
+        px, py = max(0, px), max(0, py)
+        return (px, py, min(pw, W_ - px), min(ph, H_ - py))
+
+    gpu_note = "no Direct3D 11 here, so the CPU bends (skipped)"
+    device, context, level = C.c_void_p(), C.c_void_p(), C.c_int()
+    hr, kind = -1, ""
+    if wgc._d3d11 is not None:
+        for driver, kind in ((1, "the graphics card"), (5, "WARP")):   # hardware, then software
+            hr = wgc._d3d11.D3D11CreateDevice(None, driver, None, 0x20, None, 0, 7, C.byref(device),
+                                              C.byref(level), C.byref(context))
+            if hr >= 0:
+                break
+    if hr >= 0:
+        from widgets.core import gpuglass
+        gpu = gpuglass.GpuGlass(types.SimpleNamespace(_device=device, _context=context))
+        data = np.frombuffer(pic.constBits(), np.uint8, pic.bytesPerLine() * H_).copy()
+        tex = gpu._texture(W_, H_, 87, 0x8, data, pic.bytesPerLine())
+        try:
+            worst = 0
+            for card, frost in (((200, 120, 348, 168), (1, 3)), ((420, 200, 168, 168), (2, 4)),
+                                ((100, 60, 348, 348), (0, 0))):
+                patch = patch_of(card)
+                px, py, pw, ph = patch
+                on_gpu = gpu.pane(tex, patch, card, RADIUS, frost)
+                planes = GlassBackdrop._planes(pic.copy(px, py, pw, ph), (0, 0, pw, ph), frost)[0]
+                on_cpu = lens.bend(planes, 2, (px, py), *card, RADIUS, lens.STEP)
+                assert on_gpu.size() == on_cpu.size(), "the graphics card's pane is the wrong size"
+                d = np.abs(pixels(on_gpu) - pixels(on_cpu))
+                assert d.max() <= 2 and d.mean() < 0.6, (
+                    f"the graphics card's glass isn't the CPU's: {card}, frost {frost}: "
+                    f"{d.max()} levels apart, {d.mean():.2f} on the whole")
+                worst = max(worst, int(d.max()))
+            cards = [(40, 40, 348, 168), (420, 40, 348, 168), (40, 260, 168, 168),
+                     (260, 260, 168, 168), (470, 250, 168, 168), (600, 300, 168, 168)]
+            jobs = [(patch_of(c), c, float(RADIUS)) for c in cards]
+            for frost in ((1, 3), (2, 4)):
+                together = gpu.panes(tex, jobs, frost)
+                for job, img in zip(jobs, together):
+                    alone = gpu.pane(tex, job[0], job[1], job[2], frost)
+                    assert np.abs(pixels(img) - pixels(alone)).max() <= 1, (
+                        "cards bent together came out unlike each bent alone")
+            n, started = 100, _t.perf_counter()
+            for _ in range(n):
+                gpu.panes(tex, jobs, (1, 3))
+            per = 1000 * (_t.perf_counter() - started) / n
+            levels = "level" if worst == 1 else "levels"
+            gpu_note = (f"bent on {kind} within {worst} {levels} of the CPU, six cards together "
+                        f"as each alone, six a frame in {per:.2f} ms")
+        finally:
+            wgc._release(tex)
+            gpu.close()
+            wgc._release(context)
+            wgc._release(device)
+
+    # The pace: frames a wallpaper draws at its own rate, shown at a 60 Hz
+    # screen's next refresh and handed over just after, taken by the loop.
+    def paced(fps: float, seconds: float = 6.0):
+        rnd, vsync = random.Random(7), 1 / 60
+        shown = sorted({math.ceil(i / fps / vsync - 1e-6) for i in range(int(seconds * fps))})
+        arrivals = [s * vsync + rnd.uniform(0.0005, 0.0015) for s in shown]
+        pace, now, k, asks, taken, late = glass_mod._Pace(), 0.0, 0, 0, 0, []
+        while now < seconds:
+            asks += 1
+            newest = None
+            while k < len(arrivals) and arrivals[k] <= now:
+                newest, k = k, k + 1
+            if newest is not None:
+                taken += 1
+                late.append(now - arrivals[newest])
+                pace.took(shown[newest] * vsync + 0.003, now)
+                now += 0.0015                               # building it
+                now += max(pace.wait(now), 0.0015)
+            else:
+                now += pace.wait(now)
+            now += rnd.uniform(0, 0.0004)                   # a wait runs over a little
+        late.sort()
+        return taken / len(arrivals), late[len(late) // 2], asks / len(arrivals)
+
+    for fps, slack in ((60, 0.002), (26, 0.004)):
+        share, late, asks = paced(fps)
+        assert share >= 0.98 and late < slack and asks <= 6, (
+            f"a {fps} fps wallpaper's frames aren't kept up with: {share:.0%} taken, "
+            f"{1000 * late:.1f} ms late, asked {asks:.1f} times a frame")
+    share60, late60, asks60 = paced(60)
+
+    wake = threading.Event()
+    naps = []
+    for _ in range(5):
+        started = _t.perf_counter()
+        glass_mod._nap(wake, 0.004)
+        naps.append(_t.perf_counter() - started)
+    naps.sort()
+    assert naps[2] < 0.010, f"a 4 ms wait took {1000 * naps[2]:.1f} ms"
+    threading.Timer(0.01, wake.set).start()
+    started = _t.perf_counter()
+    glass_mod._nap(wake, 0.09)
+    assert _t.perf_counter() - started < 0.06, "a wait went on after it was woken"
+
+    # A whole look along the way, beside the frames the graphics card bends.
+    W2, H2, LAYER = 640, 360, 0x5151
+    A, B = (60, 60, 160, 160), (380, 120, 160, 160)
+
+    def scene(rgb) -> QImage:
+        # Not one flat colour, which reads as a grab that failed.
+        img = QImage(W2, H2, QImage.Format_RGB32)
+        img.fill(QColor(90, 90, 90))
+        p = QPainter(img)
+        p.fillRect(0, 0, 40, 40, QColor("#ffffff"))
+        for x, y, w, h in (A, B):
+            p.fillRect(x - 30, y - 30, w + 60, h + 60, QColor(*rgb))
+        p.end()
+        return img
+
+    stand = {"frame": scene((200, 40, 40))}
+
+    class Frame:
+        size, texture, time = (W2, H2), None, None
+
+        def close(self):
+            pass
+
+    class Capture:
+        def __init__(self):
+            self.frames, self.wholes = [], 0
+
+        def latest(self):
+            return self.frames.pop(0) if self.frames else None
+
+        def origin(self):
+            return (0, 0)
+
+        def whole(self, frame):
+            self.wholes += 1
+            return stand["frame"].copy()
+
+    class Gpu:
+        def __init__(self):
+            self.frames = 0
+
+        def panes(self, texture, cards, frost, step=lens.STEP):
+            self.frames += 1
+            out = []
+            for _patch, card, radius in cards:
+                f = lens.field(card[2], card[3], radius, step)
+                img = QImage(f.cols, f.rows, QImage.Format_RGB32)
+                img.fill(QColor(10, 20, 40 + 20 * self.frames))
+                out.append(img)
+            return out
+
+    where = []
+    real_once = GlassBackdrop._live_once
+
+    def once(self, *a, **kw):
+        where.append(threading.current_thread().name)
+        return real_once(self, *a, **kw)
+
+    saved = (winapi.fullscreen_monitor, winapi.virtual_screen, winapi.desktop_colour,
+             glass_mod._hidden, GlassBackdrop._live_once)
+    winapi.fullscreen_monitor = lambda: None
+    winapi.virtual_screen = lambda: (0, 0, W2, H2)
+    winapi.desktop_colour = lambda: (0, 0, 0)
+    glass_mod._hidden = lambda info: set()
+    GlassBackdrop._live_once = once
+    g = GlassBackdrop()
+    try:
+        g.regions, g.region_info = (A, B), {A: (0, RADIUS), B: (0, RADIUS)}
+        job, _ = g._prepare_live(LAYER)
+        cap, fake = Capture(), Gpu()
+        cap.frames.append(Frame())
+        g._live_capture(cap, LAYER, job, 0, fake)
+        here = threading.current_thread().name
+        assert cap.wholes == 1 and where == [here] and g.showing_live, (
+            "live glass's first frame wasn't taken whole, at once")
+        g._live_moving, g._live_look_at = True, 0.0     # moving, and a whole look due
+        stand["frame"] = scene((40, 170, 60))
+        cap.frames.append(Frame())
+        g._live_capture(cap, LAYER, job, 1, fake)
+        assert fake.frames == 1, "the cards' frame waited on a whole look"
+        g._whole_wait()
+        assert cap.wholes == 2 and where[-1] == "glass-whole", (
+            "a whole look along the way was built in the frames' way")
+        assert all(r + (float(RADIUS),) in g._ahead for r in (A, B)), (
+            "a whole look along the way dropped the panes the graphics card bent")
+    finally:
+        g.stop_live()
+        (winapi.fullscreen_monitor, winapi.virtual_screen, winapi.desktop_colour,
+         glass_mod._hidden, GlassBackdrop._live_once) = saved
+    print(f"  gpu glass: {gpu_note}; a 60 fps wallpaper's frames taken {share60:.0%}, "
+          f"{1000 * late60:.1f} ms after they come, asking {asks60:.1f} times a frame; short waits "
+          f"to the millisecond; a whole look along the way built beside the frames")
 
 
 def _check_layout_mirror() -> None:

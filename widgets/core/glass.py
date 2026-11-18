@@ -92,17 +92,75 @@ FROST_MARGIN = DOWNSCALE * (BOX_RADIUS * BOX_PASSES + 2)   # px a frosted slice'
 
 # With Windows' own capture (wgc.py) a frame arrives whenever the wallpaper
 # draws one, so live glass keeps the wallpaper's pace - up to LIVE_FPS, and
-# never building more than LIVE_FAST_DUTY of the time. It's asked for a new
-# frame every LIVE_POLL seconds, LIVE_POLL_IDLE once nothing has come for
-# LIVE_IDLE_AFTER: asking costs next to nothing, a frame only arrives when
+# never building more than LIVE_FAST_DUTY of the time. Nothing says a frame
+# has come, so it's asked for (_Pace): from LIVE_EARLY before the next is due
+# at the wallpaper's pace, every LIVE_DUE_POLL for LIVE_DUE_FOR, then every
+# LIVE_POLL, and every LIVE_POLL_IDLE once nothing has come for
+# LIVE_IDLE_AFTER. Asking costs next to nothing; a frame only arrives when
 # something was drawn. Where that capture can't be had, PrintWindow's ten a
 # second, as above.
-LIVE_FPS = 40
+LIVE_FPS = 60
 LIVE_FAST_DUTY = 0.5
+LIVE_EARLY = 0.002
+LIVE_DUE_POLL = 0.001
+LIVE_DUE_FOR = 0.006
 LIVE_POLL = 0.005
 LIVE_POLL_IDLE = 0.02
 LIVE_IDLE_AFTER = 1.0
 HIDDEN_EVERY = 0.25      # s a reading of which cards are hidden behind windows is trusted
+
+
+def _nap(wake: threading.Event, seconds: float) -> None:
+    """Wait ``seconds``, or until ``wake`` is set. Event.wait rounds a short
+    wait up to Windows' 15.6 ms clock ticks - 2 ms takes 15, 15 takes 31 -
+    which held live glass to 32 frames a second, whatever the wallpaper drew.
+    time.sleep keeps to a high-resolution timer, so a short wait is slept in
+    slices, with ``wake`` looked at between them."""
+    if seconds <= 0:
+        return
+    if seconds >= 0.1:
+        wake.wait(seconds)
+        return
+    end = time.perf_counter() + seconds
+    while not wake.is_set():
+        left = end - time.perf_counter()
+        if left <= 0:
+            return
+        time.sleep(min(left, 0.005))
+
+
+class _Pace:
+    """When live glass next asks Windows' capture for a frame. Nothing says
+    one has come, so it's asked just before the next is due at the
+    wallpaper's own pace - learnt from the frames' own times, which a frame
+    taken late doesn't upset - then every millisecond till it comes. Each
+    frame is taken a millisecond or two after it arrives, up to LIVE_FPS,
+    without asking hundreds of times a second. Asking a little early each
+    time also brings a pace that fell behind the frames back to them."""
+
+    def __init__(self) -> None:
+        self.period = 1.0 / LIVE_FPS           # s between the wallpaper's frames
+        self.drawn: Optional[float] = None     # the last frame's own time
+        self.taken: Optional[float] = None     # when it was taken (perf_counter)
+
+    def took(self, drawn: Optional[float], now: float) -> None:
+        """A frame the compositor drew at ``drawn`` was taken at ``now``."""
+        if self.drawn is not None and drawn is not None:
+            gap = drawn - self.drawn
+            if 0 < gap < 1.0:
+                # Down at once, up slowly: a frame missed while busy isn't the pace.
+                self.period = gap if gap < self.period else self.period + (gap - self.period) / 8
+        self.period = max(self.period, 1.0 / LIVE_FPS)
+        self.drawn, self.taken = drawn, now
+
+    def wait(self, now: float) -> float:
+        """How long to wait before asking again."""
+        if self.taken is None:
+            return LIVE_POLL
+        due = self.taken + self.period - LIVE_EARLY
+        if now < due:
+            return due - now
+        return LIVE_DUE_POLL if now - due < LIVE_DUE_FOR else LIVE_POLL
 
 
 def _box_blur(img: QImage, radius: int, passes: int) -> QImage:
@@ -206,6 +264,24 @@ def _mark_of(img: QImage, area: QRect) -> bytes:
     picked = data[np.ix_(ys, cols)].reshape(n, n, 3).astype(np.uint16)
     cells = picked.reshape(16, n // 16, 16, n // 16, 3).mean(axis=(1, 3))
     return cells.astype(np.uint8).tobytes()
+
+
+def _differ(a: Optional[QImage], b: QImage) -> bool:
+    """Whether a card's newly bent pane differs from the last one handed on
+    enough to show: by ten levels anywhere, or a third of one on the whole.
+    Below that, through the tint, a repaint would show the same glass - and a
+    change creeping along still adds up past it, since it's the last pane
+    handed on that's compared."""
+    if a is None or a.size() != b.size():
+        return True
+    try:
+        import numpy as np
+    except ImportError:
+        return a != b
+    n = a.bytesPerLine() * a.height()
+    d = np.abs(np.frombuffer(a.constBits(), np.uint8, n).astype(np.int16)
+               - np.frombuffer(b.constBits(), np.uint8, n))
+    return int(d.max()) > 10 or float(d.mean()) > 0.3
 
 
 def _overlap(a, b) -> bool:
@@ -331,7 +407,10 @@ class GlassBackdrop:
         self._live_work = 0.0         # s the last frame spent building, the grab aside
         self._live_moving = False     # whether the last look found something new
         self._live_look_at = 0.0      # when the last whole look was
+        self._live_taken = (None, 0.0)  # the last captured frame: (its own time, when taken)
+        self._whole_thread = None     # a whole look building beside live glass's frames
         self._hidden_kept = None      # (when, regions, which were hidden): _hidden_now
+        self._gpu_last: Dict[Tuple, QImage] = {}   # each card's pane as the graphics card last bent it
         # A live wallpaper being followed: its layer, or 0. The glass shows it
         # from its first good grab (showing_live); until then, and once it
         # quits, the wallpaper files.
@@ -426,8 +505,9 @@ class GlassBackdrop:
         if regions is None:
             self._ahead.clear()
             self._frost_ahead.clear()
+            self._gpu_last.clear()
             return
-        for kept in (self._ahead, self._frost_ahead):
+        for kept in (self._ahead, self._frost_ahead, self._gpu_last):
             for key in [k for k in kept if any(_overlap(k[:4], r) for r in regions)]:
                 del kept[key]
 
@@ -650,11 +730,12 @@ class GlassBackdrop:
         wait = (LIVE_FRAME if self.live_glass else LIVE_EVERY) if rested else 0.0
         still = 0
         capture, joined, refused = None, False, False
+        gpu = None                             # cards bent on the graphics card (gpuglass.py)
+        pace = _Pace()                         # when to ask the capture for its next frame
         quiet_since = time.monotonic()
         try:
             while True:
-                if wait:
-                    wake.wait(wait)
+                _nap(wake, wait)
                 wake.clear()
                 if job != self._live_job or not livewall.alive(layer):
                     return
@@ -667,17 +748,28 @@ class GlassBackdrop:
                         capture = wgc.Capture(wgc.target(layer))
                     except Exception:
                         refused = True         # PrintWindow's frames instead
+                    if capture is not None and gpu is None:
+                        try:
+                            from .gpuglass import GpuGlass
+                            gpu = GpuGlass(capture)
+                        except Exception:
+                            gpu = None         # bent on the CPU, as before
                 elif not live and capture is not None:
+                    if gpu is not None:
+                        gpu.close()
+                        gpu = None
                     capture.close()
                     capture = None
-                built = again = False
+                built = again = covered = False
                 fresh = True                   # whether anything new was looked at
                 started = time.perf_counter()
                 try:
                     if winapi.fullscreen_monitor() is not None:
-                        pass
+                        covered = True
                     elif capture is not None:
-                        built, again, fresh = self._live_capture(capture, layer, job, still)
+                        built, again, fresh = self._live_capture(capture, layer, job, still, gpu)
+                        if fresh:
+                            pace.took(*self._live_taken)
                     elif not live or self._whole_look_due(still):
                         built, again = self._live_once(layer, job, keep=True)
                         self._live_look_at = time.monotonic()
@@ -685,6 +777,9 @@ class GlassBackdrop:
                         built, again = self._live_frame(layer, job)
                 except Exception:
                     if capture is not None:    # a capture that fails mid-way: PrintWindow from here
+                        if gpu is not None:
+                            gpu.close()
+                            gpu = None
                         capture.close()
                         capture, refused = None, True
                 with self._lock:
@@ -695,21 +790,23 @@ class GlassBackdrop:
                     # Nothing drawn since the last frame: ask again soon -
                     # less often once it has been quiet a while.
                     idle = time.monotonic() - quiet_since > LIVE_IDLE_AFTER
-                    wait = LIVE_POLL_IDLE if idle else LIVE_POLL
+                    wait = LIVE_POLL_IDLE if idle else pace.wait(time.perf_counter())
                     continue
                 quiet_since = time.monotonic()
                 still = 0 if built else still + 1
                 self._live_moving = built
-                if again:
+                if covered:
+                    wait = LIVE_STILL                  # a game over the desk: nothing to follow
+                elif again:
                     wait = 0.0
                 elif not live:
                     wait = LIVE_EVERY * (2 if built else 1)
                 elif capture is not None:
-                    # The wallpaper's own pace, up to LIVE_FPS, resting at
-                    # least as long as LIVE_FAST_DUTY asks after building.
+                    # The wallpaper's own pace, up to LIVE_FPS (_Pace), resting
+                    # at least as long as LIVE_FAST_DUTY asks after building.
                     work = self._live_work if built else 0.0
-                    wait = max(1.0 / LIVE_FPS - took, work * (1 - LIVE_FAST_DUTY) / LIVE_FAST_DUTY,
-                               LIVE_POLL)
+                    wait = max(pace.wait(time.perf_counter()),
+                               work * (1 - LIVE_FAST_DUTY) / LIVE_FAST_DUTY)
                 elif built:
                     # Paced as the dock's capture is: a frame every LIVE_FRAME,
                     # but resting at least as long as LIVE_DUTY asks after the
@@ -719,34 +816,144 @@ class GlassBackdrop:
                 else:
                     wait = LIVE_STILL if still < 10 else LIVE_RESTING
         finally:
+            if gpu is not None:
+                gpu.close()
             if capture is not None:
                 capture.close()
             livewall.release()                 # the bitmaps its grabs kept
             if joined:
                 wgc.leave_apartment()
 
-    def _live_capture(self, capture, layer: int, job: int, still: int) -> Tuple[bool, bool, bool]:
+    def _live_capture(self, capture, layer: int, job: int, still: int,
+                      gpu=None) -> Tuple[bool, bool, bool]:
         """One turn of live glass on Windows' capture: (built, look again at
         once, whether there was a new frame at all). Each frame is read back
-        behind the cards in view, as _live_frame reads PrintWindow's; every
-        LIVE_WHOLE_EVERY seconds of motion it's taken whole, for the blurred
-        copy and glass behind no card - from this capture too, so what's
-        compared is always alike (it holds the desktop's icons, PrintWindow's
-        layer doesn't)."""
+        behind the cards in view, as _live_frame reads PrintWindow's - or,
+        with ``gpu``, the cards' glass is bent on the graphics card
+        (_live_gpu). Every LIVE_WHOLE_EVERY seconds of motion it's taken
+        whole, for the blurred copy and glass behind no card - from this
+        capture too, so what's compared is always alike (it holds the
+        desktop's icons, PrintWindow's layer doesn't)."""
         frame = capture.latest()
         if frame is None:
             return False, False, False
+        self._live_taken = (getattr(frame, "time", None), time.perf_counter())
         try:
             at = capture.origin()
+            read = lambda asks: (capture.read(frame, asks, at), at)   # noqa: E731
             if self._whole_look_due(still):
-                built, again = self._live_once(layer, job, grabbed=(capture.whole(frame), at))
-                self._live_look_at = time.monotonic()
+                # Cards the graphics card bends keep their panes: a whole
+                # look patches the clear copy behind them, but their next
+                # frame, a sixtieth of a second on, is theirs to bring.
+                spare = self._gpu_cards() if gpu is not None else ()
+                if gpu is not None and self.liquid and self._live_mark is not None                         and self.showing_live:
+                    # One along the way: built on a thread of its own, its
+                    # 30 ms or so two frames the cards would otherwise miss.
+                    if not self._whole_busy():
+                        self._whole_beside(layer, job, (capture.whole(frame), at), spare)
+                    self._live_look_at = time.monotonic()
+                    built, again = self._live_gpu(layer, job, gpu, frame, at, read)
+                else:
+                    self._whole_wait()
+                    built, again = self._live_once(layer, job, grabbed=(capture.whole(frame), at),
+                                                   spare=spare)
+                    self._live_look_at = time.monotonic()
+            elif gpu is not None and self.liquid:
+                built, again = self._live_gpu(layer, job, gpu, frame, at, read)
             else:
-                built, again = self._live_frame(layer, job,
-                                                lambda asks: (capture.read(frame, asks, at), at))
+                built, again = self._live_frame(layer, job, read)
         finally:
             frame.close()
         return built, again, True
+
+    def _whole_beside(self, layer: int, job: int, grabbed, spare) -> None:
+        """A whole look (_live_once) built on a thread of its own while live
+        glass's frames go on: the cards' glass, bent on the graphics card,
+        doesn't need it - glass that isn't a card's does."""
+        def build() -> None:
+            try:
+                self._live_once(layer, job, grabbed=grabbed, spare=spare)
+            except Exception:
+                pass
+        thread = threading.Thread(target=build, name="glass-whole", daemon=True)
+        self._whole_thread = thread
+        thread.start()
+
+    def _whole_busy(self) -> bool:
+        """Whether a whole look is still building beside the frames."""
+        thread = self._whole_thread
+        return thread is not None and thread.is_alive()
+
+    def _whole_wait(self, timeout: float = 2.0) -> None:
+        """Let a whole look building beside the frames finish first."""
+        thread = self._whole_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+
+    def _gpu_cards(self) -> Tuple[Tuple[int, int, int, int], ...]:
+        """The regions the graphics card bends: those with a pane's radius."""
+        with self._lock:
+            info = dict(self.region_info)
+        return tuple(r for r, (_hwnd, radius) in info.items() if radius is not None)
+
+    def _live_gpu(self, layer: int, job: int, gpu, frame, at, read) -> Tuple[bool, bool]:
+        """A frame of live glass with the cards' glass bent on the graphics
+        card (gpuglass.py), straight from the captured frame: no patch is read
+        back, only each finished pane, and only a pane that came out different
+        is handed on - so a card over a still corner isn't repainted. Bent in
+        full every time, so nothing is sharpened at rest. Glass that isn't a
+        card's goes the CPU's way (_live_frame)."""
+        with self._lock:
+            liquid, frost = self.liquid, self.frost
+            regions, info, placed = tuple(self.regions), dict(self.region_info), self._live_virtual
+        virtual = winapi.virtual_screen()
+        if placed != virtual or not regions:
+            return self._live_frame(layer, job, read)
+        hidden = self._hidden_now(info)
+        cards = [r for r in regions if r not in hidden and info.get(r, (0, None))[1] is not None]
+        rest = [r for r in regions if r not in hidden and info.get(r, (0, None))[1] is None]
+        frosting = FROSTS.get(frost, FROSTS["light"])
+        from . import lens
+        fw, fh = frame.size
+        jobs, keys = [], []
+        for r in cards:
+            px, py, pw, ph = _aligned(r, virtual, PATCH_MARGIN)
+            x0, y0 = max(px - at[0], 0), max(py - at[1], 0)
+            x1, y1 = min(px - at[0] + pw, fw), min(py - at[1] + ph, fh)
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                continue
+            radius = info[r][1]
+            jobs.append(((x0, y0, x1 - x0, y1 - y0), (r[0] - at[0], r[1] - at[1], r[2], r[3]),
+                         radius))
+            keys.append((r, r + (float(radius),)))
+        started = time.perf_counter()
+        built = again = False
+        if jobs:
+            panes = gpu.panes(frame.texture, jobs, frosting, lens.STEP)
+            with self._lock:
+                last = dict(self._gpu_last)
+            moved, ahead = [], {}
+            for (r, key), pane in zip(keys, panes):
+                if _differ(last.get(key), pane):
+                    moved.append(r)
+                    ahead[key] = pane
+            if moved:
+                with self._lock:
+                    if job != self._live_job:
+                        return False, False
+                    if (self.liquid, self.frost) != (liquid, frost):
+                        self._live_mark = None
+                        return True, True
+                    self._bump(moved, fade=False)
+                    self._ahead.update(ahead)
+                    self._gpu_last.update(ahead)
+                self.notifier.ready.emit()
+                built = True
+        self._live_work = time.perf_counter() - started
+        if rest:
+            more, again = self._live_frame(layer, job, read, only=rest)
+            built = built or more
+        return built, again
 
     def _whole_look_due(self, still: int) -> bool:
         """Whether live glass's next look should be a whole one: the first, one
@@ -757,7 +964,7 @@ class GlassBackdrop:
         return self._live_moving and time.monotonic() - self._live_look_at >= LIVE_WHOLE_EVERY
 
     def _live_once(self, layer: int, job: int, keep: bool = False,
-                   grabbed=None) -> Tuple[bool, bool]:
+                   grabbed=None, spare=()) -> Tuple[bool, bool]:
         """One look at the live wallpaper. Returns (whether glass was built
         from it, whether to look again straight away - Glass style or Blur
         changed while it built).
@@ -852,14 +1059,21 @@ class GlassBackdrop:
             self._job += 1                     # a build from the files still running is dropped
             # Live glass fades only into a first frame or a setting's change;
             # its looks along the way are frames like the rest.
-            self._bump(None if whole else moved,
+            # ``spare``: cards the graphics card bends keep the panes it bent.
+            spare = set(spare)
+            kept = {k: v for k, v in self._ahead.items() if k[:4] in spare}
+            kept_last = {k: v for k, v in self._gpu_last.items() if k[:4] in spare}
+            self._bump(None if whole else [r for r in moved if r not in spare],
                        fade=not self.live_glass or last is None or not showing)
+            if last is not None and showing:
+                self._ahead.update(kept)
+                self._gpu_last.update(kept_last)
             if whole and fits:
                 self._live_whole_at = time.monotonic()
         self.notifier.ready.emit()
         return True, not fits
 
-    def _live_frame(self, layer: int, job: int, parts_of=None) -> Tuple[bool, bool]:
+    def _live_frame(self, layer: int, job: int, parts_of=None, only=None) -> Tuple[bool, bool]:
         """One frame of live glass, returning as _live_once does. The layer is
         grabbed, but read back only behind the glass in view - ``regions`` not
         hidden behind a window - and built again only where that moved. Liquid
@@ -869,9 +1083,11 @@ class GlassBackdrop:
         fades: the frames follow each other too quickly. Once it rests, the
         coarse bends are bent again in full, and those fade in. ``parts_of``
         reads the patches instead of PrintWindow: Windows' capture's frame."""
+        if self._whole_busy():
+            return False, False                # a whole look is building: it brings this too
         with self._lock:
             liquid, frost = self.liquid, self.frost
-            regions, info = tuple(self.regions), dict(self.region_info)
+            regions, info = tuple(self.regions if only is None else only), dict(self.region_info)
             marks, clear, origin = dict(self._region_marks), self.clear, self.clear_origin
             coarse, placed = set(self._live_coarse), self._live_virtual
         virtual = winapi.virtual_screen()
