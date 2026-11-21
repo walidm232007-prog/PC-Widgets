@@ -33,7 +33,7 @@ import os
 import time
 from typing import Callable, List, Optional, Tuple
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, QPointF, QRectF, Qt, QTime
+from PySide6.QtCore import QDate, QDateTime, QLocale, QPointF, QRectF, Qt, QTime, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
                                QInputDialog, QLineEdit, QTimeEdit)
@@ -45,6 +45,11 @@ FACES_ALL = (("timer", "Timer"), ("stopwatch", "Stopwatch"), ("focus", "Focus"),
 PRESETS = (1, 3, 5, 10, 15, 20, 25, 30, 45, 60)     # minutes, in the Duration menu
 RULER_MAX = 180                                    # minutes: the end of the setting ruler
 GLIDE = 16.0           # 1/s: the ruler's spring - settled on a minute in about a quarter second
+SETTLE, SETTLE_SPEED = 0.02, 0.3   # minutes, and minutes a second: near enough to stop
+BLURS = (1.3, 3.0, 5.8)    # px: the ruler's three blurs, a little soft to the softest
+DIM = 0.32                 # the ruler past the chosen minute, against lit
+SAVE_AFTER = 600           # ms of quiet on the wheel before the length is saved
+GLIDE_FPS = 60             # the ruler's frames a second, at most (frameclock.Ticker's max_fps)
 FLICK = 0.12           # s a flicked ruler carries on at the speed it was let go
 FOCUS = {"focus": 25, "short": 5, "long": 15, "rounds": 4}   # minutes; rounds before a long break
 INDIGO = {True: "#5e5ce6", False: "#5856d6"}        # iOS indigo, dark and light: Focus's colour
@@ -233,16 +238,81 @@ def countdown_rest(target: float, now: float) -> str:
 
 
 def _box(a, radius: int, axis: int):
-    """A box blur of the float array ``a`` along ``axis``: each value the mean
-    of the 2 * radius + 1 around it, nothing past the ends."""
+    """A box blur of the float array ``a`` along ``axis`` (0 or 1): each value
+    the mean of the 2 * radius + 1 around it, nothing past the ends."""
     import numpy as np
     n = a.shape[axis]
     pad = [(0, 0)] * a.ndim
     pad[axis] = (radius + 1, radius)
-    total = np.cumsum(np.pad(a, pad), axis=axis)
+    total = np.cumsum(np.pad(a, pad), axis=axis, dtype=np.float32)
     span = 2 * radius + 1
-    return (np.take(total, np.arange(span, span + n), axis=axis)
-            - np.take(total, np.arange(n), axis=axis)) / span
+    if axis == 0:
+        return (total[span:span + n] - total[:n]) * (1.0 / span)
+    return (total[:, span:span + n] - total[:, :n]) * (1.0 / span)
+
+
+def _has_numpy() -> bool:
+    """Whether numpy is there to blur with."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _soften(sharp, radius: float):
+    """``sharp`` (h, w, 4) blurred by two box passes of ``radius`` px each way,
+    near enough a Gaussian."""
+    r = max(1, int(round(radius)))
+    out = sharp
+    for _ in range(2):
+        out = _box(_box(out, r, 0), r, 1)
+    return out
+
+
+def ruler_strips(width: float, height: float, colour: str, dpr: float, font: QFont):
+    """The whole ruler, 0 to RULER_MAX, drawn once as one long strip and
+    blurred once at each of BLURS: (the strips as premultiplied bytes, sharp
+    first; the minutes of room before 0; the numbers' rows). For a ruler
+    ``width`` x ``height`` px. Safe on any thread: a QImage and numpy only."""
+    import numpy as np
+    spacing, label_h, _pointer, top, bottom, tick = ruler_geometry(width, height)
+    pad = int(math.ceil(width / 2 / spacing)) + 2
+    img = QImage(max(1, int(math.ceil((RULER_MAX + 2 * pad) * spacing * dpr))),
+                 max(1, int(math.ceil(height * dpr))), QImage.Format_ARGB32)
+    img.setDevicePixelRatio(dpr)
+    img.fill(Qt.transparent)
+    # Straight alpha, so the numbers come out greyscale, as the card's type
+    # does (WidgetCard.paint_card).
+    q = QPainter(img)
+    q.setRenderHint(QPainter.Antialiasing, True)
+    q.setRenderHint(QPainter.TextAntialiasing, True)
+    q.setFont(font)
+    q.setPen(QPen(QColor(colour), tick, Qt.SolidLine, Qt.RoundCap))
+    for m in range(0, RULER_MAX + 1):
+        x = (m + pad) * spacing
+        q.drawLine(QPointF(x, top + tick / 2), QPointF(x, bottom - tick / 2))
+        if m % 5 == 0:
+            q.drawText(QRectF(x - 24, 0, 48, label_h), Qt.AlignCenter, str(m))
+    q.end()
+    src = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+    w, h = src.width(), src.height()
+    rows = np.frombuffer(src.constBits(), np.uint8, src.bytesPerLine() * h).reshape(h, -1)
+    sharp = rows[:, :w * 4].reshape(h, w, 4).astype(np.float32)
+    levels = [sharp] + [_soften(sharp, radius * dpr) for radius in BLURS]
+    return ([np.clip(level + 0.5, 0, 255).astype(np.uint8) for level in levels], pad,
+            int(round(label_h * dpr)))
+
+
+def ruler_geometry(width: float, height: float):
+    """A ruler's (px a minute, the numbers' height, the mark's, where the ticks
+    start and end below its top, a tick's width)."""
+    spacing = max(8.0, width / 29.0)
+    label_h = height * 0.30
+    pointer = max(7.0, height * 0.12)
+    top = label_h + height * 0.05
+    bottom = height - pointer - height * 0.08
+    return spacing, label_h, pointer, top, bottom, max(1.8, spacing * 0.27)
 
 
 def out_of_focus(img: QImage) -> QImage:
@@ -262,13 +332,7 @@ def out_of_focus(img: QImage) -> QImage:
     dpr = src.devicePixelRatio()
     rows = np.frombuffer(src.constBits(), np.uint8, src.bytesPerLine() * h).reshape(h, -1)
     sharp = rows[:, :w * 4].reshape(h, w, 4).astype(np.float32)
-    levels = [sharp]
-    for radius in (1.3, 3.0, 5.8):             # px: a little soft, softer, the ends
-        r = max(1, int(round(radius * dpr)))
-        soft = sharp
-        for _ in range(2):
-            soft = _box(_box(soft, r, 0), r, 1)
-        levels.append(soft)
+    levels = [sharp] + [_soften(sharp, radius * dpr) for radius in BLURS]
     side = np.abs((np.arange(w, dtype=np.float32) + 0.5) / w - 0.5) * 2.0   # 0 middle, 1 ends
     where = np.clip((side - 0.2) / 0.72, 0.0, 1.0) * (len(levels) - 1)
     out = np.zeros_like(sharp)
@@ -347,6 +411,7 @@ class TimerWidget(WidgetCard):
     # The tick decides: a running ring is redrawn ten times a second, a card
     # with nothing running only when what it shows changes.
     repaint_on_tick = False
+    strips_ready = Signal()        # the ruler's strips are built (on their own thread)
 
     FACES = {size: FACES_ALL for size in ("small", "medium", "large")}
 
@@ -369,6 +434,12 @@ class TimerWidget(WidgetCard):
         self._glide_last: Optional[float] = None
         self._glider = None            # the frame clock's ticker while it glides
         self._drag_track: List[Tuple[float, float]] = []   # recent (time, minutes) under a drag
+        self._strip = None             # (what for, the ruler drawn and blurred once): _strips
+        self._drawn_digits: Optional[str] = None   # the setter's length, as last drawn
+        self._drawn_pos: Optional[float] = None    # where its ruler was drawn
+        self._save_timer = None        # saving the length once the wheel stops
+        self._strip_job = None         # the strips being built, by what they're for
+        self.strips_ready.connect(self.live_update)
 
     # -- faces ------------------------------------------------------------ #
     def available_faces(self):
@@ -441,7 +512,7 @@ class TimerWidget(WidgetCard):
         self._flash_until = 0.0
         self._save()
 
-    def set_duration(self, seconds: int, start: bool = False) -> None:
+    def set_duration(self, seconds: int, start: bool = False, save_now: bool = True) -> None:
         was = self._ruler_minutes()
         t = self.timer
         t["duration"] = int(max(1, min(MAX_TIMER, seconds)))
@@ -451,7 +522,22 @@ class TimerWidget(WidgetCard):
             self.timer_toggle()
         else:
             self._glide_ruler(was)
-            self._save()
+            if save_now:
+                self._save()
+            else:
+                self._save_soon()
+
+    def _save_soon(self) -> None:
+        """Save once the wheel has been still SAVE_AFTER ms: a notch at a time,
+        it wrote the board's layout file on every one."""
+        if self._save_timer is None:
+            from PySide6.QtCore import QTimer
+            self._save_timer = QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.setInterval(SAVE_AFTER)
+            self._save_timer.timeout.connect(self.changed.emit)
+        self._save_timer.start()
+        self._refresh(force=True)
 
     # -- the ruler's glide --------------------------------------------------- #
     def _ruler_minutes(self) -> float:
@@ -465,10 +551,25 @@ class TimerWidget(WidgetCard):
         return (self.face == "timer" and self.size_class != "small"
                 and timer_state(self.timer) == "ready")
 
+    def _start_ticker(self) -> bool:
+        """The frame clock's ticker: a step for every frame the display shows."""
+        try:
+            if self._glider is None:
+                from ..core.frameclock import Ticker
+                # 60 a second, on the display's own refreshes and evenly
+                # spaced: every third on a 200 Hz monitor (67), every second
+                # on a 144 Hz one (72), every one at 60. At 200 a second the
+                # glide's repaints cost more than they showed.
+                self._glider = Ticker(self._glide_step, max_fps=GLIDE_FPS)
+            self._glider.start()
+            return True
+        except Exception:
+            return False
+
     def _glide_ruler(self, start: float, velocity: float = 0.0) -> None:
         """Ease the ruler from ``start`` minutes to the timer's length rather
         than jump: a step for every frame the display shows - 60 a second on a
-        60 Hz monitor, 144 on a 144 Hz one, on the board's frame clock - along
+        60 Hz monitor, 200 on a 200 Hz one, on the board's frame clock - along
         a critically damped spring, so it never overshoots, and a new length
         mid-glide carries on from wherever it is."""
         target = float(self.timer.get("duration", 300)) / 60.0
@@ -482,14 +583,9 @@ class TimerWidget(WidgetCard):
         elif velocity:
             self._glide_vel = velocity
         self._glide_last = None
-        try:
-            if self._glider is None:
-                from ..core.frameclock import Ticker
-                self._glider = Ticker(self._glide_step)
-            self._glider.start()
-        except Exception:
+        if not self._start_ticker():
             self._stop_glide_ruler()         # no frame clock: just be there
-        self.update()
+        self._paint_frame()
 
     def _stop_glide_ruler(self) -> None:
         if self._glider is not None:
@@ -497,28 +593,39 @@ class TimerWidget(WidgetCard):
         self._shown_minutes, self._glide_vel = None, 0.0
 
     def _glide_step(self, now: Optional[float] = None) -> None:
-        """One displayed frame of the glide. Timed by the frame's own moment,
-        so a frame the board misses is stepped over, not stretched."""
+        """One displayed frame: under a drag, the ruler painted where the
+        pointer has put it - once a frame, however fast the mouse reports;
+        let go, a step of its spring toward the chosen minute. Timed by the
+        frame's own moment, so a frame the board misses is stepped over, not
+        stretched."""
         if now is None:
             from ..core.frameclock import clock
             now = getattr(clock(), "frame_time", 0.0) or time.perf_counter()
         last, self._glide_last = self._glide_last, now
-        if self._shown_minutes is None or self._scrub is not None or not self._setter_shown():
-            if self._scrub is None:
-                self._stop_glide_ruler()
-            elif self._glider is not None:
-                self._glider.stop()
-            return
-        dt = 1.0 / 60.0 if last is None else max(0.0, min(0.05, now - last))
-        target = float(self.timer.get("duration", 300)) / 60.0
-        d, v = self._shown_minutes - target, self._glide_vel
-        fall = math.exp(-GLIDE * dt)
-        d, v = (d + (v + GLIDE * d) * dt) * fall, (v - GLIDE * (v + GLIDE * d) * dt) * fall
-        if abs(d) < 0.003 and abs(v) < 0.05:
+        if not self._setter_shown() or (self._shown_minutes is None and self._scrub is None):
             self._stop_glide_ruler()
-        else:
-            self._shown_minutes, self._glide_vel = target + d, v
-        self.update()
+            return
+        if self._scrub is None:
+            dt = 1.0 / 60.0 if last is None else max(0.0, min(0.05, now - last))
+            target = float(self.timer.get("duration", 300)) / 60.0
+            d, v = self._shown_minutes - target, self._glide_vel
+            fall = math.exp(-GLIDE * dt)
+            d, v = (d + (v + GLIDE * d) * dt) * fall, (v - GLIDE * (v + GLIDE * d) * dt) * fall
+            # Settled within a fifth of a pixel or so: the frames past that
+            # moved nothing anyone could see.
+            if abs(d) < SETTLE and abs(v) < SETTLE_SPEED:
+                self._stop_glide_ruler()
+            else:
+                self._shown_minutes, self._glide_vel = target + d, v
+        self._paint_frame()
+
+    def _paint_frame(self) -> None:
+        """Repaint for the ruler having moved: the ruler alone (live_update),
+        unless the length shown beside it changed too."""
+        if self._setter_text() != self._drawn_digits:
+            self.update()
+        elif self._ruler_minutes() != self._drawn_pos:
+            self.live_update()
 
     def nudge_duration(self, steps: int) -> None:
         """The wheel over a timer that isn't running: a minute a notch, as the
@@ -533,7 +640,7 @@ class TimerWidget(WidgetCard):
             step = 10 if edge < 60 else (60 if edge < 3600 else 300)
             d = d + step if up else d - step
             d = max(10, min(MAX_TIMER, (d // step) * step if d >= 60 else d))
-        self.set_duration(d)
+        self.set_duration(d, save_now=False)
 
     # -- the stopwatch ---------------------------------------------------- #
     def stopwatch_toggle(self) -> None:
@@ -744,11 +851,10 @@ class TimerWidget(WidgetCard):
                 # Nor a press on the ruler: it scrolls under its mark instead,
                 # caught where it is if it was still gliding.
                 here = self._ruler_minutes()
-                if self._glider is not None:
-                    self._glider.stop()
                 self._shown_minutes, self._glide_vel = here, 0.0
                 self._drag_track = []
                 self._scrub = (pos.x(), here, False)
+                self._start_ticker()         # it paints the drag, once a frame
                 ev.accept()
                 return
         super().mousePressEvent(ev)
@@ -766,7 +872,8 @@ class TimerWidget(WidgetCard):
                 self._drag_track = [(t_, m_) for t_, m_ in self._drag_track if now - t_ < 0.1]
                 self._drag_track.append((now, here))
                 self._shown_minutes = here
-                self.update()
+                if self._glider is None or not self._glider.isActive():
+                    self._paint_frame()      # no frame clock: paint it now
             ev.accept()
             return
         hit = None if self._drag_from is not None else self._hit(pos)
@@ -1146,31 +1253,134 @@ class TimerWidget(WidgetCard):
             flag.closeSubpath()
             p.drawPath(flag)
 
+    def _ruler_rect(self, r: QRectF) -> QRectF:
+        """Where the setter's ruler sits in the card's inner rect ``r``."""
+        if self.size_class == "medium":
+            return QRectF(r.left() - 10, r.top() - 4, r.width() + 20, 74)
+        return QRectF(r.left() - 10, r.top() + 132, r.width() + 20, 90)
+
+    def paint_live(self, p: QPainter, r: QRectF) -> None:
+        """The setter's ruler, drawn over the card's kept layer: it's the part
+        that moves while a timer is set, so a frame of its glide repaints it
+        alone (live_update)."""
+        if not self._setter_shown():
+            self._ruler = None
+            return
+        orange = self.palette_.warn
+        # On light glass the ruler takes the deeper orange text does.
+        rule = orange if self.palette_.dark else self._ink(orange)
+        minutes = self._ruler_minutes()
+        self._paint_ruler(p, self._ruler_rect(r), minutes, rule)
+        self._drawn_pos = minutes
+
+    @staticmethod
+    def _ruler_geometry(rect: QRectF):
+        return ruler_geometry(rect.width(), rect.height())
+
+    def _strips(self, rect: QRectF, colour: str, dpr: float):
+        """The ruler drawn and blurred once (ruler_strips) for this size,
+        colour and screen scale, so a frame of a glide only cuts out the part
+        in view and blends it: blurring the view afresh took 7 ms a frame,
+        more than a core at 200 frames a second. Built on a thread of its own,
+        a tenth of a second or so, rather than holding up the board; until
+        it's there the ruler is blurred afresh at each paint, as it was, so
+        it's never seen sharp. None meanwhile, or without numpy."""
+        font = self.font(max(9.0, rect.height() * 0.30 * 0.6), QFont.DemiBold)
+        key = (round(rect.width(), 2), round(rect.height(), 2), colour, round(dpr, 3), font.key())
+        if self._strip is not None and self._strip[0] == key:
+            return self._strip[1]
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            return None
+        if self._strip_job != key:
+            self._strip_job = key
+            import threading
+            threading.Thread(target=self._build_strips,
+                             args=(key, rect.width(), rect.height(), colour, dpr, QFont(font)),
+                             name="timer-ruler", daemon=True).start()
+        return None
+
+    def _build_strips(self, key, width, height, colour, dpr, font) -> None:
+        try:
+            info = ruler_strips(width, height, colour, dpr, font)
+        except Exception:
+            return
+        if self._strip_job == key:
+            self._strip = (key, info)
+            try:
+                self.strips_ready.emit()     # back on the board's thread: draw them
+            except RuntimeError:
+                pass                         # the card has gone meanwhile
+
     def _paint_ruler(self, p, rect: QRectF, minutes: float, colour: str) -> None:
         """Minutes on a ruler, as iOS's timer control sets them: a tick a
         minute and a number every five, the chosen minute over a mark in the
         middle, lit up to it and dark past it, and out of focus toward both
-        ends (out_of_focus), as if seen past the mark through a lens. It
-        scrolls under the mark: drag it, click a minute, or turn the wheel."""
-        spacing = max(8.0, rect.width() / 29.0)
-        cx = rect.center().x()
-        label_h = rect.height() * 0.30
-        pointer = max(7.0, rect.height() * 0.12)
-        top = rect.top() + label_h + rect.height() * 0.05
-        bottom = rect.bottom() - pointer - rect.height() * 0.08
-        width = max(1.8, spacing * 0.27)
-        base = QColor(colour)
-        # Drawn apart and blurred toward the ends, then laid on the card. On a
-        # straight-alpha image, so its numbers come out greyscale, as the
-        # card's type does (WidgetCard.paint_card).
+        ends, as if seen past the mark through a lens. It scrolls under the
+        mark: drag it, click a minute, or turn the wheel. Cut from the kept
+        strips (_strips): the blur level each column needs, its fade, and
+        whether its tick and number are lit, blended in one pass."""
+        spacing, label_h, pointer, top, bottom, width = self._ruler_geometry(rect)
         dev = p.device()
         dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+        strips = self._strips(rect, colour, dpr)
+        if strips is None:
+            if _has_numpy():
+                self._paint_ruler_afresh(p, rect, minutes, colour, dpr)
+            else:
+                self._paint_ruler_plain(p, rect, minutes, colour)
+        else:
+            import numpy as np
+            levels, pad, number_rows = strips
+            px = spacing * dpr
+            w = int(math.ceil(rect.width() * dpr))
+            h = levels[0].shape[0]
+            start = (minutes + pad) * px - w / 2.0
+            off = max(0, min(levels[0].shape[1] - w, int(round(start))))
+            xs = np.arange(w, dtype=np.float32) + 0.5
+            side = np.abs(xs / w - 0.5) * 2.0
+            where = np.clip((side - 0.2) / 0.72, 0.0, 1.0) * (len(levels) - 1)
+            fade = np.clip((1.0 - side) / 0.26, 0.0, 1.0)
+            # Each column takes its nearest tick's state, and its number's.
+            at = minutes + (xs - w / 2.0 + (off - start)) / px
+            ticks = np.where(np.round(at) <= minutes + 1e-6, 1.0, DIM).astype(np.float32) * fade
+            numbers = (np.where(5 * np.round(at / 5) <= minutes + 1e-6, 1.0, DIM)
+                       .astype(np.float32) * fade)
+            out = np.zeros((h, w, 4), np.float32)
+            for i, level in enumerate(levels):
+                weight = np.clip(1.0 - np.abs(where - i), 0.0, 1.0)
+                part = level[:, off:off + w, :].astype(np.float32)
+                out[:number_rows] += part[:number_rows] * (weight * numbers)[None, :, None]
+                out[number_rows:] += part[number_rows:] * (weight * ticks)[None, :, None]
+            data = np.ascontiguousarray(np.clip(out + 0.5, 0, 255).astype(np.uint8))
+            img = QImage(data.data, w, h, w * 4, QImage.Format_ARGB32_Premultiplied)
+            img.setDevicePixelRatio(dpr)
+            p.drawImage(rect.topLeft(), img)
+        cx = rect.center().x()
+        mark = QPainterPath()
+        mark.moveTo(cx, rect.bottom() - pointer)
+        mark.lineTo(cx + pointer * 0.68, rect.bottom())
+        mark.lineTo(cx - pointer * 0.68, rect.bottom())
+        mark.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(colour))
+        p.drawPath(mark)
+        self._ruler = (QRectF(rect), spacing, minutes)
+
+    def _paint_ruler_afresh(self, p, rect: QRectF, minutes: float, colour: str,
+                            dpr: float) -> None:
+        """The ruler drawn and blurred whole at this paint (out_of_focus): the
+        way while its strips are being built, a few milliseconds a paint."""
+        spacing, label_h, _pointer, top, bottom, width = self._ruler_geometry(rect)
+        cx = rect.center().x()
         layer = QImage(max(1, int(math.ceil(rect.width() * dpr))),
                        max(1, int(math.ceil(rect.height() * dpr))), QImage.Format_ARGB32)
         layer.setDevicePixelRatio(dpr)
         layer.fill(Qt.transparent)
         q = QPainter(layer)
-        q.setRenderHints(p.renderHints())
+        q.setRenderHint(QPainter.Antialiasing, True)
+        q.setRenderHint(QPainter.TextAntialiasing, True)
         q.translate(-rect.left(), -rect.top())
         q.setFont(self.font(max(9.0, label_h * 0.6), QFont.DemiBold))
         first = int(math.floor(minutes - (cx - rect.left()) / spacing))
@@ -1179,23 +1389,36 @@ class TimerWidget(WidgetCard):
             x = cx + (m - minutes) * spacing
             if not rect.left() - width < x < rect.right() + width:
                 continue
-            ink = QColor(base)
-            ink.setAlphaF(1.0 if m <= minutes + 1e-6 else 0.32)
+            ink = QColor(colour)
+            ink.setAlphaF(1.0 if m <= minutes + 1e-6 else DIM)
             q.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap))
-            q.drawLine(QPointF(x, top + width / 2), QPointF(x, bottom - width / 2))
+            q.drawLine(QPointF(x, rect.top() + top + width / 2),
+                       QPointF(x, rect.top() + bottom - width / 2))
             if m % 5 == 0:
                 q.drawText(QRectF(x - 24, rect.top(), 48, label_h), Qt.AlignCenter, str(m))
         q.end()
         p.drawImage(rect.topLeft(), out_of_focus(layer))
-        mark = QPainterPath()
-        mark.moveTo(cx, rect.bottom() - pointer)
-        mark.lineTo(cx + pointer * 0.68, rect.bottom())
-        mark.lineTo(cx - pointer * 0.68, rect.bottom())
-        mark.closeSubpath()
-        p.setPen(Qt.NoPen)
-        p.setBrush(base)
-        p.drawPath(mark)
-        self._ruler = (QRectF(rect), spacing, minutes)
+
+    def _paint_ruler_plain(self, p, rect: QRectF, minutes: float, colour: str) -> None:
+        """The ruler without numpy: drawn afresh, fading at its ends but not
+        out of focus."""
+        spacing, label_h, _pointer, top, bottom, width = self._ruler_geometry(rect)
+        cx = rect.center().x()
+        p.setFont(self.font(max(9.0, label_h * 0.6), QFont.DemiBold))
+        first = int(math.floor(minutes - (cx - rect.left()) / spacing))
+        last = int(math.ceil(minutes + (rect.right() - cx) / spacing))
+        for m in range(max(0, first), min(RULER_MAX, last) + 1):
+            x = cx + (m - minutes) * spacing
+            edge = min(x - rect.left(), rect.right() - x)
+            if edge <= 0:
+                continue
+            ink = QColor(colour)
+            ink.setAlphaF((1.0 if m <= minutes + 1e-6 else DIM) * min(1.0, edge / (rect.width() * 0.2)))
+            p.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(x, rect.top() + top + width / 2),
+                       QPointF(x, rect.top() + bottom - width / 2))
+            if m % 5 == 0:
+                p.drawText(QRectF(x - 24, rect.top(), 48, label_h), Qt.AlignCenter, str(m))
 
     # -- the timer face --------------------------------------------------- #
     def _paint_timer(self, p, r: QRectF, now: float) -> None:
@@ -1275,20 +1498,22 @@ class TimerWidget(WidgetCard):
         self._button(p, "timer.go", QRectF(r.right() - b + 6, r.bottom() - b + 6, b, b), go_icon,
                      "timer")
 
+    def _setter_text(self) -> str:
+        """The length the setter shows, in whole minutes as iOS shows it: under
+        a drag, the minute at the mark; otherwise the one the ruler glides to."""
+        if self._scrub is not None:
+            return down_text(round(self._ruler_minutes()) * 60)
+        return down_text(float(self.timer.get("duration", 300)))
+
     def _paint_setter(self, p, r: QRectF, duration: float) -> None:
         """A timer not yet started, as iOS's timer control sets one: the
-        minutes on a ruler, the length big beside it, and Start Timer."""
+        length big, Start Timer, and the minutes on a ruler - which, as the
+        part that moves, is drawn over all this (paint_live)."""
         pal = self.palette_
         orange = pal.warn
-        # On light glass the ruler takes the deeper orange text does.
-        rule = orange if pal.dark else self._ink(orange)
-        minutes = self._ruler_minutes()
-        # The length in whole minutes, as iOS shows it: under a drag, the minute
-        # at the mark; otherwise the one the ruler is gliding to.
-        text = down_text(round(minutes) * 60 if self._scrub is not None else duration)
+        text = self._setter_text()
+        self._drawn_digits = text
         if self.size_class == "medium":
-            self._paint_ruler(p, QRectF(r.left() - 10, r.top() - 4, r.width() + 20, 74), minutes,
-                              rule)
             pill = QRectF(r.left(), r.bottom() - 40, 136, 40)
             self._pill(p, "timer.go", pill, "Start Timer", orange)
             room = QRectF(pill.right() + 10, r.bottom() - 54, r.right() - pill.right() - 10, 58)
@@ -1299,8 +1524,6 @@ class TimerWidget(WidgetCard):
         big = QRectF(r.left(), r.top() + 34, r.width(), 84)
         self._digits_text(p, big, text, self._fit_size(text, 60, big.width(), QFont.Light),
                           self._ink(orange), QFont.Light)
-        self._paint_ruler(p, QRectF(r.left() - 10, r.top() + 132, r.width() + 20, 90), minutes,
-                          rule)
         pill = QRectF(r.center().x() - 96, r.bottom() - 48, 192, 48)
         self._pill(p, "timer.go", pill, "Start Timer", orange)
 
