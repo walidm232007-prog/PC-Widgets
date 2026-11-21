@@ -44,6 +44,8 @@ FACES_ALL = (("timer", "Timer"), ("stopwatch", "Stopwatch"), ("focus", "Focus"),
              ("countdown", "Countdown"))
 PRESETS = (1, 3, 5, 10, 15, 20, 25, 30, 45, 60)     # minutes, in the Duration menu
 RULER_MAX = 180                                    # minutes: the end of the setting ruler
+GLIDE = 16.0           # 1/s: the ruler's spring - settled on a minute in about a quarter second
+FLICK = 0.12           # s a flicked ruler carries on at the speed it was let go
 FOCUS = {"focus": 25, "short": 5, "long": 15, "rounds": 4}   # minutes; rounds before a long break
 INDIGO = {True: "#5e5ce6", False: "#5856d6"}        # iOS indigo, dark and light: Focus's colour
 MAX_TIMER = 24 * 3600                              # s: the longest timer
@@ -362,6 +364,11 @@ class TimerWidget(WidgetCard):
         self._ruler = None             # (rect, px a minute, minutes at the mark), as last drawn
         self._scrub = None             # (where the press was, minutes then, whether it moved)
         self._cursor = None
+        self._shown_minutes: Optional[float] = None   # where the ruler is drawn, moving
+        self._glide_vel = 0.0          # its speed, minutes a second
+        self._glide_last: Optional[float] = None
+        self._glider = None            # the frame clock's ticker while it glides
+        self._drag_track: List[Tuple[float, float]] = []   # recent (time, minutes) under a drag
 
     # -- faces ------------------------------------------------------------ #
     def available_faces(self):
@@ -435,6 +442,7 @@ class TimerWidget(WidgetCard):
         self._save()
 
     def set_duration(self, seconds: int, start: bool = False) -> None:
+        was = self._ruler_minutes()
         t = self.timer
         t["duration"] = int(max(1, min(MAX_TIMER, seconds)))
         t["ends_at"] = t["left"] = None
@@ -442,7 +450,75 @@ class TimerWidget(WidgetCard):
         if start:
             self.timer_toggle()
         else:
+            self._glide_ruler(was)
             self._save()
+
+    # -- the ruler's glide --------------------------------------------------- #
+    def _ruler_minutes(self) -> float:
+        """Where the ruler stands: wherever it's gliding or being dragged, or
+        else at the timer's length."""
+        if self._shown_minutes is not None:
+            return self._shown_minutes
+        return float(self.timer.get("duration", 300)) / 60.0
+
+    def _setter_shown(self) -> bool:
+        return (self.face == "timer" and self.size_class != "small"
+                and timer_state(self.timer) == "ready")
+
+    def _glide_ruler(self, start: float, velocity: float = 0.0) -> None:
+        """Ease the ruler from ``start`` minutes to the timer's length rather
+        than jump: a step for every frame the display shows - 60 a second on a
+        60 Hz monitor, 144 on a 144 Hz one, on the board's frame clock - along
+        a critically damped spring, so it never overshoots, and a new length
+        mid-glide carries on from wherever it is."""
+        target = float(self.timer.get("duration", 300)) / 60.0
+        if not self._setter_shown() or (abs(start - target) < 1e-3 and abs(velocity) < 1e-3
+                                         and self._shown_minutes is None):
+            self._stop_glide_ruler()
+            return
+        if self._shown_minutes is None:
+            self._shown_minutes = start
+            self._glide_vel = velocity
+        elif velocity:
+            self._glide_vel = velocity
+        self._glide_last = None
+        try:
+            if self._glider is None:
+                from ..core.frameclock import Ticker
+                self._glider = Ticker(self._glide_step)
+            self._glider.start()
+        except Exception:
+            self._stop_glide_ruler()         # no frame clock: just be there
+        self.update()
+
+    def _stop_glide_ruler(self) -> None:
+        if self._glider is not None:
+            self._glider.stop()
+        self._shown_minutes, self._glide_vel = None, 0.0
+
+    def _glide_step(self, now: Optional[float] = None) -> None:
+        """One displayed frame of the glide. Timed by the frame's own moment,
+        so a frame the board misses is stepped over, not stretched."""
+        if now is None:
+            from ..core.frameclock import clock
+            now = getattr(clock(), "frame_time", 0.0) or time.perf_counter()
+        last, self._glide_last = self._glide_last, now
+        if self._shown_minutes is None or self._scrub is not None or not self._setter_shown():
+            if self._scrub is None:
+                self._stop_glide_ruler()
+            elif self._glider is not None:
+                self._glider.stop()
+            return
+        dt = 1.0 / 60.0 if last is None else max(0.0, min(0.05, now - last))
+        target = float(self.timer.get("duration", 300)) / 60.0
+        d, v = self._shown_minutes - target, self._glide_vel
+        fall = math.exp(-GLIDE * dt)
+        d, v = (d + (v + GLIDE * d) * dt) * fall, (v - GLIDE * (v + GLIDE * d) * dt) * fall
+        if abs(d) < 0.003 and abs(v) < 0.05:
+            self._stop_glide_ruler()
+        else:
+            self._shown_minutes, self._glide_vel = target + d, v
+        self.update()
 
     def nudge_duration(self, steps: int) -> None:
         """The wheel over a timer that isn't running: a minute a notch, as the
@@ -643,11 +719,15 @@ class TimerWidget(WidgetCard):
         return (self._ruler is not None and self.face == "timer"
                 and timer_state(self.timer) == "ready" and self._ruler[0].contains(pos))
 
-    def _set_minutes(self, minutes: int) -> None:
-        """The ruler's choice: whole minutes, 1 to RULER_MAX. Saved on letting go."""
+    def _set_minutes(self, minutes: int, start: Optional[float] = None,
+                     velocity: float = 0.0) -> None:
+        """The ruler's choice: whole minutes, 1 to RULER_MAX, glided to from
+        ``start`` (where it's drawn now). Saved on letting go."""
+        was = self._ruler_minutes() if start is None else start
         t = self.timer
         t["duration"] = 60 * max(1, min(RULER_MAX, int(minutes)))
         t["ends_at"] = t["left"] = None
+        self._glide_ruler(was, velocity)
         self._refresh(force=True)
 
     def mousePressEvent(self, ev) -> None:
@@ -661,8 +741,14 @@ class TimerWidget(WidgetCard):
                 ev.accept()
                 return
             if self._on_ruler(pos):
-                # Nor a press on the ruler: it scrolls under its mark instead.
-                self._scrub = (pos.x(), float(self.timer.get("duration", 300)) / 60.0, False)
+                # Nor a press on the ruler: it scrolls under its mark instead,
+                # caught where it is if it was still gliding.
+                here = self._ruler_minutes()
+                if self._glider is not None:
+                    self._glider.stop()
+                self._shown_minutes, self._glide_vel = here, 0.0
+                self._drag_track = []
+                self._scrub = (pos.x(), here, False)
                 ev.accept()
                 return
         super().mousePressEvent(ev)
@@ -672,9 +758,15 @@ class TimerWidget(WidgetCard):
         if self._scrub is not None:
             x0, start, moved = self._scrub
             if moved or abs(pos.x() - x0) >= 3:
+                # The ruler follows the pointer exactly, between minutes too.
                 self._scrub = (x0, start, True)
                 spacing = self._ruler[1] if self._ruler is not None else 10.0
-                self._set_minutes(int(round(start - (pos.x() - x0) / spacing)))
+                here = max(1.0, min(float(RULER_MAX), start - (pos.x() - x0) / spacing))
+                now = time.perf_counter()
+                self._drag_track = [(t_, m_) for t_, m_ in self._drag_track if now - t_ < 0.1]
+                self._drag_track.append((now, here))
+                self._shown_minutes = here
+                self.update()
             ev.accept()
             return
         hit = None if self._drag_from is not None else self._hit(pos)
@@ -692,13 +784,24 @@ class TimerWidget(WidgetCard):
 
     def mouseReleaseEvent(self, ev) -> None:
         if self._scrub is not None:
-            _x0, _start, moved = self._scrub
+            _x0, start, moved = self._scrub
             self._scrub = None
-            if not moved and self._ruler is not None:
+            if moved:
+                # Let go, it settles on a minute; flicked, it carries on a
+                # little the way it was going first.
+                here = self._ruler_minutes()
+                speed = 0.0
+                track = self._drag_track
+                if len(track) >= 2 and track[-1][0] - track[0][0] > 0.008:
+                    speed = (track[-1][1] - track[0][1]) / (track[-1][0] - track[0][0])
+                self._set_minutes(int(round(here + speed * FLICK)), start=here, velocity=speed)
+            elif self._ruler is not None:
                 # A click on the ruler brings that minute to the mark.
                 rect, spacing, minutes = self._ruler
                 self._set_minutes(int(round(minutes + (ev.position().x() - rect.center().x())
                                             / spacing)))
+            else:
+                self._stop_glide_ruler()
             self.changed.emit()
             ev.accept()
             return
@@ -897,18 +1000,25 @@ class TimerWidget(WidgetCard):
         width = max(2.0, rect.width() * 0.02)
         outer = rect.width() / 2 - width / 2
         inner = outer - rect.width() * 0.08
-        lit_n = int(math.ceil(max(0.0, min(1.0, frac)) * count - 1e-9))
+        exact = max(0.0, min(1.0, frac)) * count
+        lit_n = int(math.floor(exact + 1e-9))
+        part = exact - lit_n        # how much of the tick going dark is still lit
         on = QColor(colour)
         if flash:
-            lit_n = count
+            lit_n, part = count, 0.0
             on.setAlpha(255 if int(time.monotonic() * 2) % 2 == 0 else 90)
         dark = QColor(pal.text_faint)
         dark.setAlpha(44)
+        # The tick going dark fades out over its share of the time, rather
+        # than switching off: the dial empties smoothly, not tick by tick.
+        fading = QColor(
+            *(int(round(a + (b - a) * part)) for a, b in zip(dark.getRgb(), on.getRgb())))
         pens = (QPen(dark, width, Qt.SolidLine, Qt.RoundCap),
-                QPen(on, width, Qt.SolidLine, Qt.RoundCap))
+                QPen(on, width, Qt.SolidLine, Qt.RoundCap),
+                QPen(fading, width, Qt.SolidLine, Qt.RoundCap))
         current = None
         for i in range(count):
-            lit = i >= count - lit_n
+            lit = 1 if i >= count - lit_n else (2 if i == count - lit_n - 1 and part > 0 else 0)
             if lit is not current:
                 p.setPen(pens[lit])
                 current = lit
@@ -1172,8 +1282,10 @@ class TimerWidget(WidgetCard):
         orange = pal.warn
         # On light glass the ruler takes the deeper orange text does.
         rule = orange if pal.dark else self._ink(orange)
-        minutes = duration / 60.0
-        text = down_text(duration)
+        minutes = self._ruler_minutes()
+        # The length in whole minutes, as iOS shows it: under a drag, the minute
+        # at the mark; otherwise the one the ruler is gliding to.
+        text = down_text(round(minutes) * 60 if self._scrub is not None else duration)
         if self.size_class == "medium":
             self._paint_ruler(p, QRectF(r.left() - 10, r.top() - 4, r.width() + 20, 74), minutes,
                               rule)
