@@ -2317,9 +2317,11 @@ def _check_timer(pal) -> None:
     """
     import copy
     import datetime as _dt
+    import time as _t
 
     from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
     from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
+    from PySide6.QtWidgets import QApplication
 
     from widgets import tray
     from widgets.core import palette as pal_mod
@@ -2535,6 +2537,40 @@ def _check_timer(pal) -> None:
     assert b.timer["duration"] == 23 * 60, f"clicking two minutes along set {b.timer['duration']} s"
     settle()
     b.timer_reset()
+
+    # Its glide runs at 60 frames a second at most, on the display's refreshes.
+    assert b._start_ticker() and b._glider._max_fps == tm.GLIDE_FPS, "the ruler's glide isn't capped"
+    b._stop_glide_ruler()
+
+    # Blurred from its first paint: drawn afresh while its strips build on
+    # their own thread, then cut from them - the same picture both ways.
+    fresh = tm.TimerWidget(pal, "medium", {"timer": {"duration": 780, "ends_at": None,
+                                                      "left": None}})
+
+    def picture():
+        shot_ = QImage(fresh.size(), QImage.Format_ARGB32_Premultiplied)
+        shot_.fill(Qt.transparent)
+        q = QPainter(shot_)
+        fresh.paint_card(q)
+        q.end()
+        return shot_
+
+    early = picture()
+    try:
+        import numpy as np_
+        waited = _t.perf_counter()
+        while fresh._strip is None and _t.perf_counter() - waited < 10:
+            QApplication.processEvents()
+            _t.sleep(0.01)
+        assert fresh._strip is not None, "the ruler's strips never came"
+        late_ = picture()
+        a_ = np_.frombuffer(early.constBits(), np_.uint8).astype(np_.int16)
+        b_ = np_.frombuffer(late_.constBits(), np_.uint8).astype(np_.int16)
+        assert np_.abs(a_ - b_).mean() < 2.0, "the ruler drawn afresh and from its strips differ"
+    except ImportError:
+        pass
+    fresh.close()
+    fresh.deleteLater()
 
     # And it's out of focus toward its ends: stripes stay sharp in the middle
     # and run together at the sides.

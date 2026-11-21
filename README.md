@@ -282,11 +282,18 @@ the stopwatch still rings:
   in the middle to the softest at the ends), with the length big and thin
   beside it and **Start Timer** under it. The ruler scrolls under its mark: drag
   it, click a minute, or turn the wheel - a minute a notch, ten seconds under
-  a minute, five past an hour. It glides rather than jumps, a step for every
-  frame the display shows (on the board's frame clock: 200 a second on a
-  200 Hz monitor), along a spring that never overshoots; dragged, it follows
-  the pointer exactly and settles on the nearest minute when let go, carrying
-  on a little after a flick. The running dial's ticks fade out one by one
+  a minute, five past an hour. It glides rather than jumps, along a spring
+  that never overshoots, at 60 frames a second on the display's own refreshes
+  and evenly spaced (every third on a 200 Hz monitor, so 67). Dragged, it
+  follows the pointer exactly, one repaint a frame however fast the mouse
+  reports, and settles on the nearest minute when let go, carrying on a
+  little after a flick. A glide frame costs about 2 ms: the ruler is drawn
+  and blurred once as one long strip, on a thread of its own, and a frame
+  only cuts out the part in view and blends it, drawn over the card's kept
+  layer (paint_live) rather than redrawing the card. Blurring the view afresh
+  took 7 ms a frame, and a glide at 200 frames a second took over a core. Until
+  the strip is built, a tenth of a second or so, the ruler is blurred afresh,
+  so it's never seen sharp. Saving the length waits for the wheel to stop. The running dial's ticks fade out one by one
   rather than switching off. The small size is all dial and the wheel.
   **Duration** on the menu has presets and **Other length…**.
 - **Stopwatch**: hundredths at medium and large, laps on the grey button while

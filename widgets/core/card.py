@@ -517,6 +517,16 @@ class WidgetCard(QWidget):
         self._glass_only = True
         QWidget.update(self)
 
+    def live_update(self) -> None:
+        """Repaint for what paint_live draws and nothing else - a part that
+        moves over a card that doesn't, the timer's ruler gliding at the
+        display's rate. The kept layer is laid back on, as for glass_update(),
+        so a frame costs the moving part alone. Quiet, like update()."""
+        if _quiet or self.quiet:
+            return
+        self._glass_only = True
+        QWidget.update(self)
+
     def force_update(self) -> None:
         """Repaint regardless of quiet mode, to catch up when it lifts."""
         self._over_stale = True
@@ -531,6 +541,12 @@ class WidgetCard(QWidget):
 
     def paint_content(self, p: QPainter, r: QRectF) -> None:
         raise NotImplementedError
+
+    def paint_live(self, p: QPainter, r: QRectF) -> None:
+        """What a tile draws over its kept layer at every paint: a part that
+        moves while the rest stands still, repainted with live_update(). It
+        stays out of the kept layer, so moving it costs only itself. Nothing
+        by default."""
 
     def context_actions(self, menu: QMenu) -> None:
         """Tiles may add their own entries to the right-click menu."""
@@ -825,8 +841,12 @@ class WidgetCard(QWidget):
                 img.setDevicePixelRatio(dpr)
                 kept = self._over_kept = (key, img)
             p.drawImage(QPointF(0, 0), kept[1])
-            return
-        self._paint_over(p, r, path, layer, liquid, frosted)
+        else:
+            self._paint_over(p, r, path, layer, liquid, frosted)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(Qt.NoPen)
+        self.paint_live(p, QRectF(r.left() + PAD, r.top() + PAD,
+                                  r.width() - PAD * 2, r.height() - PAD * 2))
 
     def _paint_over(self, p: QPainter, r: QRectF, path: QPainterPath, layer,
                     liquid: bool, frosted: bool) -> None:
