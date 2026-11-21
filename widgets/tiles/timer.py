@@ -247,7 +247,7 @@ def out_of_focus(img: QImage) -> QImage:
     """``img`` sharp in the middle and softer toward both sides, fading out at
     the very ends: a ruler's depth of field, as iOS's timer control draws it.
     Three blurs of it, each two box passes either way (near enough a Gaussian),
-    are blended column by column - the middle sixth untouched, the ends at the
+    are blended column by column - the middle fifth untouched, the ends at the
     softest, still there but faint. Unchanged without numpy."""
     try:
         import numpy as np
@@ -261,14 +261,14 @@ def out_of_focus(img: QImage) -> QImage:
     rows = np.frombuffer(src.constBits(), np.uint8, src.bytesPerLine() * h).reshape(h, -1)
     sharp = rows[:, :w * 4].reshape(h, w, 4).astype(np.float32)
     levels = [sharp]
-    for radius in (1.5, 3.6, 7.0):             # px: a little soft, softer, the ends
+    for radius in (1.3, 3.0, 5.8):             # px: a little soft, softer, the ends
         r = max(1, int(round(radius * dpr)))
         soft = sharp
         for _ in range(2):
             soft = _box(_box(soft, r, 0), r, 1)
         levels.append(soft)
     side = np.abs((np.arange(w, dtype=np.float32) + 0.5) / w - 0.5) * 2.0   # 0 middle, 1 ends
-    where = np.clip((side - 0.16) / 0.72, 0.0, 1.0) * (len(levels) - 1)
+    where = np.clip((side - 0.2) / 0.72, 0.0, 1.0) * (len(levels) - 1)
     out = np.zeros_like(sharp)
     for i, level in enumerate(levels):
         out += level * np.clip(1.0 - np.abs(where - i), 0.0, 1.0)[None, :, None]
