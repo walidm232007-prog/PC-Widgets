@@ -2390,7 +2390,8 @@ def _check_timer(pal) -> None:
     itself when asked; the countdown reads in days, then hours, then minutes,
     then Today, and rings as it arrives. Its buttons take a click without
     starting a drag, and so does the ruler a timer is set on: a drag scrolls
-    it under its mark and a click brings a minute to it. The wheel sets a
+    it under its mark and a click brings a minute to it, and it goes out of
+    focus toward its ends. The wheel sets a
     length, and every face draws at every size in both themes
     (_selftest/_timer_dark.png, _timer_light.png).
     """
@@ -2573,6 +2574,27 @@ def _check_timer(pal) -> None:
     mouse(QEvent.MouseButtonRelease, two)
     assert b.timer["duration"] == 20 * 60, f"clicking two minutes along set {b.timer['duration']} s"
     b.timer_reset()
+
+    # And it's out of focus toward its ends: stripes stay sharp in the middle
+    # and run together at the sides.
+    stripes = QImage(300, 40, QImage.Format_ARGB32)
+    stripes.fill(Qt.transparent)
+    sp = QPainter(stripes)
+    for x in range(0, 300, 10):
+        sp.fillRect(x, 0, 3, 40, QColor(255, 159, 10))
+    sp.end()
+    soft = tm.out_of_focus(stripes)
+    try:
+        import numpy  # noqa: F401
+        blurs = True
+    except ImportError:
+        blurs = False
+    if blurs:
+        def spread(x0: int, x1: int) -> int:
+            alphas = [QColor.fromRgba(soft.pixel(x, 20)).alpha() for x in range(x0, x1)]
+            return max(alphas) - min(alphas)
+        assert spread(140, 160) > 200, "the ruler's middle went soft"
+        assert spread(20, 40) < 120, "the ruler's ends stayed sharp"
     before = b.timer["duration"]
     b.wheelEvent(QWheelEvent(at, at, QPoint(0, 0), QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
                              Qt.NoScrollPhase, False))
