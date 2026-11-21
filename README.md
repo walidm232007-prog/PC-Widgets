@@ -277,7 +277,9 @@ the stopwatch still rings:
   grey ✕ to cancel and an orange button with a dark mark to pause. Not yet
   started, the medium and large sizes set it as iOS's timer control does:
   minutes on a ruler, a tick a minute and a number every five, lit up to the
-  chosen minute and fading out at both ends, with the length big and thin
+  chosen minute and going out of focus toward both ends, as if seen past the
+  mark through a lens (three blurs of it, blended column by column from sharp
+  in the middle to the softest at the ends), with the length big and thin
   beside it and **Start Timer** under it. The ruler scrolls under its mark: drag
   it, click a minute, or turn the wheel - a minute a notch, ten seconds under
   a minute, five past an hour. The small size is all dial and the wheel.

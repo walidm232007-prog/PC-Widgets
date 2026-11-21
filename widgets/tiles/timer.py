@@ -34,7 +34,7 @@ import time
 from typing import Callable, List, Optional, Tuple
 
 from PySide6.QtCore import QDate, QDateTime, QLocale, QPointF, QRectF, Qt, QTime
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
                                QInputDialog, QLineEdit, QTimeEdit)
 
@@ -228,6 +228,55 @@ def countdown_rest(target: float, now: float) -> str:
     if h:
         return f"and {h} h" + (f" {m} min" if m else "")
     return f"and {m} min" if m else ""
+
+
+def _box(a, radius: int, axis: int):
+    """A box blur of the float array ``a`` along ``axis``: each value the mean
+    of the 2 * radius + 1 around it, nothing past the ends."""
+    import numpy as np
+    n = a.shape[axis]
+    pad = [(0, 0)] * a.ndim
+    pad[axis] = (radius + 1, radius)
+    total = np.cumsum(np.pad(a, pad), axis=axis)
+    span = 2 * radius + 1
+    return (np.take(total, np.arange(span, span + n), axis=axis)
+            - np.take(total, np.arange(n), axis=axis)) / span
+
+
+def out_of_focus(img: QImage) -> QImage:
+    """``img`` sharp in the middle and softer toward both sides, fading out at
+    the very ends: a ruler's depth of field, as iOS's timer control draws it.
+    Three blurs of it, each two box passes either way (near enough a Gaussian),
+    are blended column by column - the middle sixth untouched, the ends at the
+    softest, still there but faint. Unchanged without numpy."""
+    try:
+        import numpy as np
+    except ImportError:
+        return img
+    src = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+    w, h = src.width(), src.height()
+    if w < 8 or h < 4:
+        return img
+    dpr = src.devicePixelRatio()
+    rows = np.frombuffer(src.constBits(), np.uint8, src.bytesPerLine() * h).reshape(h, -1)
+    sharp = rows[:, :w * 4].reshape(h, w, 4).astype(np.float32)
+    levels = [sharp]
+    for radius in (1.5, 3.6, 7.0):             # px: a little soft, softer, the ends
+        r = max(1, int(round(radius * dpr)))
+        soft = sharp
+        for _ in range(2):
+            soft = _box(_box(soft, r, 0), r, 1)
+        levels.append(soft)
+    side = np.abs((np.arange(w, dtype=np.float32) + 0.5) / w - 0.5) * 2.0   # 0 middle, 1 ends
+    where = np.clip((side - 0.16) / 0.72, 0.0, 1.0) * (len(levels) - 1)
+    out = np.zeros_like(sharp)
+    for i, level in enumerate(levels):
+        out += level * np.clip(1.0 - np.abs(where - i), 0.0, 1.0)[None, :, None]
+    out *= np.clip((1.0 - side) / 0.26, 0.0, 1.0)[None, :, None]   # and fainter at the ends
+    data = np.ascontiguousarray(np.clip(out + 0.5, 0, 255).astype(np.uint8))
+    done = QImage(data.data, w, h, w * 4, QImage.Format_ARGB32_Premultiplied).copy()
+    done.setDevicePixelRatio(dpr)
+    return done
 
 
 def _digits(font: QFont) -> QFont:
@@ -990,7 +1039,8 @@ class TimerWidget(WidgetCard):
     def _paint_ruler(self, p, rect: QRectF, minutes: float, colour: str) -> None:
         """Minutes on a ruler, as iOS's timer control sets them: a tick a
         minute and a number every five, the chosen minute over a mark in the
-        middle, lit up to it and dark past it, fading out at both ends. It
+        middle, lit up to it and dark past it, and out of focus toward both
+        ends (out_of_focus), as if seen past the mark through a lens. It
         scrolls under the mark: drag it, click a minute, or turn the wheel."""
         spacing = max(8.0, rect.width() / 29.0)
         cx = rect.center().x()
@@ -1000,21 +1050,33 @@ class TimerWidget(WidgetCard):
         bottom = rect.bottom() - pointer - rect.height() * 0.08
         width = max(1.8, spacing * 0.27)
         base = QColor(colour)
-        p.setFont(self.font(max(9.0, label_h * 0.6), QFont.DemiBold))
+        # Drawn apart and blurred toward the ends, then laid on the card. On a
+        # straight-alpha image, so its numbers come out greyscale, as the
+        # card's type does (WidgetCard.paint_card).
+        dev = p.device()
+        dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+        layer = QImage(max(1, int(math.ceil(rect.width() * dpr))),
+                       max(1, int(math.ceil(rect.height() * dpr))), QImage.Format_ARGB32)
+        layer.setDevicePixelRatio(dpr)
+        layer.fill(Qt.transparent)
+        q = QPainter(layer)
+        q.setRenderHints(p.renderHints())
+        q.translate(-rect.left(), -rect.top())
+        q.setFont(self.font(max(9.0, label_h * 0.6), QFont.DemiBold))
         first = int(math.floor(minutes - (cx - rect.left()) / spacing))
         last = int(math.ceil(minutes + (rect.right() - cx) / spacing))
-        reach = rect.width() * 0.2               # where each end fades out
         for m in range(max(0, first), min(RULER_MAX, last) + 1):
             x = cx + (m - minutes) * spacing
-            edge = min(x - rect.left(), rect.right() - x)
-            if edge <= 0:
+            if not rect.left() - width < x < rect.right() + width:
                 continue
             ink = QColor(base)
-            ink.setAlphaF((1.0 if m <= minutes + 1e-6 else 0.32) * min(1.0, edge / reach))
-            p.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(QPointF(x, top + width / 2), QPointF(x, bottom - width / 2))
+            ink.setAlphaF(1.0 if m <= minutes + 1e-6 else 0.32)
+            q.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap))
+            q.drawLine(QPointF(x, top + width / 2), QPointF(x, bottom - width / 2))
             if m % 5 == 0:
-                p.drawText(QRectF(x - 24, rect.top(), 48, label_h), Qt.AlignCenter, str(m))
+                q.drawText(QRectF(x - 24, rect.top(), 48, label_h), Qt.AlignCenter, str(m))
+        q.end()
+        p.drawImage(rect.topLeft(), out_of_focus(layer))
         mark = QPainterPath()
         mark.moveTo(cx, rect.bottom() - pointer)
         mark.lineTo(cx + pointer * 0.68, rect.bottom())
