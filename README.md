@@ -282,7 +282,12 @@ the stopwatch still rings:
   in the middle to the softest at the ends), with the length big and thin
   beside it and **Start Timer** under it. The ruler scrolls under its mark: drag
   it, click a minute, or turn the wheel - a minute a notch, ten seconds under
-  a minute, five past an hour. The small size is all dial and the wheel.
+  a minute, five past an hour. It glides rather than jumps, a step for every
+  frame the display shows (on the board's frame clock: 200 a second on a
+  200 Hz monitor), along a spring that never overshoots; dragged, it follows
+  the pointer exactly and settles on the nearest minute when let go, carrying
+  on a little after a flick. The running dial's ticks fade out one by one
+  rather than switching off. The small size is all dial and the wheel.
   **Duration** on the menu has presets and **Other length…**.
 - **Stopwatch**: hundredths at medium and large, laps on the grey button while
   it runs, and the large size lists them with the best lap green and the

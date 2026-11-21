@@ -2309,8 +2309,9 @@ def _check_timer(pal) -> None:
     itself when asked; the countdown reads in days, then hours, then minutes,
     then Today, and rings as it arrives. Its buttons take a click without
     starting a drag, and so does the ruler a timer is set on: a drag scrolls
-    it under its mark and a click brings a minute to it, and it goes out of
-    focus toward its ends. The wheel sets a
+    it under its mark, a flick carries on a little and a click brings a minute
+    to it. It glides there a frame at a time without overshooting, in the
+    same time at 60 Hz and 144, and goes out of focus toward its ends. The wheel sets a
     length, and every face draws at every size in both themes
     (_selftest/_timer_dark.png, _timer_light.png).
     """
@@ -2460,9 +2461,33 @@ def _check_timer(pal) -> None:
     assert tm.timer_state(b.timer) == "running", "clicking start didn't start the timer"
     b.timer_reset()
 
-    # The ruler: a drag scrolls it under its mark, a click brings a minute to
-    # it, and neither moves the card.
+    # The ruler glides to a new length, a step a displayed frame, rather than
+    # jumping: along a spring that never overshoots, done in about a quarter
+    # second whether the display runs at 60 Hz or 144. Here the frames are
+    # stepped by hand; on the board the frame clock steps them.
     b.set_duration(15 * 60)
+    settled = {}
+    for hz in (60, 144):
+        b._stop_glide_ruler()
+        b._glide_ruler(10.0)                     # from 10 minutes to the 15 set
+        if b._glider is not None:
+            b._glider.stop()
+        seen, t_ = [], 0.0
+        while b._shown_minutes is not None and t_ < 2.0:
+            t_ += 1.0 / hz
+            b._glide_step(now=t_)
+            if b._shown_minutes is not None:
+                seen.append(b._shown_minutes)
+        assert b._shown_minutes is None, f"the ruler never settled at {hz} Hz"
+        assert seen == sorted(seen) and max(seen) <= 15 + 1e-6, f"the ruler overshot at {hz} Hz"
+        assert len(seen) > 6, f"the ruler jumped instead of gliding at {hz} Hz ({len(seen)} frames)"
+        settled[hz] = t_
+    assert 0.12 < settled[60] < 0.7 and abs(settled[60] - settled[144]) < 0.06, (
+        f"the glide's length depends on the display's rate: {settled}")
+
+    # A drag follows the pointer exactly and settles on a minute; a flick
+    # carries on a little; a click brings a minute to the mark; none moves
+    # the card.
     img.fill(Qt.transparent)
     p = QPainter(img)
     b.paint_card(p)
@@ -2478,20 +2503,37 @@ def _check_timer(pal) -> None:
         {QEvent.MouseButtonPress: b.mousePressEvent, QEvent.MouseMove: b.mouseMoveEvent,
          QEvent.MouseButtonRelease: b.mouseReleaseEvent}[kind](ev)
 
+    def settle():
+        if b._glider is not None:
+            b._glider.stop()
+        t_ = 0.0
+        while b._shown_minutes is not None and t_ < 2.0:
+            t_ += 1.0 / 60
+            b._glide_step(now=t_)
+        img.fill(Qt.transparent)
+        q = QPainter(img)
+        b.paint_card(q)
+        q.end()
+        return b._ruler
+
     mouse(QEvent.MouseButtonPress, mid)
     assert b._drag_from is None, "pressing the ruler started a drag"
-    mouse(QEvent.MouseMove, QPointF(mid.x() - 3 * spacing, mid.y()))
-    mouse(QEvent.MouseButtonRelease, QPointF(mid.x() - 3 * spacing, mid.y()))
-    assert b.timer["duration"] == 18 * 60, f"dragging the ruler three minutes left set {b.timer['duration']} s"
-    img.fill(Qt.transparent)
-    p = QPainter(img)
-    b.paint_card(p)
-    p.end()
-    rect, spacing, _m = b._ruler
+    mouse(QEvent.MouseMove, QPointF(mid.x() - 2.6 * spacing, mid.y()))
+    assert abs(b._shown_minutes - 17.6) < 1e-6, "a dragged ruler didn't follow the pointer exactly"
+    mouse(QEvent.MouseButtonRelease, QPointF(mid.x() - 2.6 * spacing, mid.y()))
+    assert b.timer["duration"] == 18 * 60, f"dragging the ruler 2.6 minutes set {b.timer['duration']} s"
+    rect, spacing, _m = settle()
+    mouse(QEvent.MouseButtonPress, mid)
+    mouse(QEvent.MouseMove, QPointF(mid.x() - spacing, mid.y()))
+    b._drag_track = [(0.0, 18.0), (0.05, 19.0)]          # a minute in a twentieth of a second
+    mouse(QEvent.MouseButtonRelease, QPointF(mid.x() - spacing, mid.y()))
+    assert b.timer["duration"] == 21 * 60, f"a flick from 19 settled on {b.timer['duration']} s"
+    rect, spacing, _m = settle()
     two = QPointF(rect.center().x() + 2 * spacing, rect.center().y())
     mouse(QEvent.MouseButtonPress, two)
     mouse(QEvent.MouseButtonRelease, two)
-    assert b.timer["duration"] == 20 * 60, f"clicking two minutes along set {b.timer['duration']} s"
+    assert b.timer["duration"] == 23 * 60, f"clicking two minutes along set {b.timer['duration']} s"
+    settle()
     b.timer_reset()
 
     # And it's out of focus toward its ends: stripes stay sharp in the middle
