@@ -10,7 +10,13 @@ are kept as moments on the wall clock - when a timer ends, when a stopwatch
 started - rather than as counters, so a running timer survives the board
 restarting and a paused one comes back paused.
 
-When a timer or a focus phase ends the card says so three ways: its ring
+A running timer looks like Apple's StandBy timer - a dial of short ticks
+round the time, its length in small orange capitals, a grey cross and an
+orange pause button - and one not yet started is set the way iOS's timer
+control sets one: minutes on a ruler that scrolls under a mark, a big orange
+length, and Start Timer. Focus uses the same dial, in indigo and green.
+
+When a timer or a focus phase ends the card says so three ways: its dial
 flashes, Windows shows a notification from the tray icon, and a chime plays
 ("Sound when done" on the card's menu). One that ended while the board was
 closed is shown as done, without the fanfare.
@@ -37,7 +43,7 @@ from ..core.card import WidgetCard
 FACES_ALL = (("timer", "Timer"), ("stopwatch", "Stopwatch"), ("focus", "Focus"),
              ("countdown", "Countdown"))
 PRESETS = (1, 3, 5, 10, 15, 20, 25, 30, 45, 60)     # minutes, in the Duration menu
-CHIPS = (1, 5, 10, 25)                             # the large timer's quick starts
+RULER_MAX = 180                                    # minutes: the end of the setting ruler
 FOCUS = {"focus": 25, "short": 5, "long": 15, "rounds": 4}   # minutes; rounds before a long break
 INDIGO = {True: "#5e5ce6", False: "#5856d6"}        # iOS indigo, dark and light: Focus's colour
 MAX_TIMER = 24 * 3600                              # s: the longest timer
@@ -84,6 +90,19 @@ def minutes_text(seconds: float) -> str:
     if h:
         return f"{h} h {m} min" if m else f"{h} h"
     return f"{m} min {secs} s" if secs else f"{m} min"
+
+
+def length_caps(seconds: float) -> str:
+    """A timer's length as StandBy writes it under the time: 30 MIN, 1 HR 30
+    MIN, 45 SEC (set in capitals when drawn)."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s} sec"
+    h, m = divmod(s // 60, 60)
+    rest = s % 60
+    if h:
+        return f"{h} hr {m} min" if m else f"{h} hr"
+    return f"{m} min {rest} sec" if rest else f"{m} min"
 
 
 def parse_length(text: str) -> Optional[int]:
@@ -291,6 +310,9 @@ class TimerWidget(WidgetCard):
         self._flash_until = 0.0
         self._first = True             # the first look: ends long gone ring quietly
         self._interval = IDLE_MS
+        self._ruler = None             # (rect, px a minute, minutes at the mark), as last drawn
+        self._scrub = None             # (where the press was, minutes then, whether it moved)
+        self._cursor = None
 
     # -- faces ------------------------------------------------------------ #
     def available_faces(self):
@@ -374,8 +396,8 @@ class TimerWidget(WidgetCard):
             self._save()
 
     def nudge_duration(self, steps: int) -> None:
-        """The wheel over a timer that isn't running: ten seconds at a time
-        under a minute, a minute under ten, five past that."""
+        """The wheel over a timer that isn't running: a minute a notch, as the
+        ruler counts - ten seconds under a minute, five past an hour."""
         t = self.timer
         if timer_state(t) == "running" or not steps:
             return
@@ -383,7 +405,7 @@ class TimerWidget(WidgetCard):
         for _ in range(abs(steps)):
             up = steps > 0
             edge = d if up else d - 1
-            step = 10 if edge < 60 else (60 if edge < 600 else 300)
+            step = 10 if edge < 60 else (60 if edge < 3600 else 300)
             d = d + step if up else d - step
             d = max(10, min(MAX_TIMER, (d // step) * step if d >= 60 else d))
         self.set_duration(d)
@@ -567,26 +589,70 @@ class TimerWidget(WidgetCard):
                 return name
         return None
 
+    def _on_ruler(self, pos) -> bool:
+        """Whether ``pos`` is on the ruler a timer that isn't running is set on."""
+        return (self._ruler is not None and self.face == "timer"
+                and timer_state(self.timer) == "ready" and self._ruler[0].contains(pos))
+
+    def _set_minutes(self, minutes: int) -> None:
+        """The ruler's choice: whole minutes, 1 to RULER_MAX. Saved on letting go."""
+        t = self.timer
+        t["duration"] = 60 * max(1, min(RULER_MAX, int(minutes)))
+        t["ends_at"] = t["left"] = None
+        self._refresh(force=True)
+
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.LeftButton:
-            hit = self._hit(ev.position())
+            pos = ev.position()
+            hit = self._hit(pos)
             if hit:
                 # A button press must not also start a drag.
                 self._pressed = hit
                 self.update()
                 ev.accept()
                 return
+            if self._on_ruler(pos):
+                # Nor a press on the ruler: it scrolls under its mark instead.
+                self._scrub = (pos.x(), float(self.timer.get("duration", 300)) / 60.0, False)
+                ev.accept()
+                return
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
-        hit = None if self._drag_from is not None else self._hit(ev.position())
-        if hit != self._hover_btn:
-            self._hover_btn = hit
-            self.setCursor(Qt.PointingHandCursor if hit else Qt.ArrowCursor)
+        pos = ev.position()
+        if self._scrub is not None:
+            x0, start, moved = self._scrub
+            if moved or abs(pos.x() - x0) >= 3:
+                self._scrub = (x0, start, True)
+                spacing = self._ruler[1] if self._ruler is not None else 10.0
+                self._set_minutes(int(round(start - (pos.x() - x0) / spacing)))
+            ev.accept()
+            return
+        hit = None if self._drag_from is not None else self._hit(pos)
+        if hit:
+            cursor = Qt.PointingHandCursor
+        elif self._drag_from is None and self._on_ruler(pos):
+            cursor = Qt.SizeHorCursor
+        else:
+            cursor = Qt.ArrowCursor
+        if hit != self._hover_btn or cursor != self._cursor:
+            self._hover_btn, self._cursor = hit, cursor
+            self.setCursor(cursor)
             self.update()
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self._scrub is not None:
+            _x0, _start, moved = self._scrub
+            self._scrub = None
+            if not moved and self._ruler is not None:
+                # A click on the ruler brings that minute to the mark.
+                rect, spacing, minutes = self._ruler
+                self._set_minutes(int(round(minutes + (ev.position().x() - rect.center().x())
+                                            / spacing)))
+            self.changed.emit()
+            ev.accept()
+            return
         if self._pressed:
             name, self._pressed = self._pressed, None
             if self._hit(ev.position()) == name:
@@ -597,7 +663,7 @@ class TimerWidget(WidgetCard):
         super().mouseReleaseEvent(ev)
 
     def leaveEvent(self, ev) -> None:
-        self._hover_btn = self._pressed = None
+        self._hover_btn = self._pressed = self._cursor = None
         self.unsetCursor()
         super().leaveEvent(ev)
 
@@ -617,8 +683,6 @@ class TimerWidget(WidgetCard):
             self.timer_toggle()
         elif name == "timer.reset":
             self.timer_reset()
-        elif name.startswith("timer.chip."):
-            self.set_duration(60 * int(name.rsplit(".", 1)[1]), start=True)
         elif name == "watch.go":
             self.stopwatch_toggle()
         elif name == "watch.side":
@@ -722,6 +786,7 @@ class TimerWidget(WidgetCard):
     # -- drawing ---------------------------------------------------------- #
     def paint_content(self, p: QPainter, r: QRectF) -> None:
         self._buttons = []
+        self._ruler = None
         now = self._now()
         face = self.face
         if face == "stopwatch":
@@ -749,50 +814,114 @@ class TimerWidget(WidgetCard):
             size -= 1
         return size
 
-    def _ring(self, p, rect: QRectF, frac: float, colour: str, width: float,
-              flash: bool = False) -> None:
-        """A track and the part of it still to go, from twelve o'clock
-        clockwise, with round ends."""
+    def _ink(self, colour: str) -> str:
+        """A colour for text: lifted a little in the dark theme, where indigo
+        and blue sat dim on warm glass, and deepened in the light one."""
+        c = QColor(colour)
+        return (c.lighter(128) if self.palette_.dark else c.darker(135)).name()
+
+    def _caption(self, p, rect: QRectF, s: str, colour: Optional[str] = None,
+                 size: float = 9.5, align=Qt.AlignCenter, weight=QFont.Normal) -> None:
+        p.setFont(self.font(size, weight))
+        p.setPen(QColor(colour or self.palette_.text_dim))
+        p.drawText(rect, align, s)
+
+    def _caps(self, p, rect: QRectF, s: str, colour: str, size: float,
+              align=Qt.AlignCenter) -> None:
+        """Small spaced capitals, as StandBy writes "30 MIN" under the time."""
+        f = self.font(size, QFont.DemiBold)
+        f.setLetterSpacing(QFont.PercentageSpacing, 108)
+        p.setFont(f)
+        p.setPen(QColor(colour))
+        p.drawText(rect, align, s.upper())
+
+    def _ends_at_text(self, ends_at: float) -> str:
+        when = QDateTime.fromSecsSinceEpoch(int(round(ends_at))).time()
+        return "Ends " + QLocale.system().toString(when, QLocale.ShortFormat)
+
+    def _ticks(self, p, rect: QRectF, frac: float, colour: str, flash: bool = False,
+               count: int = 60) -> None:
+        """A dial of short ticks, as Apple's StandBy timer draws it: the time
+        still to go lit, the rest dark, unwinding clockwise from twelve."""
         pal = self.palette_
-        inner = rect.adjusted(width / 2, width / 2, -width / 2, -width / 2)
-        track = QColor(pal.text_faint)
-        track.setAlpha(52)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(track, width, Qt.SolidLine, Qt.FlatCap))
-        p.drawArc(inner, 0, 360 * 16)
+        c = rect.center()
+        width = max(2.0, rect.width() * 0.02)
+        outer = rect.width() / 2 - width / 2
+        inner = outer - rect.width() * 0.08
+        lit_n = int(math.ceil(max(0.0, min(1.0, frac)) * count - 1e-9))
+        on = QColor(colour)
         if flash:
-            lit = QColor(colour)
-            lit.setAlpha(255 if int(time.monotonic() * 2) % 2 == 0 else 110)
-            p.setPen(QPen(lit, width, Qt.SolidLine, Qt.FlatCap))
-            p.drawArc(inner, 0, 360 * 16)
-            return
-        frac = max(0.0, min(1.0, frac))
-        if frac > 0:
-            p.setPen(QPen(QColor(colour), width, Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(inner, 90 * 16, -max(1, int(round(360 * 16 * frac))))
+            lit_n = count
+            on.setAlpha(255 if int(time.monotonic() * 2) % 2 == 0 else 90)
+        dark = QColor(pal.text_faint)
+        dark.setAlpha(44)
+        pens = (QPen(dark, width, Qt.SolidLine, Qt.RoundCap),
+                QPen(on, width, Qt.SolidLine, Qt.RoundCap))
+        current = None
+        for i in range(count):
+            lit = i >= count - lit_n
+            if lit is not current:
+                p.setPen(pens[lit])
+                current = lit
+            a = math.radians(-90.0 + i * 360.0 / count)
+            ca, sa = math.cos(a), math.sin(a)
+            p.drawLine(QPointF(c.x() + ca * inner, c.y() + sa * inner),
+                       QPointF(c.x() + ca * outer, c.y() + sa * outer))
+
+    def _badge(self, p, rect: QRectF, colour: str) -> None:
+        """StandBy's corner badge: the timer's glyph, in its colour, on grey."""
+        pal = self.palette_
+        fill = QColor(pal.text)
+        fill.setAlpha(30)
+        p.setPen(Qt.NoPen)
+        p.setBrush(fill)
+        p.drawEllipse(rect)
+        c = rect.center()
+        s = rect.width() * 0.22
+        p.setPen(QPen(QColor(colour), max(1.5, rect.width() * 0.065), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        dial = QPointF(c.x(), c.y() + s * 0.15)
+        p.drawArc(QRectF(dial.x() - s, dial.y() - s, 2 * s, 2 * s), 115 * 16, 310 * 16)
+        p.drawLine(dial, QPointF(dial.x() + s * 0.5, dial.y() - s * 0.42))          # the hand
+        p.drawLine(QPointF(c.x(), dial.y() - s * 0.98), QPointF(c.x(), dial.y() - s * 1.42))
 
     def _button(self, p, name: str, rect: QRectF, icon: str, tone: str) -> None:
-        """A round button as iOS's interactive widgets draw them: the main one
-        a solid disc in its colour with a white mark - green to start, orange
-        to pause, indigo for focus - and the others a grey one. Tinted discs
-        with coloured marks, as Apple's Clock app has, went missing on a bright
-        wallpaper through frosted glass: orange on orange."""
+        """A round button as StandBy draws them: the main one a solid disc in
+        its colour - orange for a timer, green to start a stopwatch and red to
+        stop it, indigo for focus - with a dark mark on the bright ones and a
+        white one on the deep; the others a grey disc. Tinted discs with
+        coloured marks, as Apple's Clock app has, went missing on a bright
+        wallpaper through frosted glass."""
         pal = self.palette_
         if tone == "plain":
             fill = QColor(pal.text)
-            fill.setAlpha(34 + (40 if self._pressed == name else 18 if self._hover_btn == name else 0))
+            fill.setAlpha(38 + (40 if self._pressed == name else 18 if self._hover_btn == name else 0))
             mark = QColor(pal.text)
+            mark.setAlpha(220)
         else:
-            fill = QColor({"go": pal.good, "pause": pal.warn, "indigo": INDIGO[pal.dark]}[tone])
+            fill = QColor({"timer": pal.warn, "go": pal.good, "stop": pal.bad,
+                           "indigo": INDIGO[pal.dark]}[tone])
             if self._pressed == name:
                 fill = fill.darker(118)
             elif self._hover_btn == name:
                 fill = fill.lighter(110)
-            mark = QColor("#ffffff")
+            deep = tone in ("indigo", "stop")
+            mark = QColor("#ffffff" if deep else "#000000")
+            mark.setAlpha(255 if deep else 225)
         p.setPen(Qt.NoPen)
         p.setBrush(fill)
         p.drawEllipse(rect)
         self._icon(p, icon, rect, mark)
+        self._buttons.append((name, QRectF(rect)))
+
+    def _pill(self, p, name: str, rect: QRectF, text: str, colour: str) -> None:
+        """iOS's Start Timer: a pill tinted with its colour, the words in it."""
+        fill = QColor(colour)
+        fill.setAlpha(58 + (40 if self._pressed == name else 22 if self._hover_btn == name else 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(fill)
+        p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        self._caption(p, rect, text, self._ink(colour), rect.height() * 0.32, weight=QFont.DemiBold)
         self._buttons.append((name, QRectF(rect)))
 
     def _icon(self, p, icon: str, rect: QRectF, colour: QColor) -> None:
@@ -806,12 +935,11 @@ class TimerWidget(WidgetCard):
             path.lineTo(c.x() + s * 0.95, c.y())
             path.lineTo(c.x() - s * 0.62, c.y() + s)
             path.closeSubpath()
-            p.setRenderHint(QPainter.Antialiasing, True)
             p.drawPath(path)
         elif icon == "pause":
-            w, gap = s * 0.55, s * 0.42
+            w, gap = s * 0.58, s * 0.40
             for x in (c.x() - gap - w, c.x() + gap):
-                p.drawRoundedRect(QRectF(x, c.y() - s * 0.95, w, s * 1.9), w * 0.3, w * 0.3)
+                p.drawRoundedRect(QRectF(x, c.y() - s * 0.95, w, s * 1.9), w * 0.32, w * 0.32)
         elif icon == "stop":
             p.drawRoundedRect(QRectF(c.x() - s * 0.8, c.y() - s * 0.8, s * 1.6, s * 1.6),
                               s * 0.3, s * 0.3)
@@ -823,12 +951,16 @@ class TimerWidget(WidgetCard):
             p.drawPath(path)
             p.drawRoundedRect(QRectF(c.x() + s * 0.5, c.y() - s * 0.9, s * 0.42, s * 1.8),
                               s * 0.15, s * 0.15)
+        elif icon == "x":
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(colour, max(1.8, rect.width() * 0.07), Qt.SolidLine, Qt.RoundCap))
+            k = s * 0.74
+            p.drawLine(QPointF(c.x() - k, c.y() - k), QPointF(c.x() + k, c.y() + k))
+            p.drawLine(QPointF(c.x() - k, c.y() + k), QPointF(c.x() + k, c.y() - k))
         elif icon == "reset":
             p.setBrush(Qt.NoBrush)
-            pen = QPen(colour, max(1.6, rect.width() * 0.075), Qt.SolidLine, Qt.RoundCap)
-            p.setPen(pen)
-            arc = QRectF(c.x() - s, c.y() - s, 2 * s, 2 * s)
-            p.drawArc(arc, 110 * 16, 270 * 16)
+            p.setPen(QPen(colour, max(1.6, rect.width() * 0.075), Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(QRectF(c.x() - s, c.y() - s, 2 * s, 2 * s), 110 * 16, 270 * 16)
             # The arrowhead at the arc's start, pointing along it.
             tip = QPointF(c.x() + s * math.cos(math.radians(110)),
                           c.y() - s * math.sin(math.radians(110)))
@@ -855,110 +987,148 @@ class TimerWidget(WidgetCard):
             flag.closeSubpath()
             p.drawPath(flag)
 
-    def _ink(self, colour: str) -> str:
-        """A colour for text: lifted a little in the dark theme, where indigo
-        and blue sat dim on warm glass."""
-        return QColor(colour).lighter(128).name() if self.palette_.dark else colour
-
-    def _caption(self, p, rect: QRectF, s: str, colour: Optional[str] = None,
-                 size: float = 9.5, align=Qt.AlignCenter, weight=QFont.Normal) -> None:
-        p.setFont(self.font(size, weight))
-        p.setPen(QColor(colour or self.palette_.text_dim))
-        p.drawText(rect, align, s)
-
-    def _ends_at_text(self, ends_at: float) -> str:
-        when = QDateTime.fromSecsSinceEpoch(int(round(ends_at))).time()
-        return "Ends " + QLocale.system().toString(when, QLocale.ShortFormat)
+    def _paint_ruler(self, p, rect: QRectF, minutes: float, colour: str) -> None:
+        """Minutes on a ruler, as iOS's timer control sets them: a tick a
+        minute and a number every five, the chosen minute over a mark in the
+        middle, lit up to it and dark past it, fading out at both ends. It
+        scrolls under the mark: drag it, click a minute, or turn the wheel."""
+        spacing = max(8.0, rect.width() / 29.0)
+        cx = rect.center().x()
+        label_h = rect.height() * 0.30
+        pointer = max(7.0, rect.height() * 0.12)
+        top = rect.top() + label_h + rect.height() * 0.05
+        bottom = rect.bottom() - pointer - rect.height() * 0.08
+        width = max(1.8, spacing * 0.27)
+        base = QColor(colour)
+        p.setFont(self.font(max(9.0, label_h * 0.6), QFont.DemiBold))
+        first = int(math.floor(minutes - (cx - rect.left()) / spacing))
+        last = int(math.ceil(minutes + (rect.right() - cx) / spacing))
+        reach = rect.width() * 0.2               # where each end fades out
+        for m in range(max(0, first), min(RULER_MAX, last) + 1):
+            x = cx + (m - minutes) * spacing
+            edge = min(x - rect.left(), rect.right() - x)
+            if edge <= 0:
+                continue
+            ink = QColor(base)
+            ink.setAlphaF((1.0 if m <= minutes + 1e-6 else 0.32) * min(1.0, edge / reach))
+            p.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(x, top + width / 2), QPointF(x, bottom - width / 2))
+            if m % 5 == 0:
+                p.drawText(QRectF(x - 24, rect.top(), 48, label_h), Qt.AlignCenter, str(m))
+        mark = QPainterPath()
+        mark.moveTo(cx, rect.bottom() - pointer)
+        mark.lineTo(cx + pointer * 0.68, rect.bottom())
+        mark.lineTo(cx - pointer * 0.68, rect.bottom())
+        mark.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(base)
+        p.drawPath(mark)
+        self._ruler = (QRectF(rect), spacing, minutes)
 
     # -- the timer face --------------------------------------------------- #
     def _paint_timer(self, p, r: QRectF, now: float) -> None:
+        """Running, StandBy's timer: a dial of ticks round the time, its
+        length in small orange capitals, a grey cross to cancel and an orange
+        button to pause. Not yet started, iOS's timer control sets it (a
+        ruler, _paint_setter) - except on a small card, which is all dial."""
         pal = self.palette_
         t = self.timer
         state = timer_state(t)
-        left = timer_left(t, now)
         duration = float(t.get("duration", 300))
+        orange = pal.warn
+        size = self.size_class
+        if state == "ready" and size != "small":
+            self._paint_setter(p, r, duration)
+            return
+        left = timer_left(t, now)
         frac = left / max(1.0, duration)
         flash = now < self._flash_until and state == "done"
         text = down_text(left)
-        caption = {"ready": minutes_text(duration), "paused": "Paused",
-                   "done": "Done"}.get(state) or self._ends_at_text(float(t["ends_at"]))
-        go_icon, go_tone = ("pause", "pause") if state == "running" else ("play", "go")
-        size = self.size_class
+        caption = "Done" if state == "done" else length_caps(duration)
+        digit_ink = pal.text_dim if state == "paused" else pal.text
+        go_icon = "pause" if state == "running" else "play"
 
         if size == "small":
-            d = 112.0
-            ring = QRectF(r.center().x() - d / 2, r.top() - 6, d, d)
-            self._ring(p, ring, frac, pal.warn, 7.0, flash)
-            digits = QRectF(ring.left() + 10, ring.center().y() - 19, ring.width() - 20, 30)
-            self._digits_text(p, digits, text, self._fit_size(text, 25, digits.width()), pal.text)
-            self._caption(p, QRectF(ring.left(), ring.center().y() + 11, ring.width(), 16),
-                          caption, pal.warn if state == "done" else None, 9)
+            d = 120.0
+            ring = QRectF(r.center().x() - d / 2, r.top() - 9, d, d)
+            self._ticks(p, ring, frac, orange, flash)
+            digits = QRectF(ring.left() + 18, ring.center().y() - 17, ring.width() - 36, 28)
+            self._digits_text(p, digits, text, self._fit_size(text, 23, digits.width(), QFont.Medium),
+                              digit_ink, QFont.Medium)
+            self._caps(p, QRectF(ring.left(), ring.center().y() + 11, ring.width(), 13), caption,
+                       self._ink(orange), 7.5)
             b = 28.0
             if state != "ready":
-                self._button(p, "timer.reset", QRectF(r.left() - 4, r.bottom() - b + 4, b, b),
-                             "reset", "plain")
-            self._button(p, "timer.go", QRectF(r.right() - b + 4, r.bottom() - b + 4, b, b),
-                         go_icon, go_tone)
+                self._button(p, "timer.reset", QRectF(r.left() - 5, r.bottom() - b + 5, b, b),
+                             "x", "plain")
+            self._button(p, "timer.go", QRectF(r.right() - b + 5, r.bottom() - b + 5, b, b),
+                         go_icon, "timer")
             return
 
         if size == "medium":
-            d = r.height() + 8
-            ring = QRectF(r.left() - 4, r.top() - 4, d, d)
-            self._ring(p, ring, frac, pal.warn, 8.0, flash)
-            inner = ring.adjusted(14, 14, -14, -14)
-            self._digits_text(p, inner, text, self._fit_size(text, 28, inner.width()), pal.text)
-            col = QRectF(ring.right() + 18, r.top(), r.right() - ring.right() - 18, r.height())
-            self.label(p, QRectF(col.left(), col.top(), col.width(), 12), "Timer")
-            self._digits_text(p, QRectF(col.left(), col.top() + 20, col.width(), 26),
-                              minutes_text(duration), 17, pal.text, QFont.DemiBold,
-                              Qt.AlignLeft | Qt.AlignVCenter)
-            self._caption(p, QRectF(col.left(), col.top() + 46, col.width(), 18), caption,
-                          pal.warn if state == "done" else None, 10.5,
-                          Qt.AlignLeft | Qt.AlignVCenter,
-                          QFont.DemiBold if state == "done" else QFont.Normal)
-            b = 40.0
-            y = r.bottom() - b + 2
-            self._button(p, "timer.go", QRectF(col.right() - b, y, b, b), go_icon, go_tone)
-            if state != "ready":
-                self._button(p, "timer.reset", QRectF(col.right() - 2 * b - 12, y, b, b),
-                             "reset", "plain")
+            d = r.height() + 12
+            ring = QRectF(r.left() - 6, r.top() - 6, d, d)
+            self._ticks(p, ring, frac, orange, flash)
+            digits = QRectF(ring.left() + 22, ring.center().y() - 20, ring.width() - 44, 32)
+            self._digits_text(p, digits, text, self._fit_size(text, 27, digits.width(), QFont.Medium),
+                              digit_ink, QFont.Medium)
+            self._caps(p, QRectF(ring.left(), ring.center().y() + 13, ring.width(), 14), caption,
+                       self._ink(orange), 8)
+            col = QRectF(ring.right() + 16, r.top(), r.right() - ring.right() - 16, r.height())
+            self._badge(p, QRectF(col.right() - 30, col.top() - 4, 30, 30), orange)
+            self.label(p, QRectF(col.left(), col.top(), col.width() - 34, 12), "Timer")
+            sub = {"paused": "Paused", "done": "Time's up"}.get(state, "")
+            if state == "running":
+                sub = self._ends_at_text(float(t["ends_at"]))
+            self._caption(p, QRectF(col.left(), col.top() + 22, col.width(), 20), sub, None, 11,
+                          Qt.AlignLeft | Qt.AlignVCenter)
+            b = 42.0
+            y = r.bottom() - b + 4
+            self._button(p, "timer.go", QRectF(col.right() - b + 2, y, b, b), go_icon, "timer")
+            self._button(p, "timer.reset", QRectF(col.right() - 2 * b - 10, y, b, b), "x", "plain")
             return
 
-        # large
-        d = 196.0
-        ring = QRectF(r.center().x() - d / 2, r.top() + 2, d, d)
-        self._ring(p, ring, frac, pal.warn, 10.0, flash)
-        digits = QRectF(ring.left() + 18, ring.center().y() - 30, ring.width() - 36, 46)
-        self._digits_text(p, digits, text, self._fit_size(text, 40, digits.width()), pal.text)
-        self._caption(p, QRectF(ring.left(), ring.center().y() + 18, ring.width(), 20), caption,
-                      pal.warn if state == "done" else None, 11)
-        b = 46.0
-        y = ring.bottom() - b + 6
-        if state != "ready":
-            self._button(p, "timer.reset", QRectF(r.left() - 2, y, b, b), "reset", "plain")
-        self._button(p, "timer.go", QRectF(r.right() - b + 2, y, b, b), go_icon, go_tone)
-        # Quick starts along the bottom: a tap sets the length and starts it.
-        chips = len(CHIPS)
-        gap = 8.0
-        cw = (r.width() - gap * (chips - 1)) / chips
-        top = r.bottom() - 30
-        for i, m in enumerate(CHIPS):
-            rect = QRectF(r.left() + i * (cw + gap), top, cw, 30)
-            name = f"timer.chip.{m}"
-            chosen = int(duration) == m * 60
-            if chosen:
-                fill = QColor(pal.warn)
-                if self._pressed == name:
-                    fill = fill.darker(118)
-            else:
-                fill = QColor(pal.text)
-                fill.setAlpha(26 + (36 if self._pressed == name else 16 if self._hover_btn == name else 0))
-            p.setPen(Qt.NoPen)
-            p.setBrush(fill)
-            p.drawRoundedRect(rect, 15, 15)
-            self._caption(p, rect, f"{m} min", "#ffffff" if chosen else pal.text, 10.5,
-                          weight=QFont.DemiBold)
-            self._buttons.append((name, QRectF(rect)))
+        # large: StandBy's timer, nearly to the pixel
+        d = 232.0
+        ring = QRectF(r.center().x() - d / 2, r.top() + 4, d, d)
+        self._ticks(p, ring, frac, orange, flash)
+        digits = QRectF(ring.left() + 30, ring.center().y() - 34, ring.width() - 60, 56)
+        self._digits_text(p, digits, text, self._fit_size(text, 46, digits.width(), QFont.Medium),
+                          digit_ink, QFont.Medium)
+        self._caps(p, QRectF(ring.left(), ring.center().y() + 24, ring.width(), 20), caption,
+                   self._ink(orange), 11)
+        self._badge(p, QRectF(r.left() - 6, r.top() - 6, 36, 36), orange)
+        b = 52.0
+        self._button(p, "timer.reset", QRectF(r.left() - 6, r.bottom() - b + 6, b, b), "x", "plain")
+        self._button(p, "timer.go", QRectF(r.right() - b + 6, r.bottom() - b + 6, b, b), go_icon,
+                     "timer")
+
+    def _paint_setter(self, p, r: QRectF, duration: float) -> None:
+        """A timer not yet started, as iOS's timer control sets one: the
+        minutes on a ruler, the length big beside it, and Start Timer."""
+        pal = self.palette_
+        orange = pal.warn
+        # On light glass the ruler takes the deeper orange text does.
+        rule = orange if pal.dark else self._ink(orange)
+        minutes = duration / 60.0
+        text = down_text(duration)
+        if self.size_class == "medium":
+            self._paint_ruler(p, QRectF(r.left() - 10, r.top() - 4, r.width() + 20, 74), minutes,
+                              rule)
+            pill = QRectF(r.left(), r.bottom() - 40, 136, 40)
+            self._pill(p, "timer.go", pill, "Start Timer", orange)
+            room = QRectF(pill.right() + 10, r.bottom() - 54, r.right() - pill.right() - 10, 58)
+            self._digits_text(p, room, text, self._fit_size(text, 40, room.width(), QFont.Light),
+                              self._ink(orange), QFont.Light, Qt.AlignRight | Qt.AlignVCenter)
+            return
+        self._badge(p, QRectF(r.left() - 6, r.top() - 6, 36, 36), orange)
+        big = QRectF(r.left(), r.top() + 34, r.width(), 84)
+        self._digits_text(p, big, text, self._fit_size(text, 60, big.width(), QFont.Light),
+                          self._ink(orange), QFont.Light)
+        self._paint_ruler(p, QRectF(r.left() - 10, r.top() + 132, r.width() + 20, 90), minutes,
+                          rule)
+        pill = QRectF(r.center().x() - 96, r.bottom() - 48, 192, 48)
+        self._pill(p, "timer.go", pill, "Start Timer", orange)
 
     # -- the stopwatch face ----------------------------------------------- #
     def _paint_stopwatch(self, p, r: QRectF, now: float) -> None:
@@ -967,7 +1137,7 @@ class TimerWidget(WidgetCard):
         running = s.get("started_at") is not None
         total = stopwatch_total(s, now)
         laps = list(s.get("laps") or [])
-        go_icon, go_tone = ("stop", "pause") if running else ("play", "go")
+        go_icon, go_tone = ("stop", "stop") if running else ("play", "go")
         side_icon = "lap" if running else "reset"
         size = self.size_class
         lap_now = total - (laps[-1] if laps else 0.0)
@@ -976,15 +1146,16 @@ class TimerWidget(WidgetCard):
             self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Stopwatch")
             text = up_text(total, 1)
             digits = QRectF(r.left() - 4, r.top() + 30, r.width() + 8, 40)
-            self._digits_text(p, digits, text, self._fit_size(text, 28, digits.width()), pal.text)
+            self._digits_text(p, digits, text, self._fit_size(text, 28, digits.width(), QFont.Medium),
+                              pal.text, QFont.Medium)
             if laps:
                 self._caption(p, QRectF(r.left(), r.top() + 70, r.width(), 16),
                               f"Lap {len(laps) + 1}  {up_text(lap_now, 1)}", None, 9.5)
             b = 28.0
             if running or total > 0:
-                self._button(p, "watch.side", QRectF(r.left() - 4, r.bottom() - b + 4, b, b),
+                self._button(p, "watch.side", QRectF(r.left() - 5, r.bottom() - b + 5, b, b),
                              side_icon, "plain")
-            self._button(p, "watch.go", QRectF(r.right() - b + 4, r.bottom() - b + 4, b, b),
+            self._button(p, "watch.go", QRectF(r.right() - b + 5, r.bottom() - b + 5, b, b),
                          go_icon, go_tone)
             return
 
@@ -994,16 +1165,16 @@ class TimerWidget(WidgetCard):
             b = 42.0
             room = r.width() - 2 * b - 30
             digits = QRectF(r.left(), r.top() + 22, room, 58)
-            self._digits_text(p, digits, text, self._fit_size(text, 40, digits.width()), pal.text,
-                              align=Qt.AlignLeft | Qt.AlignVCenter)
+            self._digits_text(p, digits, text, self._fit_size(text, 40, digits.width(), QFont.Medium),
+                              pal.text, QFont.Medium, Qt.AlignLeft | Qt.AlignVCenter)
             line = (f"Lap {len(laps) + 1}  {up_text(lap_now, 2)}" if laps
                     else ("Running" if running else ("Stopped" if total > 0 else "Ready")))
             self._caption(p, QRectF(r.left(), r.top() + 84, room, 18), line, None, 10.5,
                           Qt.AlignLeft | Qt.AlignVCenter)
             y = r.center().y() - b / 2 + 8
-            self._button(p, "watch.go", QRectF(r.right() - b, y, b, b), go_icon, go_tone)
+            self._button(p, "watch.go", QRectF(r.right() - b + 2, y, b, b), go_icon, go_tone)
             if running or total > 0:
-                self._button(p, "watch.side", QRectF(r.right() - 2 * b - 12, y, b, b),
+                self._button(p, "watch.side", QRectF(r.right() - 2 * b - 10, y, b, b),
                              side_icon, "plain")
             return
 
@@ -1011,12 +1182,13 @@ class TimerWidget(WidgetCard):
         self.label(p, QRectF(r.left(), r.top(), r.width(), 12), "Stopwatch")
         text = up_text(total, 2)
         digits = QRectF(r.left(), r.top() + 22, r.width(), 60)
-        self._digits_text(p, digits, text, self._fit_size(text, 46, digits.width()), pal.text)
-        b = 46.0
+        self._digits_text(p, digits, text, self._fit_size(text, 46, digits.width(), QFont.Medium),
+                          pal.text, QFont.Medium)
+        b = 48.0
         y = r.top() + 92
         if running or total > 0:
-            self._button(p, "watch.side", QRectF(r.left(), y, b, b), side_icon, "plain")
-        self._button(p, "watch.go", QRectF(r.right() - b, y, b, b), go_icon, go_tone)
+            self._button(p, "watch.side", QRectF(r.left() - 2, y, b, b), side_icon, "plain")
+        self._button(p, "watch.go", QRectF(r.right() - b + 2, y, b, b), go_icon, go_tone)
         splits = [laps[0]] + [laps[i] - laps[i - 1] for i in range(1, len(laps))] if laps else []
         rows: List[Tuple[int, float, bool]] = [(len(laps) + 1, lap_now, True)] if (laps or running) else []
         rows += [(i + 1, splits[i], False) for i in range(len(splits) - 1, -1, -1)]
@@ -1042,6 +1214,8 @@ class TimerWidget(WidgetCard):
 
     # -- the focus face --------------------------------------------------- #
     def _paint_focus(self, p, r: QRectF, now: float) -> None:
+        """The timer's dial in indigo for focus and green for a break, the
+        rounds as dots under the time."""
         pal = self.palette_
         f = self.focus
         phase = f.get("phase", "focus")
@@ -1049,12 +1223,12 @@ class TimerWidget(WidgetCard):
         left = focus_left(f, now)
         frac = left / max(1.0, focus_length(f, phase))
         colour = INDIGO[pal.dark] if phase == "focus" else pal.good
+        tone = "indigo" if phase == "focus" else "go"
         name = {"focus": "Focus", "short": "Break", "long": "Long break"}[phase]
         rounds = int(f.get("rounds", FOCUS["rounds"]))
         rnd = int(f.get("round", 1))
-        flash = now < self._flash_until
+        flash = now < self._flash_until and not running
         text = down_text(left)
-        tone = "indigo" if phase == "focus" else "go"
         go_icon = "pause" if running else "play"
         size = self.size_class
 
@@ -1073,66 +1247,66 @@ class TimerWidget(WidgetCard):
                 p.drawEllipse(QPointF(x0 + i * gap, y), radius, radius)
 
         if size == "small":
-            d = 112.0
-            ring = QRectF(r.center().x() - d / 2, r.top() - 6, d, d)
-            self._ring(p, ring, frac, colour, 7.0, flash and not running)
-            self._caption(p, QRectF(ring.left(), ring.center().y() - 30, ring.width(), 14),
-                          name, None, 9, weight=QFont.DemiBold)
-            digits = QRectF(ring.left() + 10, ring.center().y() - 16, ring.width() - 20, 30)
-            self._digits_text(p, digits, text, self._fit_size(text, 24, digits.width()), pal.text)
-            dots(ring.center().x(), ring.center().y() + 22, 2.4)
+            d = 120.0
+            ring = QRectF(r.center().x() - d / 2, r.top() - 9, d, d)
+            self._ticks(p, ring, frac, colour, flash)
+            digits = QRectF(ring.left() + 18, ring.center().y() - 19, ring.width() - 36, 28)
+            self._digits_text(p, digits, text, self._fit_size(text, 23, digits.width(), QFont.Medium),
+                              pal.text, QFont.Medium)
+            self._caps(p, QRectF(ring.left(), ring.center().y() + 8, ring.width(), 13), name,
+                       self._ink(colour), 7.5)
+            dots(ring.center().x(), ring.center().y() + 27, 2.2)
             b = 28.0
-            self._button(p, "focus.skip", QRectF(r.left() - 4, r.bottom() - b + 4, b, b),
-                         "skip", "plain")
-            self._button(p, "focus.go", QRectF(r.right() - b + 4, r.bottom() - b + 4, b, b),
+            self._button(p, "focus.skip", QRectF(r.left() - 5, r.bottom() - b + 5, b, b), "skip",
+                         "plain")
+            self._button(p, "focus.go", QRectF(r.right() - b + 5, r.bottom() - b + 5, b, b),
                          go_icon, tone)
             return
 
         if size == "medium":
-            d = r.height() + 8
-            ring = QRectF(r.left() - 4, r.top() - 4, d, d)
-            self._ring(p, ring, frac, colour, 8.0, flash and not running)
-            inner = ring.adjusted(14, 14, -14, -14)
-            self._digits_text(p, inner, text, self._fit_size(text, 28, inner.width()), pal.text)
-            col = QRectF(ring.right() + 18, r.top(), r.right() - ring.right() - 18, r.height())
-            self.label(p, QRectF(col.left(), col.top(), col.width(), 12),
-                       f"Round {rnd} of {rounds}")
-            self._caption(p, QRectF(col.left(), col.top() + 20, col.width(), 26),
-                          name, self._ink(colour), 17, Qt.AlignLeft | Qt.AlignVCenter, QFont.DemiBold)
+            d = r.height() + 12
+            ring = QRectF(r.left() - 6, r.top() - 6, d, d)
+            self._ticks(p, ring, frac, colour, flash)
+            digits = QRectF(ring.left() + 22, ring.center().y() - 20, ring.width() - 44, 32)
+            self._digits_text(p, digits, text, self._fit_size(text, 27, digits.width(), QFont.Medium),
+                              pal.text, QFont.Medium)
+            self._caps(p, QRectF(ring.left(), ring.center().y() + 13, ring.width(), 14), name,
+                       self._ink(colour), 8)
+            col = QRectF(ring.right() + 16, r.top(), r.right() - ring.right() - 16, r.height())
+            self.label(p, QRectF(col.left(), col.top(), col.width(), 12), f"Round {rnd} of {rounds}")
             nxt, _r = focus_next(f)
             after = (self._ends_at_text(float(f["ends_at"])) if running else
                      f"Then a {minutes_text(focus_length(f, nxt))} "
                      f"{'long break' if nxt == 'long' else 'break'}" if phase == "focus"
                      else "Then focus")
-            self._caption(p, QRectF(col.left(), col.top() + 48, col.width(), 18), after, None,
-                          10.5, Qt.AlignLeft | Qt.AlignVCenter)
-            dots(col.left() + 2.6 + (rounds - 1) * 2.6 * 3.2 / 2, col.top() + 76, 2.6)
-            b = 40.0
-            y = r.bottom() - b + 2
-            self._button(p, "focus.go", QRectF(col.right() - b, y, b, b), go_icon, tone)
-            self._button(p, "focus.skip", QRectF(col.right() - 2 * b - 12, y, b, b), "skip",
+            self._caption(p, QRectF(col.left(), col.top() + 22, col.width(), 20), after, None, 11,
+                          Qt.AlignLeft | Qt.AlignVCenter)
+            dots(col.left() + 2.6 + (rounds - 1) * 2.6 * 3.2 / 2, col.top() + 54, 2.6)
+            b = 42.0
+            y = r.bottom() - b + 4
+            self._button(p, "focus.go", QRectF(col.right() - b + 2, y, b, b), go_icon, tone)
+            self._button(p, "focus.skip", QRectF(col.right() - 2 * b - 10, y, b, b), "skip",
                          "plain")
             return
 
         # large
-        d = 196.0
-        ring = QRectF(r.center().x() - d / 2, r.top() + 2, d, d)
-        self._ring(p, ring, frac, colour, 10.0, flash and not running)
-        self._caption(p, QRectF(ring.left(), ring.center().y() - 50, ring.width(), 20), name,
-                      self._ink(colour), 12, weight=QFont.DemiBold)
-        digits = QRectF(ring.left() + 18, ring.center().y() - 28, ring.width() - 36, 46)
-        self._digits_text(p, digits, text, self._fit_size(text, 40, digits.width()), pal.text)
-        dots(ring.center().x(), ring.center().y() + 32, 3.2)
-        b = 46.0
-        y = ring.bottom() - b + 6
-        self._button(p, "focus.skip", QRectF(r.left() - 2, y, b, b), "skip", "plain")
-        self._button(p, "focus.go", QRectF(r.right() - b + 2, y, b, b), go_icon, tone)
+        d = 232.0
+        ring = QRectF(r.center().x() - d / 2, r.top() + 4, d, d)
+        self._ticks(p, ring, frac, colour, flash)
+        digits = QRectF(ring.left() + 30, ring.center().y() - 34, ring.width() - 60, 56)
+        self._digits_text(p, digits, text, self._fit_size(text, 46, digits.width(), QFont.Medium),
+                          pal.text, QFont.Medium)
+        self._caps(p, QRectF(ring.left(), ring.center().y() + 22, ring.width(), 20), name,
+                   self._ink(colour), 11)
+        dots(ring.center().x(), ring.center().y() + 50, 3.0)
+        b = 52.0
+        self._button(p, "focus.skip", QRectF(r.left() - 6, r.bottom() - b + 6, b, b), "skip", "plain")
+        self._button(p, "focus.go", QRectF(r.right() - b + 6, r.bottom() - b + 6, b, b), go_icon, tone)
         done = self.focus_today()
-        line = (f"{done} focus session{'s' if done != 1 else ''} today, "
-                f"{minutes_text(done * focus_length(f, 'focus'))}" if done else
-                f"{int(f.get('focus', FOCUS['focus']))} min focus, "
+        line = (f"{done} today, {minutes_text(done * focus_length(f, 'focus'))}" if done else
+                f"{int(f.get('focus', FOCUS['focus']))} min, "
                 f"{int(f.get('short', FOCUS['short']))} min breaks")
-        self._caption(p, QRectF(r.left(), r.bottom() - 22, r.width(), 22), line, None, 11)
+        self._caption(p, QRectF(r.left() + b, r.bottom() - 30, r.width() - 2 * b, 30), line, None, 10.5)
 
     # -- the countdown face ----------------------------------------------- #
     def _paint_countdown(self, p, r: QRectF, now: float) -> None:

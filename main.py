@@ -2308,8 +2308,10 @@ def _check_timer(pal) -> None:
     break, ..., a long break after the fourth round, and starts the next by
     itself when asked; the countdown reads in days, then hours, then minutes,
     then Today, and rings as it arrives. Its buttons take a click without
-    starting a drag, the wheel sets a length, and every face draws at every
-    size in both themes (_selftest/_timer_dark.png, _timer_light.png).
+    starting a drag, and so does the ruler a timer is set on: a drag scrolls
+    it under its mark and a click brings a minute to it. The wheel sets a
+    length, and every face draws at every size in both themes
+    (_selftest/_timer_dark.png, _timer_light.png).
     """
     import copy
     import datetime as _dt
@@ -2367,13 +2369,17 @@ def _check_timer(pal) -> None:
     assert tm.timer_state(late.timer) == "done" and said == [], (
         "a timer that ran out while the board was closed rang on starting")
 
-    # The wheel: a minute at a time, ten seconds under one, five past ten.
+    # The wheel: a minute a notch, as the ruler counts; ten seconds under one, five past an hour.
     w = card()
     lengths = []
     for steps in (1, -5, -2, 2, 9, 1):
         w.nudge_duration(steps)
         lengths.append(w.timer["duration"])
-    assert lengths == [360, 60, 40, 60, 600, 900], f"the wheel's steps: {lengths}"
+    w.set_duration(3600)
+    for steps in (1, -2):
+        w.nudge_duration(steps)
+        lengths.append(w.timer["duration"])
+    assert lengths == [360, 60, 40, 60, 600, 660, 3900, 3540], f"the wheel's steps: {lengths}"
 
     # The stopwatch.
     s = card()
@@ -2452,9 +2458,44 @@ def _check_timer(pal) -> None:
             assert b._drag_from is None, "pressing a timer's button started a drag"
     assert tm.timer_state(b.timer) == "running", "clicking start didn't start the timer"
     b.timer_reset()
+
+    # The ruler: a drag scrolls it under its mark, a click brings a minute to
+    # it, and neither moves the card.
+    b.set_duration(15 * 60)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    b.paint_card(p)
+    p.end()
+    assert b._ruler is not None, "a timer not yet started has no ruler"
+    rect, spacing, _m = b._ruler
+    mid = QPointF(rect.center().x(), rect.center().y())
+
+    def mouse(kind, at_):
+        down = kind != QEvent.MouseButtonRelease
+        ev = QMouseEvent(kind, at_, at_, Qt.NoButton if kind == QEvent.MouseMove else Qt.LeftButton,
+                         Qt.LeftButton if down else Qt.NoButton, Qt.NoModifier)
+        {QEvent.MouseButtonPress: b.mousePressEvent, QEvent.MouseMove: b.mouseMoveEvent,
+         QEvent.MouseButtonRelease: b.mouseReleaseEvent}[kind](ev)
+
+    mouse(QEvent.MouseButtonPress, mid)
+    assert b._drag_from is None, "pressing the ruler started a drag"
+    mouse(QEvent.MouseMove, QPointF(mid.x() - 3 * spacing, mid.y()))
+    mouse(QEvent.MouseButtonRelease, QPointF(mid.x() - 3 * spacing, mid.y()))
+    assert b.timer["duration"] == 18 * 60, f"dragging the ruler three minutes left set {b.timer['duration']} s"
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    b.paint_card(p)
+    p.end()
+    rect, spacing, _m = b._ruler
+    two = QPointF(rect.center().x() + 2 * spacing, rect.center().y())
+    mouse(QEvent.MouseButtonPress, two)
+    mouse(QEvent.MouseButtonRelease, two)
+    assert b.timer["duration"] == 20 * 60, f"clicking two minutes along set {b.timer['duration']} s"
+    b.timer_reset()
+    before = b.timer["duration"]
     b.wheelEvent(QWheelEvent(at, at, QPoint(0, 0), QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
                              Qt.NoScrollPhase, False))
-    assert b.timer["duration"] == 360, "the wheel didn't lengthen the timer"
+    assert b.timer["duration"] == before + 60, "the wheel didn't lengthen the timer a minute"
     assert tray.notify("Timer done", "test") is False, "a notification went out with no tray"
 
     # Every face at every size, in both themes, for looking at.
@@ -2487,8 +2528,8 @@ def _check_timer(pal) -> None:
     print("  timer: counts down as Apple's Clock writes it, pauses, rings once and survives a "
           "restart, quiet for an end while the board was closed; the wheel's steps; stopwatch "
           "laps and resets; focus rounds to a long break and starts the next by itself; the "
-          "countdown in days, hours, minutes and Today, ringing as it arrives; buttons click "
-          "without dragging; faces in _selftest/_timer_*.png")
+          "countdown in days, hours, minutes and Today, ringing as it arrives; buttons and the "
+          "ruler click and scrub without dragging the card; faces in _selftest/_timer_*.png")
 
 
 def _check_layout_mirror() -> None:

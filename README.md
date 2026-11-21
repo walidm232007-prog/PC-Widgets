@@ -270,35 +270,42 @@ known shapes rather than an infinite number.
 in the gallery), and each keeps its own state, so a timer left running behind
 the stopwatch still rings:
 
-- **Timer**: a ring that empties as the time runs down, written as Apple's
-  Clock writes it (5:00 for the whole first second, 0:00 only once it's over).
-  The green button starts it, the grey one resets it, and the wheel over a
-  timer that isn't running sets its length: ten seconds at a time under a
-  minute, a minute under ten, five past that. **Duration** on the menu has
-  presets and **Other length…**; the large size adds quick starts for 1, 5, 10
-  and 25 minutes.
+- **Timer**: running, it's Apple's StandBy timer - a dial of short ticks that
+  go dark as the time runs down, unwinding clockwise from twelve, round the
+  time written as Apple's Clock writes it (5:00 for the whole first second,
+  0:00 only once it's over), its length under it in small orange capitals, a
+  grey ✕ to cancel and an orange button with a dark mark to pause. Not yet
+  started, the medium and large sizes set it as iOS's timer control does:
+  minutes on a ruler, a tick a minute and a number every five, lit up to the
+  chosen minute and fading out at both ends, with the length big and thin
+  beside it and **Start Timer** under it. The ruler scrolls under its mark: drag
+  it, click a minute, or turn the wheel - a minute a notch, ten seconds under
+  a minute, five past an hour. The small size is all dial and the wheel.
+  **Duration** on the menu has presets and **Other length…**.
 - **Stopwatch**: hundredths at medium and large, laps on the grey button while
   it runs, and the large size lists them with the best lap green and the
   worst red, as Apple's Stopwatch does.
-- **Focus**: 25 minutes of focus, a 5-minute break, and a 15-minute break
-  after the fourth round, in indigo for focus and green for breaks, with the
-  rounds as dots and today's sessions counted at large. The lengths are on the
+- **Focus**: the same dial, in indigo for 25 minutes of focus and green for
+  a 5-minute break, with a 15-minute break after the fourth round, the rounds
+  as dots and today's sessions counted at large. The lengths are on the
   menu, and **Start the next one by itself** runs straight on.
 - **Countdown**: days to a date you name (**Count down to…**), then hours and
   minutes on its last day, then **Today**. A new card counts down to New Year.
 
-When a timer or a focus phase runs out, the ring flashes, Windows shows a
+When a timer or a focus phase runs out, the dial flashes, Windows shows a
 notification from the tray icon, and Windows' own alarm chime plays (**Sound
 when done** turns it off). A countdown arriving gets the notification too.
 Times are saved as moments on the clock - when a timer ends, when a stopwatch
 started - so a running timer carries on through a restart of the board. One
 that ran out while the board was closed shows as done, without ringing late.
 The digits use tabular figures, so a counting time doesn't shuffle sideways
-as its digits change width. The main button is a solid disc in its colour with
-a white mark, as iOS's interactive widgets draw it: Apple Clock's tinted discs
-went missing on a bright wallpaper through frosted glass. A running ring
-redraws ten times a second and a stopwatch twenty; with nothing running the
-card redraws only when what it shows changes.
+as its digits change width. The main button is a solid disc in its colour -
+orange for a timer, green and red for a stopwatch, indigo for focus - with a
+dark mark on the bright ones and a white one on the deep, as StandBy draws
+them: Apple Clock's tinted discs went missing on a bright wallpaper through
+frosted glass. On light glass, orange text and the ruler take a deeper orange.
+A running dial redraws ten times a second and a stopwatch twenty; with nothing
+running the card redraws only when what it shows changes.
 
 Right-click **Stocks → Edit symbols** for the watchlist. The same endpoint serves
 equities, indices (`^GSPC`) and crypto (`BTC-USD`), so one list can mix them.
@@ -967,7 +974,7 @@ card on a stand-in clock: a timer that counts, pauses, rings once and survives
 a restart, but stays quiet for an end that came while the board was closed;
 the wheel's steps; stopwatch laps; four focus rounds to a long break; a
 countdown read in days, hours and minutes and ringing as it arrives; and a
-button click that doesn't start a drag. It draws every face at every size in
+button click, a ruler drag and a ruler click that don't move the card. It draws every face at every size in
 both themes to `_selftest/_timer_dark.png` and `_timer_light.png`. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
