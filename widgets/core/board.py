@@ -56,12 +56,14 @@ def load_builtin_tiles() -> None:
     from ..tiles.outlook import OutlookWidget
     from ..tiles.stocks import StocksWidget
     from ..tiles.system import DiskWidget, SystemWidget
+    from ..tiles.timer import TimerWidget
     from ..tiles.weather import WeatherWidget
     from ..tiles.workspace import WorkspaceWidget
 
     for cls in (ClockWidget, WeatherWidget, StocksWidget, SystemWidget,
                 DiskWidget, CalendarWidget, NotesWidget, FilesWidget,
-                WorkspaceWidget, MediaWidget, OutlookWidget, CommsWidget):
+                WorkspaceWidget, MediaWidget, OutlookWidget, CommsWidget,
+                TimerWidget):
         register(cls)
 
 
