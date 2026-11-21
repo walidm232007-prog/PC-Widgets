@@ -119,6 +119,8 @@ def selftest() -> int:
                     samples.workspace(card)
                 if kind == "media":
                     samples.media(card)
+                if kind == "timer":
+                    samples.timer(card)
                 if kind == "outlook":
                     samples.outlook(card)
                 if kind == "comms":
@@ -173,6 +175,7 @@ def selftest() -> int:
     _check_live_glass(pal_mod.build("dark", "blue"))
     _check_gpu_glass(pal_mod.build("dark", "blue"))
     _check_glass_layer(pal_mod.build("dark", "blue"))
+    _check_timer(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -2291,6 +2294,201 @@ def _check_glass_layer(pal) -> None:
           f"the kept layer on it, pixel for pixel, in {alone:.2f} ms against {drawn:.2f} drawn again; "
           f"update() draws it again; its type greyscale ({fringed} coloured-edge pixels drawn "
           f"straight on the glass here, none in the layer); a covered card never goes stale")
+
+
+def _check_timer(pal) -> None:
+    """The Timer card keeps time on all four faces, rings once, and survives
+    a restart.
+
+    On a stand-in clock: a five-minute timer counts down as Apple's Clock
+    writes it, pauses and resumes, and runs out once - one alert, the ring
+    flashing. A new card made from its saved settings mid-run carries on
+    running, and one that ran out while the board was closed comes back done,
+    without an alert. The stopwatch laps, stops and resets; focus goes focus,
+    break, ..., a long break after the fourth round, and starts the next by
+    itself when asked; the countdown reads in days, then hours, then minutes,
+    then Today, and rings as it arrives. Its buttons take a click without
+    starting a drag, the wheel sets a length, and every face draws at every
+    size in both themes (_selftest/_timer_dark.png, _timer_light.png).
+    """
+    import copy
+    import datetime as _dt
+
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
+
+    from widgets import tray
+    from widgets.core import palette as pal_mod
+    from widgets.core import samples
+    from widgets.tiles import timer as tm
+
+    now = [1_800_000_000.0]
+    said = []
+
+    def card(size: str = "small", cfg=None):
+        c = tm.TimerWidget(pal, size, {} if cfg is None else cfg)
+        c._now = lambda: now[0]
+        c._alert = lambda title, text: said.append(title)
+        return c
+
+    # The time as text.
+    assert (tm.down_text(300), tm.down_text(299.2), tm.down_text(299)) == ("5:00", "5:00", "4:59")
+    assert (tm.down_text(0.2), tm.down_text(0), tm.down_text(3723)) == ("0:01", "0:00", "1:02:03")
+    assert tm.up_text(83.47) == "01:23.47" and tm.up_text(45.91 - 21.62) == "00:24.29", (
+        "a lap's time lost a hundredth to floating point")
+    assert tm.up_text(3723.4, 1) == "1:02:03.4"
+    assert [tm.parse_length(x) for x in ("25", "1:30", "1:00:00", "90s", "1h30m", "soon")] == [
+        1500, 90, 3600, 90, 5400, None]
+
+    # The timer: counts, pauses, rings once.
+    c = card()
+    t = c.timer
+    assert tm.timer_state(t) == "ready" and tm.timer_left(t, now[0]) == 300
+    c.timer_toggle()
+    now[0] += 61.5
+    c.on_tick()
+    assert tm.timer_state(t) == "running" and tm.down_text(tm.timer_left(t, now[0])) == "3:59"
+    c.timer_toggle()
+    now[0] += 100
+    assert tm.timer_state(t) == "paused" and tm.down_text(tm.timer_left(t, now[0])) == "3:59"
+    c.timer_toggle()
+    again = card(cfg=copy.deepcopy(c.config))      # the board restarting mid-run
+    assert tm.timer_state(again.timer) == "running" and abs(
+        tm.timer_left(again.timer, now[0]) - tm.timer_left(t, now[0])) < 1e-6, (
+        "a running timer didn't survive a restart")
+    now[0] += 238.6
+    c.on_tick()
+    assert tm.timer_state(t) == "done" and said == ["Timer done"] and now[0] < c._flash_until
+    c.on_tick()
+    assert said == ["Timer done"], "a timer rang twice"
+    said.clear()
+    late = card(cfg={"timer": {"duration": 60, "ends_at": now[0] - 600, "left": None}})
+    late.on_tick()
+    assert tm.timer_state(late.timer) == "done" and said == [], (
+        "a timer that ran out while the board was closed rang on starting")
+
+    # The wheel: a minute at a time, ten seconds under one, five past ten.
+    w = card()
+    lengths = []
+    for steps in (1, -5, -2, 2, 9, 1):
+        w.nudge_duration(steps)
+        lengths.append(w.timer["duration"])
+    assert lengths == [360, 60, 40, 60, 600, 900], f"the wheel's steps: {lengths}"
+
+    # The stopwatch.
+    s = card()
+    sw = s.stopwatch
+    s.stopwatch_toggle()
+    now[0] += 12.34
+    s.stopwatch_side()                               # a lap
+    now[0] += 5.0
+    s.stopwatch_toggle()                             # stopped
+    now[0] += 50.0
+    assert tm.up_text(tm.stopwatch_total(sw, now[0])) == "00:17.34" and sw["laps"] == [12.34]
+    s.stopwatch_side()                               # reset
+    assert tm.stopwatch_total(sw, now[0]) == 0 and sw["laps"] == []
+
+    # Focus: four rounds, then a long break, then round 1 again.
+    f = card()
+    fo = f.focus
+    f.on_tick()
+    seen = []
+    for _ in range(8):
+        f.focus_toggle()
+        now[0] += tm.focus_length(fo, fo["phase"]) + 0.5
+        f.on_tick()
+        seen.append((fo["phase"], fo["round"]))
+    assert seen == [("short", 1), ("focus", 2), ("short", 2), ("focus", 3), ("short", 3),
+                    ("focus", 4), ("long", 4), ("focus", 1)], f"focus went {seen}"
+    assert f.focus_today() == 4 and said.count("Focus done") == 4 and said.count("Break's over") == 4
+    f._set_focus("auto", True)
+    f.focus_toggle()
+    now[0] += tm.focus_length(fo, "focus") + 0.5
+    f.on_tick()
+    assert fo["phase"] == "short" and fo["ends_at"] is not None, "the next phase didn't start by itself"
+
+    # The countdown.
+    base = _dt.datetime(2026, 12, 10, 15, 0).timestamp()
+    new_year = _dt.datetime(2027, 1, 1).timestamp()
+    assert tm.countdown_text(new_year, base) == ("21", "days")
+    assert tm.countdown_rest(new_year, base) == "and 9 h"
+    assert tm.countdown_text(base + 5 * 3600 + 12 * 60 + 30, base) == ("5 h 12", "min")
+    assert tm.countdown_text(base + 12 * 60 + 34, base) == ("12:34", "left")
+    assert tm.countdown_text(base - 60, base) == ("Today", "")
+    assert tm.countdown_text(base - 3 * 86400, base) == ("3", "days ago")
+    said.clear()
+    cd = card()
+    cd.on_tick()
+    soon = _dt.datetime.fromtimestamp(now[0] + 120).replace(second=0, microsecond=0)
+    cd.set_countdown("Exam", soon.isoformat(timespec="minutes"))
+    now[0] = soon.timestamp() + 1
+    cd.on_tick()
+    cd.on_tick()
+    assert said == ["Exam"], f"a countdown arriving rang {said}"
+
+    # The faces.
+    for size in tm.TimerWidget.supported_sizes:
+        assert [k for k, _ in card(size).available_faces()] == [
+            "timer", "stopwatch", "focus", "countdown"]
+    fc = card()
+    fc.set_face("focus")
+    assert fc.config["faces"] == {"small": "focus"} and fc.face == "focus"
+
+    # A button takes a click without starting a drag; the wheel sets a length.
+    b = card("medium")
+    img = QImage(b.size(), QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    b.paint_card(p)
+    p.end()
+    go = next(rect for name, rect in b._buttons if name == "timer.go").center()
+    at = QPointF(go)
+    for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+        ev = QMouseEvent(kind, at, at, Qt.LeftButton,
+                         Qt.LeftButton if kind == QEvent.MouseButtonPress else Qt.NoButton,
+                         Qt.NoModifier)
+        (b.mousePressEvent if kind == QEvent.MouseButtonPress else b.mouseReleaseEvent)(ev)
+        if kind == QEvent.MouseButtonPress:
+            assert b._drag_from is None, "pressing a timer's button started a drag"
+    assert tm.timer_state(b.timer) == "running", "clicking start didn't start the timer"
+    b.timer_reset()
+    b.wheelEvent(QWheelEvent(at, at, QPoint(0, 0), QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+                             Qt.NoScrollPhase, False))
+    assert b.timer["duration"] == 360, "the wheel didn't lengthen the timer"
+    assert tray.notify("Timer done", "test") is False, "a notification went out with no tray"
+
+    # Every face at every size, in both themes, for looking at.
+    out = os.path.join(_write_dir(), "_selftest")
+    os.makedirs(out, exist_ok=True)
+    faces = [k for k, _ in tm.FACES_ALL]
+    for theme in ("dark", "light"):
+        tpal = pal_mod.build(theme, "blue")
+        sheet = QImage(1080, 4 * 420 + 40, QImage.Format_ARGB32_Premultiplied)
+        sheet.fill(QColor(30, 30, 34) if theme == "dark" else QColor(236, 236, 240))
+        sp = QPainter(sheet)
+        for row, face in enumerate(faces):
+            for x, size in zip((40, 260, 660), tm.TimerWidget.supported_sizes):
+                fcard = tm.TimerWidget(tpal, size, {})
+                samples.timer(fcard)
+                fcard.config["faces"] = {size: face}
+                pic = QImage(fcard.size(), QImage.Format_ARGB32_Premultiplied)
+                pic.fill(Qt.transparent)
+                q = QPainter(pic)
+                fcard.paint_card(q)
+                q.end()
+                sp.drawImage(x, 20 + row * 420, pic)
+                fcard.close()
+                fcard.deleteLater()
+        sp.end()
+        sheet.save(os.path.join(out, f"_timer_{theme}.png"))
+    for c_ in (c, again, late, w, s, f, cd, fc, b):
+        c_.close()
+        c_.deleteLater()
+    print("  timer: counts down as Apple's Clock writes it, pauses, rings once and survives a "
+          "restart, quiet for an end while the board was closed; the wheel's steps; stopwatch "
+          "laps and resets; focus rounds to a long break and starts the next by itself; the "
+          "countdown in days, hours, minutes and Today, ringing as it arrives; buttons click "
+          "without dragging; faces in _selftest/_timer_*.png")
 
 
 def _check_layout_mirror() -> None:

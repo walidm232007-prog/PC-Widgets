@@ -180,9 +180,25 @@ def _quiet_notes(card) -> None:
         pass
 
 
+def timer(card) -> None:
+    """A timer part-way through, a stopwatch with laps, a focus round and a
+    countdown to New Year, on a clock that stands still at 3 pm on 10 December
+    2026 - so a render is the same whenever it's made."""
+    fixed = time.mktime((2026, 12, 10, 15, 0, 0, 0, 0, -1))
+    card._now = lambda: fixed
+    card.config.update({
+        "timer": {"duration": 1500, "ends_at": fixed + 1122.0, "left": None},
+        "stopwatch": {"started_at": None, "elapsed": 83.47, "laps": [21.62, 45.91, 71.04]},
+        "focus": {"focus": 25, "short": 5, "long": 15, "rounds": 4, "phase": "focus",
+                  "round": 2, "ends_at": fixed + 800.0, "left": None, "auto": False,
+                  "today": {"day": "2026-12-10", "count": 1}},
+        "countdown": {"label": "New Year", "target": "2027-01-01T00:00", "rang": None},
+    })
+
+
 _PREPARE = {
     "weather": weather, "stocks": stocks, "outlook": outlook, "media": media,
-    "comms": comms, "system": system, "notes": _quiet_notes,
+    "comms": comms, "system": system, "notes": _quiet_notes, "timer": timer,
 }
 
 

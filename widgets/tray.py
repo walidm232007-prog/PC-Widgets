@@ -60,9 +60,24 @@ class _HotkeyFilter(QAbstractNativeEventFilter):
         return False, 0
 
 
+_tray: "WidgetTray | None" = None      # the board's tray icon, once there is one
+
+
+def notify(title: str, text: str) -> bool:
+    """A Windows notification from the tray icon, for a card with something
+    to say - a timer running out. False where there's no tray to say it."""
+    tray = _tray
+    if tray is None or not tray.isVisible():
+        return False
+    tray.showMessage(title, text, tray.icon(), 8000)
+    return True
+
+
 class WidgetTray(QSystemTrayIcon):
     def __init__(self, board: Board, app) -> None:
+        global _tray
         super().__init__(_icon())
+        _tray = self
         self.board = board
         self.app = app
         self._hk_window: QWidget | None = None

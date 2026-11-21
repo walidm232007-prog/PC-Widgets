@@ -259,11 +259,46 @@ at runtime with `QPainter` — there are no image assets.
 | **Notes** | S, M, L | a real editable sticky note, saved as you type |
 | **Workspace** | S, M, L | a building site with one lit bay per coding agent |
 | **Now Playing** | S, M, L | album art, progress and working transport controls |
+| **Timer** | S, M, L | a timer, a stopwatch, focus sessions or a countdown to a date, one face at a time |
 
 Sizes follow the phone convention — small (2×2), medium (4×2), large (4×4) —
 rather than free resizing. Fixed sizes are what make a board of mixed widgets
 look composed instead of scattered, and they mean each tile is designed for three
 known shapes rather than an infinite number.
+
+**Timer** has four faces (right-click → **Face**, or the dots under a preview
+in the gallery), and each keeps its own state, so a timer left running behind
+the stopwatch still rings:
+
+- **Timer**: a ring that empties as the time runs down, written as Apple's
+  Clock writes it (5:00 for the whole first second, 0:00 only once it's over).
+  The green button starts it, the grey one resets it, and the wheel over a
+  timer that isn't running sets its length: ten seconds at a time under a
+  minute, a minute under ten, five past that. **Duration** on the menu has
+  presets and **Other length…**; the large size adds quick starts for 1, 5, 10
+  and 25 minutes.
+- **Stopwatch**: hundredths at medium and large, laps on the grey button while
+  it runs, and the large size lists them with the best lap green and the
+  worst red, as Apple's Stopwatch does.
+- **Focus**: 25 minutes of focus, a 5-minute break, and a 15-minute break
+  after the fourth round, in indigo for focus and green for breaks, with the
+  rounds as dots and today's sessions counted at large. The lengths are on the
+  menu, and **Start the next one by itself** runs straight on.
+- **Countdown**: days to a date you name (**Count down to…**), then hours and
+  minutes on its last day, then **Today**. A new card counts down to New Year.
+
+When a timer or a focus phase runs out, the ring flashes, Windows shows a
+notification from the tray icon, and Windows' own alarm chime plays (**Sound
+when done** turns it off). A countdown arriving gets the notification too.
+Times are saved as moments on the clock - when a timer ends, when a stopwatch
+started - so a running timer carries on through a restart of the board. One
+that ran out while the board was closed shows as done, without ringing late.
+The digits use tabular figures, so a counting time doesn't shuffle sideways
+as its digits change width. The main button is a solid disc in its colour with
+a white mark, as iOS's interactive widgets draw it: Apple Clock's tinted discs
+went missing on a bright wallpaper through frosted glass. A running ring
+redraws ten times a second and a stopwatch twenty; with nothing running the
+card redraws only when what it shows changes.
 
 Right-click **Stocks → Edit symbols** for the watchlist. The same endpoint serves
 equities, indices (`^GSPC`) and crypto (`BTC-USD`), so one list can mix them.
@@ -927,7 +962,13 @@ check hands a three-level change on and holds a two-level one back, then
 repaints a clock for new glass alone and asks for its kept layer laid on it to
 come out pixel for pixel as drawing the layer again, and the layer drawn
 again after update(). It checks the layer's type has no coloured edges, and
-that a card a picture covers never goes stale. The TLS check reads what the board's
+that a card a picture covers never goes stale. The timer check runs the Timer
+card on a stand-in clock: a timer that counts, pauses, rings once and survives
+a restart, but stays quiet for an end that came while the board was closed;
+the wheel's steps; stopwatch laps; four focus rounds to a long break; a
+countdown read in days, hours and minutes and ringing as it arrives; and a
+button click that doesn't start a drag. It draws every face at every size in
+both themes to `_selftest/_timer_dark.png` and `_timer_light.png`. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 
