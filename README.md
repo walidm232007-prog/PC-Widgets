@@ -1022,6 +1022,12 @@ sidebar has to reach the window's edge with a hairline beside it, turn red with
 a red desktop behind it, and stay solid hanging off the edge of the desktop,
 where a see-through gap would be a hole in the window.
 
+A drop has to end the move, too, so no tile may take the name of one of the
+card's own private methods. Python lets a subclass shadow one without a word,
+and the card then calls the tile's in its place. That is how dropping the
+Headlines card once left every card on the board rimmed, as if one were still
+being moved.
+
 The display checks put a board on a made-up desk shaped like this machine's (a
 main landscape monitor, a portrait one on its left), then rearrange, unplug and
 replug it — on another port — and change its resolution, asserting where every
@@ -1063,7 +1069,8 @@ with their source, date and picture. The merge has to drop repeats and mix one
 busy feed with the others. A fetch through a stand-in for `net.fetch` has to
 ask for `https://` only, capped, saying only the app's name, and a fetch that
 gets nothing has to leave the stories on show. A click on a story opens it,
-and a drag from one moves the card without opening anything. Self-test boards
+and a drag from one moves the card without opening anything; let go, the card
+lands as any card does, and the board isn't left rimmed. Self-test boards
 never fetch (`PCWIDGETS_NO_FEEDS`). It draws every size, with pictures and
 without, and the empty states in both themes to `_selftest/_headlines_dark.png`
 and `_headlines_light.png`. The TLS check reads what the board's
