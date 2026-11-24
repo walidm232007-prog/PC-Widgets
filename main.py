@@ -169,6 +169,7 @@ def selftest() -> int:
     _check_fetch()
     _check_vendored_closure()
     _check_agent_bus()
+    _check_tile_names()
     _check_appearance()
     _check_layout_mirror()
     _check_displays()
@@ -533,6 +534,30 @@ def _check_backend_recovery() -> None:
     assert m.MediaSource("nonsense").prefer == "auto"
     print("  backend recovery: falls back, holds, comes back, retries a failed "
           "import; selector pins to one player")
+
+
+def _check_tile_names() -> None:
+    """No tile takes the name of one of WidgetCard's own private methods.
+
+    Python lets a subclass shadow one without a word, and the card then calls
+    the tile's in its place. Headlines named its fetch handler _landed, which
+    is how a card ends a drop, so dropping it left every card on the board
+    rimmed, as if one were still being moved."""
+    from widgets.core.board import REGISTRY
+    from widgets.core.card import WidgetCard
+
+    base = set(dir(WidgetCard))
+    for kind, cls in REGISTRY.items():
+        own = set()
+        for k in cls.__mro__:
+            if k is WidgetCard:
+                break
+            own |= set(vars(k))
+        taken = sorted(n for n in own
+                       if n.startswith("_") and not n.startswith("__") and n in base)
+        assert not taken, f"{kind} shadows the card's own {taken}"
+    print(f"  tile names: none of the {len(REGISTRY)} tiles shadows one of the card's "
+          f"private methods")
 
 
 def _check_appearance() -> None:
@@ -2699,7 +2724,8 @@ def _check_headlines(pal) -> None:
     and a fetch that gets nothing keeps the stories on show.
     Self-test boards never fetch (PCWIDGETS_NO_FEEDS). A click on a story
     opens it; a press that moves past DRAG_AFTER picks the card up instead
-    and opens nothing. Every size draws in both themes, with pictures and
+    and opens nothing, and letting go lands it as any card lands, the board
+    no longer rimmed. Every size draws in both themes, with pictures and
     without, as do the empty states (_selftest/_headlines_dark.png,
     _headlines_light.png).
     """
@@ -2882,7 +2908,7 @@ def _check_headlines(pal) -> None:
     assert [s.title for s in c.stories] == ["fresh"] and c._ok, (
         "a fetch's stories didn't land on the card")
     c._result = ([], ["https://feeds.example/bbc"])
-    c._landed()
+    c._fetched()
     assert [s.title for s in c.stories] == ["fresh"] and c._ok is False, (
         "a fetch that got nothing emptied the card")
     calls = []
@@ -2940,6 +2966,27 @@ def _check_headlines(pal) -> None:
     mouse(m, QEvent.MouseButtonRelease, second + QPointF(24, 0))
     assert opened == [m.stories[0].link], "a drag that started on a story opened it"
 
+    # Let go, it lands as any card lands: nothing left moving - or every card
+    # on the board keeps the light rim it wears while one is moved - and its
+    # new spot reported, so the board saves it.
+    from widgets.core import card as card_mod
+    from widgets.core import winapi
+    moves = []
+    m.moved.connect(lambda: moves.append(True))
+    animations = winapi.animations_enabled
+    winapi.animations_enabled = lambda: False        # land at once, not over a glide
+    try:
+        mouse(m, QEvent.MouseButtonPress, second)
+        mouse(m, QEvent.MouseMove, second + QPointF(30, 0))
+        assert card_mod._moving is m, "a drag from a story didn't rim the board"
+        mouse(m, QEvent.MouseButtonRelease, second + QPointF(30, 0))
+    finally:
+        winapi.animations_enabled = animations
+    assert card_mod._moving is None, (
+        "dropping the card left the board rimmed, as if one were still moving")
+    assert moves and not m._gliding and m._drag_from is None, (
+        "dropping the card didn't land it: its new spot was never reported")
+
     # Every size, with pictures and without, and the empty states, in both themes.
     out = os.path.join(_write_dir(), "_selftest")
     os.makedirs(out, exist_ok=True)
@@ -2986,7 +3033,8 @@ def _check_headlines(pal) -> None:
     print("  headlines: BBC-, Verge-, NPR- and RSS 1.0-style feeds read as plain titles with "
           "their sources, dates and pictures; merged without repeats and mixed so one feed "
           "doesn't fill the card; https:// only, capped, saying only the app's name; a fetch "
-          "that gets nothing keeps what's shown; a click opens a story, a drag moves the card; "
+          "that gets nothing keeps what's shown; a click opens a story, a drag moves the card "
+          "and lands it; "
           "sizes and states in _selftest/_headlines_*.png")
 
 

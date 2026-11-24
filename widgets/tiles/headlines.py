@@ -355,7 +355,7 @@ class HeadlinesWidget(WidgetCard):
         self._pressed_row: Optional[int] = None
         self._hover_row: Optional[int] = None
         self._shown_ages: Optional[tuple] = None
-        self.data_ready.connect(self._landed)
+        self.data_ready.connect(self._fetched)
         self.setAccessibleName("Headlines")
         self.speak()
 
@@ -411,7 +411,10 @@ class HeadlinesWidget(WidgetCard):
 
         threading.Thread(target=work, name="headlines", daemon=True).start()
 
-    def _landed(self) -> None:
+    def _fetched(self) -> None:
+        """A fetch's stories, back on the board's thread. Not named _landed:
+        that is how WidgetCard ends a drop, and taking its name left every
+        card on the board rimmed, as if one were still being moved."""
         stories, failed = self._result
         if stories or not self.stories:       # a fetch that got nothing keeps what's shown
             self.stories = stories
