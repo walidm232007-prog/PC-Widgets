@@ -278,6 +278,7 @@ at runtime with `QPainter` — there are no image assets.
 | **Workspace** | S, M, L | a building site with one lit bay per coding agent |
 | **Now Playing** | S, M, L | album art, progress and working transport controls |
 | **Timer** | S, M, L | a timer, a stopwatch, focus sessions or a countdown to a date, one face at a time |
+| **Headlines** | S, M, L | the latest stories from news feeds you choose, with their pictures; a click opens one |
 
 Sizes follow the phone convention — small (2×2), medium (4×2), large (4×4) —
 rather than free resizing. Fixed sizes are what make a board of mixed widgets
@@ -338,6 +339,25 @@ them: Apple Clock's tinted discs went missing on a bright wallpaper through
 frosted glass. On light glass, orange text and the ruler take a deeper orange.
 A running dial redraws ten times a second and a stopwatch twenty; with nothing
 running the card redraws only when what it shows changes.
+
+**Headlines** shows the latest stories from news feeds you choose: right-click
+→ **Feeds…** and put a feed's link on each line, RSS or Atom. A new card
+starts on BBC News and The Verge. It's laid out after Apple's News widget.
+At small, the top story's picture fills the card under its headline; at
+medium, two stories sit beside their pictures; at large, the top story runs
+under a banner of its picture, with as many more below it as fit. Each story
+shows its source, in a colour of its own (a feed's colour comes from its place
+in the list, so up to seven never share one), and how long ago it went up:
+12m ago, 3h ago, Yesterday. A click opens the story in your browser; a drag
+from anywhere on the card still moves it. The feeds are read every 15 minutes
+on a thread of their own, two minutes after a fetch that got nothing, or
+straight away with **Refresh now**. A fetch that gets nothing keeps what's
+shown. Stories are merged newest first, the same story from two feeds once.
+By time alone one busy feed would fill the card (BBC News publishes every few
+minutes), so another source's story goes next when it's at most three hours
+older, and never three from one source in a row while another has one
+waiting. Only text, links and picture addresses are taken from a feed, never
+its markup, and a story whose link isn't a web address is dropped.
 
 Right-click **Stocks → Edit symbols** for the watchlist. The same endpoint serves
 equities, indices (`^GSPC`) and crypto (`BTC-USD`), so one list can mix them.
@@ -905,6 +925,14 @@ and nothing needs an account.
     the partly cloudy one need 82%. Night uses the same photos under navy. The
     selftest measures every composite again, so a new photo can't quietly make
     a face unreadable.
+- **Headlines** — the RSS or Atom feeds you list, read through `net.fetch`
+  like every other fetch: `https://` only (an `http://` link is asked for over
+  HTTPS), a feed read to 2 MB at most and a picture to 3 MB, and a request that
+  says nothing but the app's name. Only the pictures of the stories that can be
+  on show are fetched, five at most, scaled down to 640 px as they arrive, and
+  one already on the card isn't fetched again.
+  BBC News sends 240 px thumbnails, soft across a large card's banner, so
+  those are asked for at 480 from the same image server.
 
 **Every fetch trusts Windows' root certificates and nothing else**
 (`widgets/core/net.py`). Python on Windows also trusts the intermediate
@@ -1028,7 +1056,17 @@ a restart, but stays quiet for an end that came while the board was closed;
 the wheel's steps; stopwatch laps; four focus rounds to a long break; a
 countdown read in days, hours and minutes and ringing as it arrives; and a
 button click, a ruler drag and a ruler click that don't move the card. It draws every face at every size in
-both themes to `_selftest/_timer_dark.png` and `_timer_light.png`. The TLS check reads what the board's
+both themes to `_selftest/_timer_dark.png` and `_timer_light.png`. The
+headlines check never touches the network. Feeds written the way BBC News, The
+Verge, NPR and an RSS 1.0 wire write theirs have to come out as plain titles
+with their source, date and picture. The merge has to drop repeats and mix one
+busy feed with the others. A fetch through a stand-in for `net.fetch` has to
+ask for `https://` only, capped, saying only the app's name, and a fetch that
+gets nothing has to leave the stories on show. A click on a story opens it,
+and a drag from one moves the card without opening anything. Self-test boards
+never fetch (`PCWIDGETS_NO_FEEDS`). It draws every size, with pictures and
+without, and the empty states in both themes to `_selftest/_headlines_dark.png`
+and `_headlines_light.png`. The TLS check reads what the board's
 HTTPS trusts - Windows' roots only, and never the expired certificate that broke
 the weather card - without going near the network.
 

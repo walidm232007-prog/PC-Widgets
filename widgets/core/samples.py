@@ -196,9 +196,57 @@ def timer(card) -> None:
     })
 
 
+def headlines(card) -> None:
+    """Five stories from three made-up sources, with drawn pictures (one
+    without), on a clock that stands still - so a render needs no network,
+    names no real outlet, and looks the same whenever it's made."""
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter
+
+    from ..tiles.headlines import Story
+    fixed = time.mktime((2026, 12, 10, 15, 0, 0, 0, 0, -1))
+    card._now = lambda: fixed
+
+    def picture(top: str, bottom: str, sun: str, ground: str) -> QImage:
+        img = QImage(640, 400, QImage.Format_ARGB32_Premultiplied)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        sky = QLinearGradient(0, 0, 0, 400)
+        sky.setColorAt(0.0, QColor(top))
+        sky.setColorAt(1.0, QColor(bottom))
+        p.fillRect(img.rect(), sky)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(sun))
+        p.drawEllipse(QPointF(450, 150), 64, 64)
+        p.setBrush(QColor(ground))
+        p.drawEllipse(QRectF(-160, 270, 980, 420))
+        p.end()
+        return img
+
+    card.stories = [
+        Story("City opens its first library that runs entirely on solar power",
+              "https://example.com/news/1", "Morning Post", fixed - 12 * 60, None,
+              picture("#3f86d8", "#f4c27c", "#fff1c2", "#2f5d3a"), feed=0),
+        Story("Foldable laptops get thinner, and their hinges quieter",
+              "https://example.com/news/2", "Circuit", fixed - 50 * 60, None,
+              picture("#1f2340", "#7b4fd6", "#ff8fb1", "#141629"), feed=1),
+        Story("Scientists map a whole coral reef from orbit for the first time",
+              "https://example.com/news/3", "Field Notes", fixed - 2 * 3600, None,
+              picture("#0f5c8a", "#5fd0d6", "#e8fbff", "#0b3d52"), feed=2),
+        Story("Night trains return to three routes this winter",
+              "https://example.com/news/4", "Morning Post", fixed - 5 * 3600, None,
+              picture("#2b1d3d", "#e0795a", "#ffd9a0", "#1c1424"), feed=0),
+        Story("A small studio's puzzle game tops the charts in its first week",
+              "https://example.com/news/5", "Circuit", fixed - 26 * 3600, None, None, feed=1),
+    ]
+    card._ok = True
+    card.speak()
+
+
 _PREPARE = {
     "weather": weather, "stocks": stocks, "outlook": outlook, "media": media,
     "comms": comms, "system": system, "notes": _quiet_notes, "timer": timer,
+    "headlines": headlines,
 }
 
 
