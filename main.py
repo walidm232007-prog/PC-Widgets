@@ -56,6 +56,9 @@ def selftest() -> int:
     # whatever this PC's desktop runs, and a frame landing mid-check would
     # change what the glass checks see. _check_live_wallpaper covers it.
     os.environ["PCWIDGETS_NO_LIVE_WALLPAPER"] = "1"
+    # Nor fetch the news: a Headlines card added by a check would reach out
+    # to the feeds' sites. Its samples have stories of their own.
+    os.environ["PCWIDGETS_NO_FEEDS"] = "1"
     from PySide6.QtCore import QRectF
     from PySide6.QtGui import QColor, QImage, QPainter
     from PySide6.QtWidgets import QApplication
@@ -121,6 +124,8 @@ def selftest() -> int:
                     samples.media(card)
                 if kind == "timer":
                     samples.timer(card)
+                if kind == "headlines":
+                    samples.headlines(card)
                 if kind == "outlook":
                     samples.outlook(card)
                 if kind == "comms":
@@ -177,6 +182,7 @@ def selftest() -> int:
     _check_gpu_glass(pal_mod.build("dark", "blue"))
     _check_glass_layer(pal_mod.build("dark", "blue"))
     _check_timer(pal_mod.build("dark", "blue"))
+    _check_headlines(pal_mod.build("dark", "blue"))
     _check_crop()
     _check_app_window()
     print("all good.")
@@ -2674,6 +2680,314 @@ def _check_timer(pal) -> None:
           "laps and resets; focus rounds to a long break and starts the next by itself; the "
           "countdown in days, hours, minutes and Today, ringing as it arrives; buttons and the "
           "ruler click and scrub without dragging the card; faces in _selftest/_timer_*.png")
+
+
+def _check_headlines(pal) -> None:
+    """The Headlines card reads feeds as their sites write them, mixes them,
+    and opens a story on a click - never on a drag - all without the network.
+
+    Feeds shaped as BBC News (RSS with a media:thumbnail), The Verge (Atom,
+    the picture in the entry's HTML), NPR (content:encoded) and an RSS 1.0
+    wire write theirs, with CDATA, entities and markup in titles, come out
+    as plain titles with their source, date and picture; a story with no
+    title or no web link is left out. Merged, the same story from two feeds
+    shows once, newest first, mixed so one busy feed doesn't fill the card.
+    Typed feed links are kept https:// only, and ages read as Apple News
+    writes them. A fetch through a stand-in for net.fetch asks for https://
+    only, capped, saying nothing but the app's name, and a feed that fails
+    leaves the others; pictures on the card already aren't fetched again,
+    and a fetch that gets nothing keeps the stories on show.
+    Self-test boards never fetch (PCWIDGETS_NO_FEEDS). A click on a story
+    opens it; a press that moves past DRAG_AFTER picks the card up instead
+    and opens nothing. Every size draws in both themes, with pictures and
+    without, as do the empty states (_selftest/_headlines_dark.png,
+    _headlines_light.png).
+    """
+    import datetime as _dt
+    import time as _t
+
+    from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QPointF, Qt
+    from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
+    from PySide6.QtWidgets import QApplication
+
+    from widgets.core import net, samples
+    from widgets.core import palette as pal_mod
+    from widgets.tiles import headlines as hl
+
+    def utc(*when) -> float:
+        return _dt.datetime(*when, tzinfo=_dt.timezone.utc).timestamp()
+
+    # Four feeds, each written as its kind is.
+    bbc = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:media="http://search.yahoo.com/mrss/" version="2.0"><channel>
+<title><![CDATA[BBC News]]></title><link>https://www.bbc.co.uk/news</link>
+<item><title><![CDATA[Snow &amp; ice warnings for the north]]></title>
+<link>https://www.bbc.co.uk/news/articles/c1?at_medium=RSS</link>
+<pubDate>Mon, 23 Nov 2026 22:10:27 GMT</pubDate>
+<media:thumbnail width="240" height="135"
+ url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/a.jpg"/></item>
+<item><title>No link</title><pubDate>Mon, 23 Nov 2026 21:00:00 GMT</pubDate></item>
+<item><title></title><link>https://www.bbc.co.uk/news/articles/c2</link></item>
+<item><title>Not the web</title><link>javascript:alert(1)</link></item>
+</channel></rss>"""
+    verge = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-US">
+<title type="text">The Verge</title>
+<entry><title type="html">A phone&#8217;s new &lt;em&gt;trick&lt;/em&gt;</title>
+<link rel="replies" href="https://www.theverge.com/news/1/phone#comments"/>
+<link rel="alternate" type="text/html" href="https://www.theverge.com/news/1/phone"/>
+<published>2026-11-23T17:02:52-05:00</published><updated>2026-11-23T18:00:00-05:00</updated>
+<content type="html">&lt;figure&gt;&lt;img alt="" src="https://platform.theverge.com/up/a.jpg?quality=90&amp;amp;w=1200" /&gt;&lt;/figure&gt;&lt;p&gt;Words&lt;/p&gt;</content>
+</entry></feed>"""
+    npr = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>
+<title>NPR Topics: News</title>
+<item><title>Rivers run high after a week of rain</title>
+<link>https://www.npr.org/2026/11/23/1/rivers</link>
+<pubDate>Mon, 23 Nov 2026 16:30:00 -0500</pubDate>
+<content:encoded><![CDATA[<p><img src='https://media.npr.org/assets/img/r.jpg' alt='A river'/></p><p>Words</p>]]></content:encoded>
+</item></channel></rss>"""
+    wire = b"""<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"
+ xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel rdf:about="https://wire.example/"><title>Example Wire - Everything, all day</title></channel>
+<item rdf:about="https://wire.example/a"><title>Markets close flat</title>
+<link>https://wire.example/a</link><dc:date>2026-11-23T12:00:00Z</dc:date></item>
+</rdf:RDF>"""
+
+    got = hl.parse(bbc)
+    assert [s.title for s in got] == ["Snow & ice warnings for the north"], (
+        f"a BBC-style feed read as {[s.title for s in got]}")
+    assert (got[0].source, got[0].when) == ("BBC News", utc(2026, 11, 23, 22, 10, 27)), (
+        f"a BBC-style feed's source and date: {got[0].source!r}, {got[0].when}")
+    assert got[0].link == "https://www.bbc.co.uk/news/articles/c1?at_medium=RSS"
+    assert got[0].picture_url == "https://ichef.bbci.co.uk/ace/standard/480/cpsprodpb/a.jpg", (
+        f"BBC's 240 px thumbnail wasn't asked for at 480: {got[0].picture_url}")
+    got = hl.parse(verge)
+    assert [s.title for s in got] == ["A phone\u2019s new trick"], (
+        f"an Atom title's markup and entities: {[s.title for s in got]}")
+    assert (got[0].link, got[0].source) == ("https://www.theverge.com/news/1/phone", "The Verge")
+    assert got[0].when == utc(2026, 11, 23, 22, 2, 52), "an Atom entry's published time"
+    assert got[0].picture_url == "https://platform.theverge.com/up/a.jpg?quality=90&w=1200", (
+        f"the picture in an Atom entry's HTML: {got[0].picture_url}")
+    got = hl.parse(npr)
+    assert got[0].picture_url == "https://media.npr.org/assets/img/r.jpg", (
+        "the picture in content:encoded")
+    assert got[0].when == utc(2026, 11, 23, 21, 30)
+    got = hl.parse(wire)
+    assert (got[0].source, got[0].title, got[0].when) == (
+        "Example Wire", "Markets close flat", utc(2026, 11, 23, 12)), "an RSS 1.0 feed"
+    assert hl.parse(b"<html><body><p>Not a feed</p></body></html>") == []
+
+    # Merging: no repeats, newest first, mixed.
+    t0 = 1_800_000_000.0
+
+    def story(title, source, ago, link=None, feed=0):
+        return hl.Story(title, link or f"https://news.example/{title}", source,
+                        None if ago is None else t0 - ago, None, None, feed)
+
+    busy = [story(f"b{i}", "Busy", i * 600) for i in range(8)]       # one every ten minutes
+    slow = [story("s0", "Slow", 1500, feed=1), story("s1", "Slow", 4 * 3600, feed=1),
+            story("again", "Slow", 300, link="https://news.example/b0/?ref=slow", feed=1)]
+    order = [s.title for s in hl.merge(busy + slow, keep=8)]
+    assert order == ["b0", "s0", "b1", "b2", "s1", "b3", "b4", "b5"], (
+        f"stories weren't merged and mixed as they should be: {order}")
+    assert [s.title for s in hl.merge([story("u", "A", None), story("d", "A", 60)])] == [
+        "d", "u"], "an undated story went before a dated one"
+
+    # Ages, as Apple News writes them (10 December 2026 is a Thursday).
+    now = _dt.datetime(2026, 12, 10, 15, 0).timestamp()
+    ages = [hl.age_text(now - s, now) for s in (20, 12 * 60, 3 * 3600 + 5, 20 * 3600)]
+    assert ages == ["Just now", "12m ago", "3h ago", "20h ago"], ages
+    assert [hl.age_text(_dt.datetime(2026, m, d, 9, 0).timestamp(), now)
+            for m, d in ((12, 9), (12, 7), (11, 30))] == ["Yesterday", "Monday", "30 Nov"]
+    assert hl.age_text(None, now) == ""
+
+    # Typed feed links: https:// only, http:// asked for over https://, no repeats.
+    assert hl.clean_feeds("https://a.example/feed\n  http://b.example/rss  \nc.example/atom.xml\n"
+                          "file:///C:/feed.xml\njavascript:alert(1)\nhttps://a.example/feed\n\n"
+                          "not a link") == [
+        "https://a.example/feed", "https://b.example/rss", "https://c.example/atom.xml"]
+
+    # Fetching, through a stand-in for net.fetch: no network.
+    pic = QImage(800, 450, QImage.Format_RGB32)
+    pic.fill(QColor("#3f86d8"))
+    png = QByteArray()
+    buf = QBuffer(png)
+    buf.open(QIODevice.WriteOnly)
+    pic.save(buf, "PNG")
+    buf.close()
+    pages = {"https://feeds.example/bbc": bbc, "https://feeds.example/verge": verge,
+             "https://feeds.example/broken": b"<rss><channel><item>",
+             "https://pics.example/bad.png": b"not a picture"}
+    asked = []
+
+    def stand_in(url, headers=None, timeout=10, limit=net.MAX_BYTES):
+        asked.append((url, dict(headers or {}), limit))
+        if url in pages:
+            return pages[url]
+        if ".jpg" in url or ".png" in url:
+            return bytes(png)
+        raise OSError("no such page")
+
+    real = net.fetch
+    net.fetch = stand_in
+    try:
+        stories, failed = hl.fetch(["https://feeds.example/bbc", "https://feeds.example/broken",
+                                    "https://feeds.example/verge", "https://feeds.example/gone"])
+        assert hl.load_picture("http://pics.example/p.png") is not None \
+            and asked[-1][0] == "https://pics.example/p.png", "a picture was asked for over http://"
+        assert hl.load_picture("//pics.example/q.png") is not None \
+            and asked[-1][0] == "https://pics.example/q.png"
+        assert hl.load_picture("https://pics.example/bad.png") is None
+        # Fetched again, the pictures already on the card are used as they are.
+        before = len(asked)
+        again, _f = hl.fetch(["https://feeds.example/bbc", "https://feeds.example/verge"],
+                             known={s.picture_url: s.picture for s in stories})
+        assert [u for u, _h, _l in asked[before:]] == [
+            "https://feeds.example/bbc", "https://feeds.example/verge"], (
+            f"pictures on the card already were fetched again: {asked[before:]}")
+        assert [s.picture for s in again] == [s.picture for s in stories]
+    finally:
+        net.fetch = real
+    assert failed == ["https://feeds.example/broken", "https://feeds.example/gone"], failed
+    assert [(s.source, s.feed) for s in stories] == [("BBC News", 0), ("The Verge", 2)], (
+        f"fetched stories: {[(s.source, s.feed) for s in stories]}")
+    assert all(s.picture is not None and s.picture.width() == hl.PICTURE_SIZE for s in stories), (
+        "the stories' pictures weren't loaded and scaled to fit")
+    assert all(u.startswith("https://") for u, _h, _l in asked), [u for u, _h, _l in asked]
+    assert set(hl.HEADERS) == {"User-Agent"} and hl.HEADERS["User-Agent"].startswith(
+        "pc-widgets/") and all(h == hl.HEADERS for _u, h, _l in asked), (
+        "a fetch said more than the app's name")
+    assert {lim for u, _h, lim in asked if u.startswith("https://feeds.")} == {hl.FEED_LIMIT}
+    assert {lim for u, _h, lim in asked if u.startswith("https://pics.")} == {hl.PICTURE_LIMIT}
+
+    # The card fetches on a thread of its own, but never on a self-test board.
+    assert os.environ.get("PCWIDGETS_NO_FEEDS"), "the self-test's boards would fetch the news"
+    c = hl.HeadlinesWidget(pal, "medium", {})
+    c.refresh()
+    assert not c._busy and c._fetched_at == 0.0, "a self-test card reached out for the news"
+    real_fetch = hl.fetch
+    hl.fetch = lambda feeds, pictures=hl.PICTURES, known=None: ([story("fresh", "Busy", 5)], [])
+    os.environ.pop("PCWIDGETS_NO_FEEDS")
+    try:
+        c.refresh()
+        deadline = _t.monotonic() + 5
+        while (c._busy or not c.stories) and _t.monotonic() < deadline:
+            QApplication.processEvents()
+            _t.sleep(0.01)
+    finally:
+        os.environ["PCWIDGETS_NO_FEEDS"] = "1"
+        hl.fetch = real_fetch
+    assert [s.title for s in c.stories] == ["fresh"] and c._ok, (
+        "a fetch's stories didn't land on the card")
+    c._result = ([], ["https://feeds.example/bbc"])
+    c._landed()
+    assert [s.title for s in c.stories] == ["fresh"] and c._ok is False, (
+        "a fetch that got nothing emptied the card")
+    calls = []
+    c.refresh = lambda: calls.append(1)
+    clock = [t0]
+    c._now = lambda: clock[0]
+    c._fetched_at, c._ok = t0 - 60, True
+    c.on_tick()                                  # a minute after a fetch: nothing
+    c._ok = False
+    c.on_tick()                                  # after a failed one: not yet
+    clock[0] = t0 + hl.RETRY_AFTER
+    c.on_tick()                                  # now
+    c._ok, c._fetched_at = True, clock[0] - hl.FETCH_EVERY + 1
+    c.on_tick()
+    clock[0] += 1
+    c.on_tick()                                  # FETCH_EVERY after the last
+    assert len(calls) == 2, f"the card fetched {len(calls)} times, not twice"
+
+    # A click on a story opens it; a drag from one moves the card instead.
+    m = hl.HeadlinesWidget(pal, "medium", {})
+    samples.headlines(m)
+    assert m.accessibleDescription().startswith("Morning Post: City opens"), (
+        m.accessibleDescription())
+    opened = []
+    m._open = opened.append
+    img = QImage(m.size(), QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    m.paint_card(p)
+    p.end()
+    assert [i for i, _r in m._rows] == [0, 1], f"the medium card's stories: {m._rows}"
+
+    def mouse(card, kind, at_):
+        down = kind != QEvent.MouseButtonRelease
+        on_screen = QPointF(at_.x() + card.x(), at_.y() + card.y())
+        ev = QMouseEvent(kind, at_, on_screen,
+                         Qt.NoButton if kind == QEvent.MouseMove else Qt.LeftButton,
+                         Qt.LeftButton if down else Qt.NoButton, Qt.NoModifier)
+        {QEvent.MouseButtonPress: card.mousePressEvent, QEvent.MouseMove: card.mouseMoveEvent,
+         QEvent.MouseButtonRelease: card.mouseReleaseEvent}[kind](ev)
+
+    first = m._rows[0][1].center()
+    mouse(m, QEvent.MouseButtonPress, first)
+    assert m._drag_from is None, "pressing a story picked the card up"
+    mouse(m, QEvent.MouseMove, first + QPointF(3, 2))         # a hand's wobble: still a click
+    mouse(m, QEvent.MouseButtonRelease, first + QPointF(3, 2))
+    assert opened == [m.stories[0].link] and m._drag_from is None, (
+        f"a click on the top story opened {opened}")
+    second = m._rows[1][1].center()
+    start = m.pos()
+    mouse(m, QEvent.MouseButtonPress, second)
+    mouse(m, QEvent.MouseMove, second + QPointF(24, 0))
+    assert m._drag_from is not None and m.pos() != start, (
+        "dragging from a story didn't move the card")
+    mouse(m, QEvent.MouseButtonRelease, second + QPointF(24, 0))
+    assert opened == [m.stories[0].link], "a drag that started on a story opened it"
+
+    # Every size, with pictures and without, and the empty states, in both themes.
+    out = os.path.join(_write_dir(), "_selftest")
+    os.makedirs(out, exist_ok=True)
+    looks = (("pictures",) * 3, ("plain",) * 3, ("loading", "failed", "no feeds"))
+    shown = {}
+    for theme in ("dark", "light"):
+        tpal = pal_mod.build(theme, "blue")
+        sheet = QImage(1080, 3 * 420 + 40, QImage.Format_ARGB32_Premultiplied)
+        sheet.fill(QColor(30, 30, 34) if theme == "dark" else QColor(236, 236, 240))
+        sp = QPainter(sheet)
+        for row, kinds in enumerate(looks):
+            for x, size, look in zip((40, 260, 660), hl.HeadlinesWidget.supported_sizes, kinds):
+                hc = hl.HeadlinesWidget(tpal, size, {})
+                if look in ("pictures", "plain"):
+                    samples.headlines(hc)
+                    if look == "plain":
+                        for s in hc.stories:
+                            s.picture = None
+                elif look == "failed":
+                    hc._ok = False
+                elif look == "no feeds":
+                    hc.config["feeds"] = []
+                pic = QImage(hc.size(), QImage.Format_ARGB32_Premultiplied)
+                pic.fill(Qt.transparent)
+                q = QPainter(pic)
+                hc.paint_card(q)
+                q.end()
+                shown[(theme, size, look)] = [i for i, _r in hc._rows]
+                sp.drawImage(x, 20 + row * 420, pic)
+                hc.close()
+                hc.deleteLater()
+        sp.end()
+        sheet.save(os.path.join(out, f"_headlines_{theme}.png"))
+    for theme in ("dark", "light"):
+        assert shown[(theme, "small", "pictures")] == [0], "a small card shows the top story"
+        assert shown[(theme, "large", "pictures")][:3] == [0, 1, 2], (
+            f"a large card's stories: {shown[(theme, 'large', 'pictures')]}")
+        assert len(shown[(theme, "large", "plain")]) >= 4, (
+            "a large card without pictures left room empty")
+        assert shown[(theme, "small", "loading")] == [], "an empty card had a story to click"
+    for c_ in (c, m):
+        c_.close()
+        c_.deleteLater()
+    print("  headlines: BBC-, Verge-, NPR- and RSS 1.0-style feeds read as plain titles with "
+          "their sources, dates and pictures; merged without repeats and mixed so one feed "
+          "doesn't fill the card; https:// only, capped, saying only the app's name; a fetch "
+          "that gets nothing keeps what's shown; a click opens a story, a drag moves the card; "
+          "sizes and states in _selftest/_headlines_*.png")
 
 
 def _check_layout_mirror() -> None:
